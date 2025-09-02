@@ -23,15 +23,13 @@ export class CronSnapshootService {
   constructor(private readonly prisma: PrismaService) {}
   private readonly TZ = '-06:00'; // Guatemala
 
-  @Cron(CronExpression.EVERY_11_HOURS)
+  // @Cron(CronExpression.EVERY_11_HOURS)
   async CronCreateCierreSucursalDia() {
-    this.cronCierreAyer();
-
-    const snapshotDia = await this.generarSnapshotSucursalDia(1, '2025-08-22'); // sucursal 1, hoy
-    const snapshootGloabal = await this.generarSnapshotGlobalDia('2025-08-22');
-
-    this.logger.log('Snapshoot del dia es: ', snapshotDia);
-    this.logger.log('snapshootGloabal del dia es: ', snapshootGloabal);
+    // this.cronCierreAyer();
+    // const snapshotDia = await this.generarSnapshotSucursalDia(1, '2025-08-22'); // sucursal 1, hoy
+    // const snapshootGloabal = await this.generarSnapshotGlobalDia('2025-08-22');
+    // this.logger.log('Snapshoot del dia es: ', snapshotDia);
+    // this.logger.log('snapshootGloabal del dia es: ', snapshootGloabal);
   }
 
   /**

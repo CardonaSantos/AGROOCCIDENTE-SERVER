@@ -1,3 +1,5 @@
+import { ComprobanteTipo, TipoComprobante } from '@prisma/client';
+
 type CierreModo =
   | 'DEPOSITO_TODO'
   | 'DEPOSITO_PARCIAL'
@@ -23,4 +25,8 @@ export interface CerrarCajaV3Dto {
   usuarioInicioSiguienteId?: number; // default: usuarioCierreId
   fondoFijoSiguiente?: number; // default: turno.fondoFijo
   comentarioAperturaSiguiente?: string;
+
+  comprobanteTipo?: ComprobanteTipo;
+  comprobanteNumero?: string;
+  comprobanteFecha?: string;
 }

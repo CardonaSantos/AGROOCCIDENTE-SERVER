@@ -11,6 +11,10 @@ export class CreateClientDto {
   @IsNotEmpty()
   nombre: string;
 
+  @IsString()
+  @IsNotEmpty()
+  apellidos: string;
+
   @IsOptional()
   @IsString()
   dpi?: string; // DPI opcional y único

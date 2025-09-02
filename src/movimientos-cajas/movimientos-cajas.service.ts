@@ -393,6 +393,10 @@ export class MovimientosCajasService {
             select: { id: true, nombre: true, correo: true, rol: true },
           },
 
+          comprobanteNumero: true,
+          comprobanteFecha: true,
+          comprobanteTipo: true,
+
           registroCaja: {
             select: {
               id: true,
@@ -510,6 +514,10 @@ export class MovimientosCajasService {
         gastoOperativoTipo: m.gastoOperativoTipo ?? null,
         costoVentaTipo: m.costoVentaTipo ?? null,
         afectaInventario: m.afectaInventario,
+
+        comprobanteTipo: m?.comprobanteTipo,
+        comprobanteFecha: m?.comprobanteFecha,
+        comprobanteNumero: m?.comprobanteNumero,
 
         cuentaBancaria: m.cuentaBancaria
           ? {

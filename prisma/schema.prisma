@@ -313,6 +313,13 @@ model VentaEliminadaProducto {
   @@index([sucursalId, estado])
 }
 
+  enum ComprobanteTipo {
+    DEPOSITO_BOLETA
+    TRANSFERENCIA
+    CHEQUE 
+    TARJETA_VOUCHER
+    OTRO
+  }
 
   model MovimientoFinanciero {
     id               Int       @id @default(autoincrement())
@@ -366,6 +373,12 @@ model VentaEliminadaProducto {
     creadoEn         DateTime   @default(now())
     actualizadoEn    DateTime   @updatedAt
     esAsientoVentas  Boolean   @default(false) // 👈 nuevo
+    //nuevo
+    comprobanteTipo    ComprobanteTipo?
+    comprobanteNumero  String?         @db.VarChar(64)
+    comprobanteFecha   DateTime?
+    comprobanteUrl     String?         // foto/pdf del baucher
+    //nuevo
 
     @@unique([registroCajaId, referencia], map: "uq_movfin_turno_referencia") // 👈 idempotencia por turno
     @@index([registroCajaId, esAsientoVentas])                                  // 👈 útil para consultas
@@ -374,6 +387,11 @@ model VentaEliminadaProducto {
     @@index([registroCajaId])
     @@index([clasificacion, motivo])
     @@index([esDepositoCierre, esDepositoProveedor])
+
+    //CONCILIACION EN REPORTES DE CIERRES CON BOLETAS
+    @@unique([cuentaBancariaId, comprobanteTipo, comprobanteNumero], map: "uq_movfin_comprobante")
+    @@index([comprobanteTipo, comprobanteNumero], map: "idx_movfin_comprobante_lookup")
+
   }
 
   enum TipoCuentaBancaria { 
@@ -1192,7 +1210,7 @@ model Cliente {
 model Garantia {
   id                 Int              @id @default(autoincrement())
   ventaId            Int              // vinculamos con la venta
-  venta              Venta            @relation(fields: [ventaId], references: [id])
+  venta              Venta            @relation(fields: [ventaId], references: [id], onDelete: Cascade)
   productoId         Int
   producto           Producto         @relation(fields: [productoId], references: [id])
   usuarioIdRecibe    Int?

@@ -9,6 +9,7 @@ import {
 import { PrismaService } from 'src/prisma/prisma.service';
 import {
   ClasificacionAdmin,
+  ComprobanteTipo,
   EstadoTurnoCaja,
   MetodoPago,
   MotivoMovimiento,
@@ -32,6 +33,10 @@ import { UtilitiesService } from 'src/utilities/utilities.service';
 import { getCajasToCompraDto } from './getCajasToCompra.dto';
 import { TZGT } from 'src/utils/utils';
 import { CerrarCajaV3Dto } from './dto/CerrarCajaV3Dto';
+import {
+  metodoPagoFromComprobante,
+  toComprobanteNumero,
+} from './utils/helpers';
 dayjs.extend(utc);
 dayjs.extend(timezone);
 dayjs.extend(isSameOrBefore);
@@ -45,6 +50,7 @@ type Paginated<T> = {
   items: T[];
 };
 const CASH_LIKE = ['EFECTIVO', 'CHEQUE', 'CONTADO'] as const;
+
 @Injectable()
 export class CajaService {
   private logger = new Logger(CajaService.name);
@@ -595,9 +601,27 @@ export class CajaService {
         );
       }
 
+      if (montoDeposito > 0) {
+        if (!dto.comprobanteTipo) {
+          throw new BadRequestException(
+            'Tipo de comprobante requerido para depósito',
+          );
+        }
+        if (!dto.comprobanteNumero?.trim()) {
+          throw new BadRequestException(
+            'Número de comprobante requerido para depósito',
+          );
+        }
+      }
+
       // 6) Crear movimiento de depósito (si corresponde)
       let movDeposito: any = null;
       if (montoDeposito > 0.01) {
+        const metodoPagoMF = metodoPagoFromComprobante(
+          dto.comprobanteTipo as any,
+        );
+        const compNumero = toComprobanteNumero(dto.comprobanteNumero);
+
         movDeposito = await tx.movimientoFinanciero.create({
           data: {
             sucursalId: turno.sucursalId,
@@ -605,13 +629,19 @@ export class CajaService {
             fecha: ahora,
             clasificacion: 'TRANSFERENCIA', // ajusta a tu enum si aplica
             motivo: 'DEPOSITO_CIERRE', // idem
-            metodoPago: 'TRANSFERENCIA',
+            // metodoPago: 'TRANSFERENCIA',
+            // metodoPago: 'TRANSFERENCIA',
+            metodoPago: metodoPagoMF,
             deltaCaja: -montoDeposito,
             deltaBanco: +montoDeposito,
             cuentaBancariaId: dto.cuentaBancariaId!,
             esDepositoCierre: true,
             descripcion: 'Depósito de cierre de turno',
             usuarioId: dto.usuarioCierreId,
+            //comprobante
+            comprobanteTipo: dto.comprobanteTipo as any,
+            comprobanteNumero: compNumero,
+            comprobanteFecha: dto.comprobanteFecha ?? ahora,
           },
         });
       }

@@ -69,6 +69,8 @@ export class CuentasBancariasService {
       this.prisma.cuentaBancaria.count({ where }),
     ]);
 
+    this.logger.log('Las cuentas bancarias son: ', items);
+
     return {
       page,
       limit,
@@ -123,7 +125,7 @@ export class CuentasBancariasService {
 
     const updated = await this.prisma.cuentaBancaria.update({
       where: { id },
-      data: { activa: false },
+      data: { activa: false, isDeleted: true },
     });
     return updated;
   }
@@ -137,7 +139,7 @@ export class CuentasBancariasService {
 
     const updated = await this.prisma.cuentaBancaria.update({
       where: { id },
-      data: { activa: true },
+      data: { activa: true, isDeleted: false },
     });
     return updated;
   }
@@ -180,10 +182,12 @@ export class CuentasBancariasService {
     try {
       const cuentas = await this.prisma.cuentaBancaria.findMany({
         where: {
-          isDeleted: false,
           activa: true,
         },
       });
+      console.log('');
+      this.logger.debug('Las cuetnas bancarias son:¨', cuentas);
+
       return cuentas.map((c) => ({
         id: c.id,
         nombre: c.alias,
@@ -227,6 +231,7 @@ export class CuentasBancariasService {
         alias: true,
         tipo: true,
         activa: true,
+        isDeleted: true,
         creadoEn: true,
         actualizadoEn: true,
         movimientos: {
@@ -236,7 +241,7 @@ export class CuentasBancariasService {
     });
 
     const total = await this.prisma.cuentaBancaria.count({ where });
-
+    this.logger.log('cuentas bancarias existentes son: ', cuentas);
     // Mapear con saldo + último movimiento
     const items: CuentaBancariaResponseDto[] = cuentas.map((c) => {
       const saldoActual = c.movimientos.reduce(

@@ -20,6 +20,8 @@ export class ClientService {
       const client = await this.prisma.cliente.create({
         data: {
           nombre: createClientDto.nombre,
+          apellidos: createClientDto.apellidos,
+
           dpi: createClientDto.dpi,
           telefono: createClientDto.telefono,
           direccion: createClientDto.direccion,
@@ -44,6 +46,7 @@ export class ClientService {
         select: {
           id: true,
           nombre: true,
+          apellidos: true,
           telefono: true,
           dpi: true,
           direccion: true,
@@ -94,6 +97,7 @@ export class ClientService {
         },
         data: {
           nombre: updateClientDto.nombre,
+          apellidos: updateClientDto.apellidos,
           telefono: updateClientDto.telefono,
           direccion: updateClientDto.direccion,
           dpi: updateClientDto.dpi,

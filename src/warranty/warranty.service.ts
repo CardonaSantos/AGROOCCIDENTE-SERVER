@@ -567,8 +567,24 @@ export class WarrantyService {
     // }
   }
 
-  remove(id: number) {
-    return `This action removes a #${id} warranty`;
+  async remove(id: number) {
+    try {
+      if (!id) throw new BadRequestException('ID proporcionado no válido');
+
+      const garantiaToDelete = await this.prisma.garantia.delete({
+        where: {
+          id,
+        },
+      });
+
+      return garantiaToDelete;
+    } catch (error) {
+      this.logger.error('El error en eliminar garantia es: ', error);
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException(
+        'Fatal error: Error inesperado en eliminar garantía',
+      );
+    }
   }
 
   async removeAll() {

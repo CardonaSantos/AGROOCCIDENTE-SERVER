@@ -31,6 +31,10 @@ export class CreateVentaDto {
 
   @IsString()
   @IsOptional()
+  apellidos?: string;
+
+  @IsString()
+  @IsOptional()
   dpi?: string;
 
   @IsString()

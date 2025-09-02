@@ -69,7 +69,7 @@ export class WarrantyController {
   }
 
   @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.warrantyService.remove(+id);
+  remove(@Param('id', ParseIntPipe) id: number) {
+    return this.warrantyService.remove(id);
   }
 }

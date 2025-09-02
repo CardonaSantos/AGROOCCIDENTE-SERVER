@@ -21,6 +21,10 @@ export class ClientController {
     return this.clientService.create(createClientDto);
   }
 
+  /**
+   * PARA VISTA DE CLIENTES
+   * @returns
+   */
   @Get('/get-all-customers')
   findAllCustomers() {
     return this.clientService.Customers();

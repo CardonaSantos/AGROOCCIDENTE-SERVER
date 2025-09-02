@@ -14,7 +14,7 @@ export class CloudinaryService {
     return new Promise((resolve, reject) => {
       cloudinary.uploader.upload(
         image,
-        { folder: 'PRODUCTOS_SABISA' },
+        { folder: 'AGROSERVICIO-PRODUCTOS' },
         (error, result) => {
           if (error) return reject(error);
           if (!result?.secure_url || !result?.public_id) {

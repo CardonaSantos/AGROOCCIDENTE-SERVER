@@ -45,6 +45,7 @@ export class VentaService {
       usuarioId,
       tipoComprobante,
       referenciaPago,
+      apellidos,
     } = createVentaDto;
 
     this.logger.log('La reference es: ', referenciaPago);
@@ -65,7 +66,14 @@ export class VentaService {
           clienteConnect = { connect: { id: clienteId } };
         } else if (nombre) {
           const nuevoCliente = await tx.cliente.create({
-            data: { nombre, dpi, telefono, direccion, observaciones },
+            data: {
+              nombre,
+              dpi,
+              telefono,
+              direccion,
+              observaciones,
+              apellidos,
+            },
           });
           clienteConnect = { connect: { id: nuevoCliente.id } };
         }
