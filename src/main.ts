@@ -7,7 +7,7 @@ async function bootstrap() {
 
   app.enableCors({
     origin: [
-      'http://localhost:5173',
+      'https://sabisu-server.up.railway.app',
       'http://127.0.0.1:5173',
       // agrega aquí cualquier otro origin de tu front (p.ej. http://localhost:3001)
     ],
