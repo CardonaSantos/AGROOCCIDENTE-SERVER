@@ -2,13 +2,18 @@ import {
   BadRequestException,
   Injectable,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { CreateCuotaDto } from './dto/create-cuota.dto';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { UpdateVentaCuotaDto } from './dto/update-cuota.dto';
-import { CreateVentaCuotaDto } from './dto/create-ventacuota.dto';
+import {
+  CreateVentaCuotaDto,
+  ProductsList,
+  Tipo,
+} from './dto/create-ventacuota.dto';
 import { CreatePlantillaComprobanteDto } from './dto/plantilla-comprobante.dt';
 import { CuotaDto } from './dto/registerNewPay';
 import { CloseCreditDTO } from './dto/close-credit.dto';
@@ -18,636 +23,351 @@ import { DeleteOneRegistCreditDto } from './dto/delete-one-regist.dto';
 import * as bcrypt from 'bcryptjs';
 import * as dayjs from 'dayjs';
 import { DeleteCuotaPaymentDTO } from './dto/delete-one-payment-cuota.dto';
+import { TZGT } from 'src/utils/utils';
+import { CajaService } from 'src/caja/caja.service';
 
+// Líneas separadas con tipo firme
+type LineaProducto = {
+  tipo: Tipo.PRODUCTO;
+  productoId: number;
+  cantidad: number;
+  precioVenta?: number;
+};
+
+type LineaPresentacion = {
+  tipo: Tipo.PRESENTACION;
+  productoId: number; // sigue siendo útil para validaciones
+  presentacionId: number; // CLAVE para agrupar/stock
+  cantidad: number;
+  precioVenta?: number;
+};
+
+// Para updates de stock
+type StockUpdate = { id: number; cantidad: number };
 @Injectable()
 export class CuotasService {
-  constructor(private readonly prisma: PrismaService) {}
-
-  // async create(createVentaCuotaDto: CreateVentaCuotaDto) {
-  //   try {
-  //     console.log(
-  //       'Los datos entrantes fecha inicio: ',
-  //       createVentaCuotaDto.fechaInicio,
-  //     );
-  //     console.log(
-  //       'Los datos entrantes son fechaContrato: ',
-  //       createVentaCuotaDto.fechaContrato,
-  //     );
-
-  //     // Convertir las fechas a UTC para evitar problemas de zona horaria, solo la parte de la fecha (sin hora)
-  //     const fechaIniciox = dayjs(createVentaCuotaDto.fechaInicio)
-  //       .startOf('day')
-  //       .toDate(); // Aseguramos que la hora sea 00:00
-  //     const fechaContrato = createVentaCuotaDto.fechaContrato
-  //       ? dayjs(createVentaCuotaDto.fechaContrato).startOf('day').toDate()
-  //       : null;
-
-  //     console.log('Fecha de inicio convertida: ', fechaIniciox);
-  //     console.log('Fecha de contrato convertida: ', fechaContrato);
-
-  //     // 1. Consolidar productos para evitar duplicados
-  //     const productosConsolidados = createVentaCuotaDto.productos.reduce(
-  //       (acc, prod) => {
-  //         const existingProduct = acc.find(
-  //           (p) => p.productoId === prod.productoId,
-  //         );
-  //         if (existingProduct) {
-  //           existingProduct.cantidad += prod.cantidad;
-  //         } else {
-  //           acc.push(prod);
-  //         }
-  //         return acc;
-  //       },
-  //       [],
-  //     );
-
-  //     console.log('Productos consolidados: ', productosConsolidados);
-
-  //     // 2. Verificar disponibilidad de stock
-  //     const stockUpdates = [];
-  //     for (const prod of productosConsolidados) {
-  //       const stocks = await this.prisma.stock.findMany({
-  //         where: {
-  //           productoId: prod.productoId,
-  //           sucursalId: createVentaCuotaDto.sucursalId,
-  //         },
-  //         orderBy: { fechaIngreso: 'asc' },
-  //       });
-
-  //       let cantidadRestante = prod.cantidad;
-
-  //       for (const stock of stocks) {
-  //         if (cantidadRestante <= 0) break;
-
-  //         if (stock.cantidad >= cantidadRestante) {
-  //           stockUpdates.push({
-  //             id: stock.id,
-  //             cantidad: stock.cantidad - cantidadRestante,
-  //           });
-  //           cantidadRestante = 0;
-  //         } else {
-  //           stockUpdates.push({ id: stock.id, cantidad: 0 });
-  //           cantidadRestante -= stock.cantidad;
-  //         }
-  //       }
-
-  //       if (cantidadRestante > 0) {
-  //         throw new Error(
-  //           `No hay suficiente stock para el producto ${prod.productoId}`,
-  //         );
-  //       }
-  //     }
-
-  //     console.log('Actualizaciones de stock: ', stockUpdates);
-
-  //     // 3. Actualizar stock en la base de datos
-  //     await this.prisma.$transaction(
-  //       stockUpdates.map((stock) =>
-  //         this.prisma.stock.update({
-  //           where: { id: stock.id },
-  //           data: { cantidad: stock.cantidad },
-  //         }),
-  //       ),
-  //     );
-
-  //     // 4. Crear la venta (productos se crean aquí para evitar duplicados)
-  //     const venta = await this.prisma.venta.create({
-  //       data: {
-  //         clienteId: Number(createVentaCuotaDto.clienteId),
-  //         sucursalId: Number(createVentaCuotaDto.sucursalId),
-  //         totalVenta: Number(createVentaCuotaDto.totalVenta),
-  //         productos: {
-  //           create: productosConsolidados.map((prod) => ({
-  //             producto: { connect: { id: prod.productoId } },
-  //             cantidad: prod.cantidad,
-  //             precioVenta: prod.precioVenta,
-  //           })),
-  //         },
-  //       },
-  //     });
-
-  //     console.log('La venta creada es: ', venta);
-
-  //     // 5. Registrar el pago inicial
-  //     const pago = await this.prisma.pago.create({
-  //       data: {
-  //         ventaId: venta.id,
-  //         monto: createVentaCuotaDto.cuotaInicial,
-  //         metodoPago: 'CREDITO',
-  //         fechaPago: new Date(),
-  //       },
-  //     });
-
-  //     console.log('El pago inicial registrado es: ', pago);
-
-  //     // 6. Crear el registro de crédito (VentaCuota)
-  //     const ventaCuota = await this.prisma.ventaCuota.create({
-  //       data: {
-  //         // fechaInicio: new Date(createVentaCuotaDto.fechaInicio),
-
-  //         //
-  //         clienteId: Number(createVentaCuotaDto.clienteId),
-  //         usuarioId: Number(createVentaCuotaDto.usuarioId),
-  //         sucursalId: Number(createVentaCuotaDto.sucursalId),
-  //         totalVenta: Number(createVentaCuotaDto.totalVenta),
-  //         cuotaInicial: Number(createVentaCuotaDto.cuotaInicial),
-  //         cuotasTotales: Number(createVentaCuotaDto.cuotasTotales),
-  //         fechaInicio: new Date(createVentaCuotaDto.fechaInicio), //FECHA INICIO
-  //         diasEntrePagos: Number(createVentaCuotaDto.diasEntrePagos),
-  //         interes: Number(createVentaCuotaDto.interes),
-  //         estado: createVentaCuotaDto.estado,
-  //         dpi: createVentaCuotaDto.dpi,
-  //         ventaId: venta.id,
-  //         montoTotalConInteres: createVentaCuotaDto.montoTotalConInteres,
-  //         testigos: createVentaCuotaDto.testigos ?? null,
-  //         fechaContrato: createVentaCuotaDto.fechaContrato
-  //           ? new Date(createVentaCuotaDto.fechaContrato)
-  //           : null,
-  //         montoVenta: Number(createVentaCuotaDto.montoVenta),
-  //         garantiaMeses: Number(createVentaCuotaDto.garantiaMeses),
-  //         totalPagado: Number(createVentaCuotaDto.cuotaInicial),
-  //       },
-  //     });
-
-  //     console.log('El registro de venta a crédito es: ', ventaCuota);
-
-  //     console.log('Incrementando saldo');
-
-  //     console.log(
-  //       'El saldo a incrementar es: ',
-  //       createVentaCuotaDto.totalVenta,
-  //     );
-
-  //     //CREAR LAS CUOTAS Y DEMÁS
-
-  //     // 7. Generar las cuotas programadas
-  //     const montoTotalConInteres = Number(
-  //       createVentaCuotaDto.montoTotalConInteres,
-  //     );
-  //     const cuotaInicial = Number(createVentaCuotaDto.cuotaInicial);
-  //     const cuotasTotales = Number(createVentaCuotaDto.cuotasTotales);
-  //     const diasEntrePagos = Number(createVentaCuotaDto.diasEntrePagos);
-  //     // const fechaInicio = dayjs(createVentaCuotaDto.fechaInicio);
-  //     const fechaInicio = dayjs(fechaIniciox);
-
-  //     // Calcular el monto por cuota
-  //     const montoPorCuota =
-  //       (montoTotalConInteres - cuotaInicial) / cuotasTotales;
-
-  //     // Generar cada cuota
-  //     for (let i = 1; i <= cuotasTotales; i++) {
-  //       // const fechaVencimiento = fechaInicio
-  //       //   .add(diasEntrePagos * i, 'day')
-  //       //   .toDate();
-
-  //       const fechaVencimiento = fechaInicio
-  //         .add(diasEntrePagos * i, 'day')
-  //         .toDate();
-
-  //       let s = await this.prisma.cuota.create({
-  //         data: {
-  //           ventaCuotaId: ventaCuota.id,
-  //           montoEsperado: montoPorCuota,
-  //           fechaVencimiento: fechaVencimiento,
-  //           estado: 'PENDIENTE',
-  //           monto: 0, // Inicializar en 0 hasta que se pague
-  //         },
-  //       });
-  //       console.log('La fecha creada es: ', s);
-  //     }
-
-  //     //INCREMENTAR EL SALDO
-
-  //     console.log('EL ID DE LA SUCURSAL ES: ', createVentaCuotaDto.sucursalId);
-  //     const sucursal = await this.prisma.sucursal.findUnique({
-  //       where: {
-  //         id: createVentaCuotaDto.sucursalId,
-  //       },
-  //     });
-  //     console.log('La sucursal es: ', sucursal);
-
-  //     const saldos = await this.prisma.sucursalSaldo.update({
-  //       where: {
-  //         sucursalId: createVentaCuotaDto.sucursalId,
-  //       },
-  //       data: {
-  //         saldoAcumulado: {
-  //           increment: createVentaCuotaDto.totalVenta,
-  //         },
-  //         totalIngresos: {
-  //           increment: createVentaCuotaDto.totalVenta,
-  //         },
-  //       },
-  //     });
-  //     console.log('Incrementando saldo', saldos);
-
-  //     return ventaCuota;
-  //   } catch (error) {
-  //     console.error(error);
-  //     throw new BadRequestException('Error al crear el registro de crédito');
-  //   }
-  // }
-
-  // async create(createVentaCuotaDto: CreateVentaCuotaDto) {
-  //   try {
-  //     console.log(
-  //       'Los datos entrantes fecha inicio: ',
-  //       createVentaCuotaDto.fechaInicio,
-  //     );
-  //     console.log(
-  //       'Los datos entrantes son fechaContrato: ',
-  //       createVentaCuotaDto.fechaContrato,
-  //     );
-
-  //     // Convertir las fechas a UTC para evitar problemas de zona horaria, solo la parte de la fecha (sin hora)
-  //     const fechaIniciox = dayjs(createVentaCuotaDto.fechaInicio)
-  //       .startOf('day')
-  //       .toDate(); // Aseguramos que la hora sea 00:00
-  //     const fechaContrato = createVentaCuotaDto.fechaContrato
-  //       ? dayjs(createVentaCuotaDto.fechaContrato).startOf('day').toDate()
-  //       : null;
-
-  //     console.log('Fecha de inicio convertida: ', fechaIniciox);
-  //     console.log('Fecha de contrato convertida: ', fechaContrato);
-
-  //     // 1. Consolidar productos para evitar duplicados
-  //     const productosConsolidados = createVentaCuotaDto.productos.reduce(
-  //       (acc, prod) => {
-  //         const existingProduct = acc.find(
-  //           (p) => p.productoId === prod.productoId,
-  //         );
-  //         if (existingProduct) {
-  //           existingProduct.cantidad += prod.cantidad;
-  //         } else {
-  //           acc.push(prod);
-  //         }
-  //         return acc;
-  //       },
-  //       [],
-  //     );
-
-  //     console.log('Productos consolidados: ', productosConsolidados);
-
-  //     // 2. Verificar disponibilidad de stock
-  //     const stockUpdates = [];
-  //     for (const prod of productosConsolidados) {
-  //       const stocks = await this.prisma.stock.findMany({
-  //         where: {
-  //           productoId: prod.productoId,
-  //           sucursalId: createVentaCuotaDto.sucursalId,
-  //         },
-  //         orderBy: { fechaIngreso: 'asc' },
-  //       });
-
-  //       let cantidadRestante = prod.cantidad;
-
-  //       for (const stock of stocks) {
-  //         if (cantidadRestante <= 0) break;
-
-  //         if (stock.cantidad >= cantidadRestante) {
-  //           stockUpdates.push({
-  //             id: stock.id,
-  //             cantidad: stock.cantidad - cantidadRestante,
-  //           });
-  //           cantidadRestante = 0;
-  //         } else {
-  //           stockUpdates.push({ id: stock.id, cantidad: 0 });
-  //           cantidadRestante -= stock.cantidad;
-  //         }
-  //       }
-
-  //       if (cantidadRestante > 0) {
-  //         throw new Error(
-  //           `No hay suficiente stock para el producto ${prod.productoId}`,
-  //         );
-  //       }
-  //     }
-
-  //     console.log('Actualizaciones de stock: ', stockUpdates);
-
-  //     // 3. Actualizar stock en la base de datos
-  //     await this.prisma.$transaction(
-  //       stockUpdates.map((stock) =>
-  //         this.prisma.stock.update({
-  //           where: { id: stock.id },
-  //           data: { cantidad: stock.cantidad },
-  //         }),
-  //       ),
-  //     );
-
-  //     // 4. Crear la venta (productos se crean aquí para evitar duplicados)
-  //     const venta = await this.prisma.venta.create({
-  //       data: {
-  //         clienteId: Number(createVentaCuotaDto.clienteId),
-  //         sucursalId: Number(createVentaCuotaDto.sucursalId),
-  //         totalVenta: Number(createVentaCuotaDto.totalVenta),
-  //         productos: {
-  //           create: productosConsolidados.map((prod) => ({
-  //             producto: { connect: { id: prod.productoId } },
-  //             cantidad: prod.cantidad,
-  //             precioVenta: prod.precioVenta,
-  //           })),
-  //         },
-  //       },
-  //     });
-
-  //     console.log('La venta creada es: ', venta);
-
-  //     // 5. Registrar el pago inicial
-  //     const pago = await this.prisma.pago.create({
-  //       data: {
-  //         ventaId: venta.id,
-  //         monto: createVentaCuotaDto.cuotaInicial,
-  //         metodoPago: 'CREDITO',
-  //         fechaPago: new Date(),
-  //       },
-  //     });
-
-  //     console.log('El pago inicial registrado es: ', pago);
-
-  //     // 6. Crear el registro de crédito (VentaCuota)
-  //     const ventaCuota = await this.prisma.ventaCuota.create({
-  //       data: {
-  //         clienteId: Number(createVentaCuotaDto.clienteId),
-  //         usuarioId: Number(createVentaCuotaDto.usuarioId),
-  //         sucursalId: Number(createVentaCuotaDto.sucursalId),
-  //         totalVenta: Number(createVentaCuotaDto.totalVenta),
-  //         cuotaInicial: Number(createVentaCuotaDto.cuotaInicial),
-  //         cuotasTotales: Number(createVentaCuotaDto.cuotasTotales),
-  //         fechaInicio: fechaIniciox, // FECHA INICIO
-  //         diasEntrePagos: Number(createVentaCuotaDto.diasEntrePagos),
-  //         interes: Number(createVentaCuotaDto.interes),
-  //         estado: createVentaCuotaDto.estado,
-  //         dpi: createVentaCuotaDto.dpi,
-  //         ventaId: venta.id,
-  //         montoTotalConInteres: createVentaCuotaDto.montoTotalConInteres,
-  //         testigos: createVentaCuotaDto.testigos ?? null,
-  //         fechaContrato: fechaContrato, // Usamos la fecha de contrato convertida
-  //         montoVenta: Number(createVentaCuotaDto.montoVenta),
-  //         garantiaMeses: Number(createVentaCuotaDto.garantiaMeses),
-  //         totalPagado: Number(createVentaCuotaDto.cuotaInicial),
-  //       },
-  //     });
-
-  //     console.log('El registro de venta a crédito es: ', ventaCuota);
-
-  //     console.log('Incrementando saldo');
-
-  //     console.log(
-  //       'El saldo a incrementar es: ',
-  //       createVentaCuotaDto.totalVenta,
-  //     );
-
-  //     // CREAR LAS CUOTAS Y DEMÁS
-
-  //     // 7. Generar las cuotas programadas
-  //     const montoTotalConInteres = Number(
-  //       createVentaCuotaDto.montoTotalConInteres,
-  //     );
-  //     const cuotaInicial = Number(createVentaCuotaDto.cuotaInicial);
-  //     const cuotasTotales = Number(createVentaCuotaDto.cuotasTotales);
-  //     const diasEntrePagos = Number(createVentaCuotaDto.diasEntrePagos);
-  //     const fechaInicio = dayjs(fechaIniciox);
-
-  //     // Calcular el monto por cuota
-  //     const montoPorCuota =
-  //       (montoTotalConInteres - cuotaInicial) / cuotasTotales;
-
-  //     // Generar cada cuota
-  //     for (let i = 1; i <= cuotasTotales; i++) {
-  //       const fechaVencimiento = fechaInicio
-  //         .add(diasEntrePagos * i, 'day')
-  //         .toDate();
-
-  //       let s = await this.prisma.cuota.create({
-  //         data: {
-  //           ventaCuotaId: ventaCuota.id,
-  //           montoEsperado: montoPorCuota,
-  //           fechaVencimiento: fechaVencimiento,
-  //           estado: 'PENDIENTE',
-  //           monto: 0, // Inicializar en 0 hasta que se pague
-  //         },
-  //       });
-  //       console.log('La fecha creada es: ', s);
-  //     }
-
-  //     // INCREMENTAR EL SALDO
-
-  //     console.log('EL ID DE LA SUCURSAL ES: ', createVentaCuotaDto.sucursalId);
-  //     const sucursal = await this.prisma.sucursal.findUnique({
-  //       where: {
-  //         id: createVentaCuotaDto.sucursalId,
-  //       },
-  //     });
-  //     console.log('La sucursal es: ', sucursal);
-
-  //     const saldos = await this.prisma.sucursalSaldo.update({
-  //       where: {
-  //         sucursalId: createVentaCuotaDto.sucursalId,
-  //       },
-  //       data: {
-  //         saldoAcumulado: {
-  //           increment: createVentaCuotaDto.totalVenta,
-  //         },
-  //         totalIngresos: {
-  //           increment: createVentaCuotaDto.totalVenta,
-  //         },
-  //       },
-  //     });
-  //     console.log('Incrementando saldo', saldos);
-
-  //     return ventaCuota;
-  //   } catch (error) {
-  //     console.error(error);
-  //     throw new BadRequestException('Error al crear el registro de crédito');
-  //   }
-  // }
+  private readonly logger = new Logger(CuotasService.name);
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly cajaService: CajaService,
+  ) {}
 
   async create(createVentaCuotaDto: CreateVentaCuotaDto) {
     try {
-      console.log('Los datos entrantes son: ', createVentaCuotaDto);
+      const {
+        productos,
+        clienteId,
+        cuotaInicial,
+        diasEntrePagos,
+        montoVenta, // viene del front; podemos ignorarlo si calculamos todo
+        sucursalId,
+        totalVenta, // idem
+        usuarioId,
+        fechaContrato,
+        fechaInicio,
+        garantiaMeses,
+        cuotasTotales,
+        interes,
+        montoTotalConInteres,
+      } = createVentaCuotaDto;
 
-      // Convertir las fechas a UTC para evitar problemas de zona horaria, solo la parte de la fecha (sin hora)
-      const fechaIniciox = dayjs(createVentaCuotaDto.fechaInicio)
+      this.logger.log(
+        'Payload Crédito -> ' + JSON.stringify(createVentaCuotaDto),
+      );
+
+      // === 1) Normalización de fechas
+      const fechaInicioDate = dayjs(fechaInicio)
+        .tz(TZGT)
         .startOf('day')
-        .toDate(); // Aseguramos que la hora sea 00:00
-      const fechaContrato = createVentaCuotaDto.fechaContrato
-        ? dayjs(createVentaCuotaDto.fechaContrato).startOf('day').toDate()
-        : null;
+        .toDate();
+      const fechaContratoDate = fechaContrato
+        ? dayjs(fechaContrato).tz(TZGT).startOf('day').toDate()
+        : fechaInicioDate;
 
-      console.log('Fecha de inicio convertida: ', fechaIniciox);
-      console.log('Fecha de contrato convertida: ', fechaContrato);
+      // === 2) Partición tipada de líneas
+      const productosLineas: LineaProducto[] = productos
+        .filter(
+          (p): p is ProductsList & { tipo: Tipo.PRODUCTO } =>
+            p.tipo === Tipo.PRODUCTO && !!p.productoId,
+        )
+        .map((p) => ({
+          tipo: Tipo.PRODUCTO,
+          productoId: p.productoId!,
+          cantidad: p.cantidad,
+          precioVenta: p.precioVenta,
+        }));
 
-      // 1. Consolidar productos para evitar duplicados
-      const productosConsolidados = createVentaCuotaDto.productos.reduce(
-        (acc, prod) => {
-          const existingProduct = acc.find(
-            (p) => p.productoId === prod.productoId,
-          );
-          if (existingProduct) {
-            existingProduct.cantidad += prod.cantidad;
-          } else {
-            acc.push(prod);
-          }
+      const presentacionesLineas: LineaPresentacion[] = productos
+        .filter(
+          (p): p is ProductsList & { tipo: Tipo.PRESENTACION } =>
+            p.tipo === Tipo.PRESENTACION && !!p.presentacionId,
+        )
+        .map((p) => ({
+          tipo: Tipo.PRESENTACION,
+          productoId: p.productoId!,
+          presentacionId: p.presentacionId!,
+          cantidad: p.cantidad,
+          precioVenta: p.precioVenta,
+        }));
+
+      // === 3) Consolidación (para no duplicar items)
+      const productosConsolidados = productosLineas.reduce<LineaProducto[]>(
+        (acc, curr) => {
+          const i = acc.findIndex((x) => x.productoId === curr.productoId);
+          if (i >= 0) acc[i].cantidad += curr.cantidad;
+          else acc.push({ ...curr });
           return acc;
         },
         [],
       );
 
-      console.log('Productos consolidados: ', productosConsolidados);
+      const presentacionesConsolidadas = presentacionesLineas.reduce<
+        LineaPresentacion[]
+      >((acc, curr) => {
+        const i = acc.findIndex(
+          (x) => x.presentacionId === curr.presentacionId,
+        );
+        if (i >= 0) acc[i].cantidad += curr.cantidad;
+        else acc.push({ ...curr });
+        return acc;
+      }, []);
 
-      // 2. Verificar disponibilidad de stock
-      const stockUpdates = [];
+      this.logger.log(
+        'Productos consolidados: ' +
+          JSON.stringify(productosConsolidados, null, 2),
+      );
+      this.logger.log(
+        'Presentaciones consolidadas: ' +
+          JSON.stringify(presentacionesConsolidadas, null, 2),
+      );
+
+      // === 4) Totales (lado servidor)
+      const totalVentaCalculado =
+        productosConsolidados.reduce(
+          (acc, p) => acc + p.cantidad * (p.precioVenta ?? 0),
+          0,
+        ) +
+        presentacionesConsolidadas.reduce(
+          (acc, pr) => acc + pr.cantidad * (pr.precioVenta ?? 0),
+          0,
+        );
+
+      const montoTotalConInteresFinal =
+        montoTotalConInteres != null
+          ? Number(montoTotalConInteres)
+          : +(totalVentaCalculado * (1 + Number(interes ?? 0) / 100)).toFixed(
+              2,
+            );
+
+      // === 5) Validaciones numéricas
+      if (montoTotalConInteresFinal < 0)
+        throw new BadRequestException(
+          'montoTotalConInteres no puede ser negativo.',
+        );
+      if (cuotaInicial < 0)
+        throw new BadRequestException(
+          'La cuota inicial no puede ser negativa.',
+        );
+      if (cuotasTotales <= 0)
+        throw new BadRequestException('cuotasTotales debe ser mayor que 0.');
+      if (cuotaInicial > montoTotalConInteresFinal) {
+        throw new BadRequestException(
+          'La cuota inicial no puede ser mayor que el monto total con interés.',
+        );
+      }
+
+      // === 6) Verificación de stock (preparamos “updates”)
+      const stockUpdates: StockUpdate[] = [];
       for (const prod of productosConsolidados) {
         const stocks = await this.prisma.stock.findMany({
-          where: {
-            productoId: prod.productoId,
-            sucursalId: createVentaCuotaDto.sucursalId,
-          },
+          where: { productoId: prod.productoId, sucursalId },
           orderBy: { fechaIngreso: 'asc' },
         });
-
-        let cantidadRestante = prod.cantidad;
-
-        for (const stock of stocks) {
-          if (cantidadRestante <= 0) break;
-
-          if (stock.cantidad >= cantidadRestante) {
-            stockUpdates.push({
-              id: stock.id,
-              cantidad: stock.cantidad - cantidadRestante,
-            });
-            cantidadRestante = 0;
+        let restante = prod.cantidad;
+        for (const st of stocks) {
+          if (restante <= 0) break;
+          if (st.cantidad >= restante) {
+            stockUpdates.push({ id: st.id, cantidad: st.cantidad - restante });
+            restante = 0;
           } else {
-            stockUpdates.push({ id: stock.id, cantidad: 0 });
-            cantidadRestante -= stock.cantidad;
+            stockUpdates.push({ id: st.id, cantidad: 0 });
+            restante -= st.cantidad;
           }
         }
-
-        if (cantidadRestante > 0) {
+        if (restante > 0)
           throw new Error(
             `No hay suficiente stock para el producto ${prod.productoId}`,
           );
-        }
       }
 
-      console.log('Actualizaciones de stock: ', stockUpdates);
+      const stockUpdatesPresentaciones: StockUpdate[] = [];
+      for (const pres of presentacionesConsolidadas) {
+        const stocks = await this.prisma.stockPresentacion.findMany({
+          where: { presentacionId: pres.presentacionId, sucursalId },
+          orderBy: { fechaIngreso: 'asc' },
+        });
+        let restante = pres.cantidad;
+        for (const st of stocks) {
+          if (restante <= 0) break;
+          if (st.cantidadPresentacion >= restante) {
+            stockUpdatesPresentaciones.push({
+              id: st.id,
+              cantidad: st.cantidadPresentacion - restante,
+            });
+            restante = 0;
+          } else {
+            stockUpdatesPresentaciones.push({ id: st.id, cantidad: 0 });
+            restante -= st.cantidadPresentacion;
+          }
+        }
+        if (restante > 0)
+          throw new Error(
+            `No hay suficiente stock para la presentación ${pres.presentacionId}`,
+          );
+      }
 
-      // 3. Actualizar stock en la base de datos
-      await this.prisma.$transaction(
-        stockUpdates.map((stock) =>
-          this.prisma.stock.update({
-            where: { id: stock.id },
-            data: { cantidad: stock.cantidad },
-          }),
-        ),
+      this.logger.log(
+        'Updates stock pres -> ' +
+          JSON.stringify(stockUpdatesPresentaciones, null, 2),
       );
 
-      // 4. Crear la venta (productos se crean aquí para evitar duplicados)
-      const venta = await this.prisma.venta.create({
-        data: {
-          clienteId: Number(createVentaCuotaDto.clienteId),
-          sucursalId: Number(createVentaCuotaDto.sucursalId),
-          totalVenta: Number(createVentaCuotaDto.totalVenta),
-          productos: {
-            create: productosConsolidados.map((prod) => ({
-              producto: { connect: { id: prod.productoId } },
-              cantidad: prod.cantidad,
-              precioVenta: prod.precioVenta,
-            })),
-          },
-        },
-      });
+      // === 7) Transacción: descuenta stock + crea venta/pago + ventaCuota + cuotas
+      const ventaCuota = await this.prisma.$transaction(async (tx) => {
+        // 7.1 Stock
+        for (const u of stockUpdates) {
+          await tx.stock.update({
+            where: { id: u.id },
+            data: { cantidad: u.cantidad },
+          });
+        }
+        for (const u of stockUpdatesPresentaciones) {
+          await tx.stockPresentacion.update({
+            where: { id: u.id },
+            data: { cantidadPresentacion: u.cantidad },
+          });
+        }
 
-      console.log('La venta creada es: ', venta);
-
-      // 5. Registrar el pago inicial
-      const pago = await this.prisma.pago.create({
-        data: {
-          ventaId: venta.id,
-          monto: createVentaCuotaDto.cuotaInicial,
-          metodoPago: 'CREDITO',
-          fechaPago: new Date(),
-        },
-      });
-
-      console.log('El pago inicial registrado es: ', pago);
-
-      // 6. Crear el registro de crédito (VentaCuota)
-      const ventaCuota = await this.prisma.ventaCuota.create({
-        data: {
-          clienteId: Number(createVentaCuotaDto.clienteId),
-          usuarioId: Number(createVentaCuotaDto.usuarioId),
-          sucursalId: Number(createVentaCuotaDto.sucursalId),
-          totalVenta: Number(createVentaCuotaDto.totalVenta),
-          cuotaInicial: Number(createVentaCuotaDto.cuotaInicial),
-          cuotasTotales: Number(createVentaCuotaDto.cuotasTotales),
-          fechaInicio: fechaIniciox,
-          diasEntrePagos: Number(createVentaCuotaDto.diasEntrePagos),
-          interes: Number(createVentaCuotaDto.interes),
-          estado: createVentaCuotaDto.estado,
-          dpi: createVentaCuotaDto.dpi,
-          ventaId: venta.id,
-          montoTotalConInteres: createVentaCuotaDto.montoTotalConInteres,
-          testigos: createVentaCuotaDto.testigos ?? null,
-          fechaContrato: fechaIniciox,
-          montoVenta: Number(createVentaCuotaDto.montoVenta),
-          garantiaMeses: Number(createVentaCuotaDto.garantiaMeses),
-          totalPagado: Number(createVentaCuotaDto.cuotaInicial),
-        },
-      });
-
-      console.log('El registro de venta a crédito es: ', ventaCuota);
-
-      // CREAR LAS CUOTAS Y DEMÁS
-      const montoTotalConInteres = Number(
-        createVentaCuotaDto.montoTotalConInteres,
-      );
-      const cuotaInicial = Number(createVentaCuotaDto.cuotaInicial);
-      const cuotasTotales = Number(createVentaCuotaDto.cuotasTotales);
-      const diasEntrePagos = Number(createVentaCuotaDto.diasEntrePagos);
-      const fechaInicio = dayjs(fechaIniciox);
-
-      const montoPorCuota =
-        (montoTotalConInteres - cuotaInicial) / cuotasTotales;
-
-      for (let i = 1; i <= cuotasTotales; i++) {
-        const fechaVencimiento = fechaInicio
-          .add(diasEntrePagos * i, 'day')
-          .toDate();
-
-        let s = await this.prisma.cuota.create({
+        // 7.2 Venta
+        const venta = await tx.venta.create({
           data: {
-            ventaCuotaId: ventaCuota.id,
-            montoEsperado: montoPorCuota,
-            fechaVencimiento: fechaVencimiento,
-            estado: 'PENDIENTE',
-            monto: 0, // Inicializar en 0 hasta que se pague
+            clienteId: Number(clienteId),
+            sucursalId: Number(sucursalId),
+            totalVenta: Number(totalVentaCalculado),
+            productos: {
+              create: [
+                ...productosConsolidados.map((p) => ({
+                  producto: { connect: { id: p.productoId } },
+                  cantidad: p.cantidad,
+                  precioVenta: Number(p.precioVenta ?? 0),
+                })),
+                ...presentacionesConsolidadas.map((pr) => ({
+                  presentacion: { connect: { id: pr.presentacionId } },
+                  cantidad: pr.cantidad,
+                  precioVenta: Number(pr.precioVenta ?? 0),
+                })),
+              ],
+            },
           },
         });
-        console.log('La fecha creada es: ', s);
-      }
 
-      console.log('Incrementando saldo');
+        // 7.3 Pago inicial
+        await tx.pago.create({
+          data: {
+            ventaId: venta.id,
+            monto: Number(cuotaInicial),
+            metodoPago: 'CREDITO',
+            fechaPago: new Date(),
+          },
+        });
 
-      // const saldos = await this.prisma.sucursalSaldo.update({
-      //   where: {
-      //     sucursalId: createVentaCuotaDto.sucursalId,
-      //   },
-      //   data: {
-      //     saldoAcumulado: {
-      //       increment: createVentaCuotaDto.totalVenta,
-      //     },
-      //     totalIngresos: {
-      //       increment: createVentaCuotaDto.totalVenta,
-      //     },
-      //   },
-      // });
-      // console.log('Incrementando saldo', saldos);
+        // 7.4 Venta a crédito
+        const vc = await tx.ventaCuota.create({
+          data: {
+            totalVenta: Number(totalVentaCalculado),
+            montoVenta: Number(totalVentaCalculado),
+            montoTotalConInteres: Number(montoTotalConInteresFinal),
+
+            cuotaInicial: Number(cuotaInicial),
+            cuotasTotales: Number(cuotasTotales),
+            diasEntrePagos: Number(diasEntrePagos),
+            interes: Number(interes ?? 0),
+            totalPagado: Number(cuotaInicial),
+
+            estado: 'ACTIVA',
+            fechaInicio: fechaInicioDate,
+            fechaContrato: fechaContratoDate,
+            garantiaMeses: Number(garantiaMeses ?? 0),
+
+            comentario: '',
+            dpi: '',
+            testigos: {},
+
+            venta: { connect: { id: venta.id } },
+            cliente: {
+              connect: {
+                id: clienteId,
+              },
+            },
+            sucursal: {
+              connect: {
+                id: sucursalId,
+              },
+            },
+            usuario: {
+              connect: {
+                id: usuarioId,
+              },
+            },
+          },
+        });
+
+        // 7.5 Cuotas (reparto de centavos para evitar drift)
+        const baseCents = Math.max(
+          0,
+          Math.round((montoTotalConInteresFinal - cuotaInicial) * 100),
+        );
+        const cuotaBaseCents = Math.floor(baseCents / cuotasTotales);
+        const resto = baseCents - cuotaBaseCents * cuotasTotales;
+
+        for (let i = 0; i < cuotasTotales; i++) {
+          const cents = cuotaBaseCents + (i < resto ? 1 : 0);
+          await tx.cuota.create({
+            data: {
+              ventaCuotaId: vc.id,
+              montoEsperado: cents / 100,
+              fechaVencimiento: dayjs(fechaInicioDate)
+                .tz(TZGT)
+                .add(diasEntrePagos * (i + 1), 'day')
+                .toDate(),
+              estado: 'PENDIENTE',
+              monto: 0,
+            },
+          });
+        }
+        await this.cajaService.attachAndRecordSaleTx(
+          tx,
+          venta.id,
+          sucursalId,
+          usuarioId,
+          { exigirCajaSiEfectivo: true },
+        );
+
+        return vc;
+      });
+
+      this.logger.debug(`[CRED] totalVentaCalculado=${totalVentaCalculado}`);
+      this.logger.debug(
+        `[CRED] montoTotalConInteresFinal=${montoTotalConInteresFinal}`,
+      );
+      const base = +(montoTotalConInteresFinal - cuotaInicial).toFixed(2);
+      const montoPorCuota = +(base / cuotasTotales).toFixed(2);
+      this.logger.debug(
+        `[CRED] cuotaInicial=${cuotaInicial}, base=${base}, cuotas=${cuotasTotales}, montoPorCuota≈${montoPorCuota}`,
+      );
 
       return ventaCuota;
-    } catch (error) {
-      console.error(error);
+    } catch (err) {
+      this.logger.error(err);
       throw new BadRequestException('Error al crear el registro de crédito');
     }
   }
@@ -669,64 +389,6 @@ export class CuotasService {
       throw new BadRequestException('Error');
     }
   }
-
-  // async registerNewPay(createCuotaDto: CuotaDto) {
-  //   try {
-  //     // const hoy = dayjs();
-  //     const cuotaID = createCuotaDto.ventaCuotaId;
-  //     const CreditoID = createCuotaDto.CreditoID;
-  //     // 1. Crear el registro del pago
-  //     const cuotaA_Actualizar = await this.prisma.cuota.update({
-  //       where: {
-  //         id: cuotaID,
-  //       },
-  //       data: {
-  //         monto: createCuotaDto.monto,
-  //         estado: createCuotaDto.estado,
-  //         usuarioId: createCuotaDto.usuarioId,
-  //         comentario: createCuotaDto.comentario,
-  //         fechaPago: new Date(),
-  //       },
-  //     });
-
-  //     // 2. Actualizar el total pagado en la VentaCuota
-  //     const ventaCuotaActualizada = await this.prisma.ventaCuota.update({
-  //       where: {
-  //         id: createCuotaDto.CreditoID,
-  //       },
-  //       data: {
-  //         totalPagado: {
-  //           increment: createCuotaDto.monto,
-  //         },
-  //       },
-  //       include: {
-  //         venta: true, // Incluir la venta asociada
-  //       },
-  //     });
-
-  //     if (!ventaCuotaActualizada) {
-  //       throw new NotFoundException('Registro no encontrado');
-  //     }
-
-  //     // 3. Actualizar el totalVenta en la Venta asociada (si existe)
-  //     if (ventaCuotaActualizada.venta) {
-  //       await this.prisma.venta.update({
-  //         where: {
-  //           id: ventaCuotaActualizada.venta.id, // Usar la relación directa con Venta
-  //         },
-  //         data: {
-  //           totalVenta: {
-  //             increment: createCuotaDto.monto,
-  //           },
-  //         },
-  //       });
-  //     }
-  //     return cuotaA_Actualizar;
-  //   } catch (error) {
-  //     console.error('Error en registerNewPay:', error);
-  //     throw new BadRequestException('Error al registrar pago de cuota');
-  //   }
-  // }
 
   async registerNewPay(createCuotaDto: CuotaDto) {
     try {
@@ -843,20 +505,7 @@ export class CuotasService {
             nombre: true,
           },
         },
-        // productos: {
-        //   orderBy: {
-        //     precioVenta: 'desc',
-        //   },
-        //   include: {
-        //     producto: {
-        //       select: {
-        //         id: true,
-        //         nombre: true,
-        //         codigoProducto: true,
-        //       },
-        //     },
-        //   },
-        // },
+
         sucursal: {
           select: {
             id: true,
@@ -1092,23 +741,6 @@ export class CuotasService {
     totalVenta: number;
     montoTotalConInteres: number;
     totalPagado: number;
-
-    //-----------------
-    // id, // Código único del contrato
-    // fechaContrato, // Fecha del contrato
-    // cliente, // Información del cliente
-    // usuario, // Información del vendedor
-    // testigos, // Lista de testigos
-    // sucursal, // Sucursal involucrada
-    // productos, // Lista de productos vendidos
-    // montoVenta, // Monto total de la venta
-    // cuotaInicial, // Pago inicial
-    // cuotasTotales, // Número total de cuotas
-    // garantiaMeses, // Meses de garantía
-    // dpi, // DPI del cliente
-    // diasEntrePagos,
-    // interes,
-    // totalVenta,
   }> {
     try {
       const cuota = await this.prisma.ventaCuota.findUnique({
@@ -1446,25 +1078,6 @@ export class CuotasService {
       );
       console.log('El total de todas las cuotas es:', total);
 
-      // Actualizar el saldo de la sucursal
-      // const x = await this.prisma.sucursalSaldo.findUnique({
-      //   where: { sucursalId: sucursal.id },
-      // });
-      // console.log('El saldo actual es: ', x);
-
-      // await this.prisma.sucursalSaldo.update({
-      //   where: { sucursalId: sucursal.id },
-      //   data: {
-      //     saldoAcumulado: { decrement: total },
-      //     totalEgresos: { increment: total },
-      //   },
-      // });
-
-      // const l = await this.prisma.sucursalSaldo.findUnique({
-      //   where: { sucursalId: sucursal.id },
-      // });
-      // console.log('El saldo actual es: ', l);
-
       await this.prisma.cuota.deleteMany({
         where: { ventaCuotaId: creditId },
       });
@@ -1595,27 +1208,6 @@ export class CuotasService {
           totalVenta: nuevoTotalVenta,
         },
       });
-
-      // let x = await prisma.sucursalSaldo.findUnique({
-      //   where: {
-      //     sucursalId: ventaCuota.sucursalId,
-      //   },
-      // });
-
-      // console.log('el monto actual de la sucursal es: ', x);
-
-      // await prisma.sucursalSaldo.updateMany({
-      //   where: { sucursalId: ventaCuota.sucursalId },
-      //   data: {
-      //     saldoAcumulado: { decrement: monto }, // Restar el monto pagado
-      //     totalIngresos: { decrement: monto },
-      //   },
-      // });
-
-      // console.log(
-      //   'El saldo de la sucursal debería ser: ',
-      //   x.saldoAcumulado - monto,
-      // );
 
       return {
         message:

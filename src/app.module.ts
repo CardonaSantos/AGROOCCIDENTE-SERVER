@@ -63,6 +63,7 @@ import { CajaAdministrativoModule } from './caja-administrativo/caja-administrat
 import { PresentacionProductoModule } from './presentacion-producto/presentacion-producto.module';
 import { InventarioPresentacionModule } from './inventario-presentacion/inventario-presentacion.module';
 import { RealtimeModule } from './realtime/realtime.module';
+import { StockPresentacionModule } from './stock-presentacion/stock-presentacion.module';
 
 @Module({
   imports: [
@@ -128,6 +129,7 @@ import { RealtimeModule } from './realtime/realtime.module';
     PresentacionProductoModule,
     InventarioPresentacionModule,
     RealtimeModule,
+    StockPresentacionModule,
   ],
   controllers: [AppController],
   providers: [AppService, CloudinaryProvider, SaldosServiceService],

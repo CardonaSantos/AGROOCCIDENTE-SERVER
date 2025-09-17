@@ -26,6 +26,7 @@ import { EntregaStockData } from 'src/utilities/utils';
 import { UtilitiesService } from 'src/utilities/utilities.service';
 import { HistorialStockTrackerService } from 'src/historial-stock-tracker/historial-stock-tracker.service';
 import { RecepcionarCompraAutoDto } from './dto/compra-recepcion.dto';
+import { StockBaseDto, StockPresentacionDto } from './interfaces';
 dayjs.extend(utc);
 dayjs.extend(timezone);
 dayjs.extend(isSameOrBefore);
@@ -1440,130 +1441,172 @@ export class PurchaseRequisitionsService {
 
   async makeRecepcionCompraAuto(dto: RecepcionarCompraAutoDto) {
     try {
-      this.logger.log('La data llegando es: ', dto);
-      const { cuentaBancariaId } = dto;
-      console.log('la cuenta es_:', cuentaBancariaId);
-
       return await this.prisma.$transaction(async (tx) => {
-        // 0) Cargar compra con PRESENTACIONES en detalles
+        // 0) Compra + detalles + presentaciones
         const compra = await tx.compra.findUnique({
           where: { id: dto.compraId },
           include: {
             detalles: {
               select: {
                 id: true,
-                cantidad: true, // cantidad en la UNIDAD de la línea (presentación o unidad)
-                costoUnitario: true, // costo por esa unidad (presentación o unidad)
+                cantidad: true,
+                costoUnitario: true,
                 productoId: true,
                 requisicionLineaId: true,
-                // 👇 NUEVO: traemos presentacion (si existe) para convertir a base
                 presentacionId: true,
-                presentacion: {
-                  select: {
-                    id: true,
-                    factorUnidadBase: true, // Decimal(18,6)
-                    nombre: true,
-                    sku: true,
-                  },
-                },
+                presentacion: { select: { id: true } },
               },
             },
             proveedor: { select: { id: true } },
             pedido: {
               select: {
                 id: true,
-                estado: true,
-                folio: true,
-                tipo: true,
+                lineas: {
+                  select: {
+                    id: true,
+                    productoId: true,
+                    presentacionId: true,
+                    cantidad: true,
+                    precioUnitario: true,
+                  },
+                },
               },
             },
-            // necesitamos sucursalId para stock
-            // (ya lo usabas antes)
+            sucursal: { select: { id: true } },
           },
         });
-        if (!compra) throw new NotFoundException('Compra no encontrada');
 
+        if (!compra) throw new NotFoundException('Compra no encontrada');
         const sucursalId = compra.sucursalId;
-        if (!sucursalId) {
+        if (!sucursalId)
           throw new BadRequestException(
             'La compra no tiene sucursal asociada.',
           );
-        }
 
-        // 1) Si hay requisición, crear la recepción (igual que antes)
+        // 1) Si hay requisición, crear cabecera de recepción
         let requisicionRecepcionId: number | null = null;
         if (compra.requisicionId) {
-          const reqMain = await tx.requisicion.findUnique({
+          const req = await tx.requisicion.findUnique({
             where: { id: compra.requisicionId },
           });
-          if (!reqMain)
+          if (!req)
             throw new NotFoundException(
               'Requisición origen no encontrada para la compra',
             );
-
           const recep = await tx.requisicionRecepcion.create({
             data: {
               observaciones: dto.observaciones ?? null,
               usuario: { connect: { id: dto.usuarioId } },
-              requisicion: { connect: { id: reqMain.id } },
+              requisicion: { connect: { id: req.id } },
               fechaRecepcion: dayjs().tz(TZGT).toDate(),
             },
           });
           requisicionRecepcionId = recep.id;
         }
 
-        // 2) Armar DTOs para stock (BASE) y líneas de recepción (igual que antes)
+        // 2) Preparación
         const nowISO = dayjs().tz(TZGT).toISOString();
+        const stockBaseDtos: StockBaseDto[] = [];
+        const stockPresentacionDtos: StockPresentacionDto[] = [];
+        const lineasRecep: Array<{
+          compraDetalleId: number;
+          productoId: number;
+          cantidadSolicitada: number;
+          cantidadRecibida: number;
+          precioUnitario: number;
+          cantidadRecibidaBase: number;
+        }> = [];
+        let solicitadoTotalUI = 0;
+        let recibidoTotalUI = 0;
+        let totalCompra = 0;
 
         type LineaRecep = {
           compraDetalleId: number;
           productoId: number;
-          cantidadSolicitada: number; // en unidad declarada por la línea (presentación o unidad)
-          cantidadRecibida: number; // idem arriba
-          precioUnitario: number; // costo por esa unidad (presentación o unidad)
-          // 👇 NUEVO: cantidad en base (para tracking/stock)
-          cantidadRecibidaBase: number; // unidades base (int)
+          cantidadSolicitada: number; // unidad de la línea
+          cantidadRecibida: number; // unidad de la línea
+          precioUnitario: number; // costo por la unidad de la línea
+          cantidadRecibidaBase: number; // convertida a base (int)
         };
 
-        const stockDtos: Array<any> = []; // para helper generateStockFromRequisicion (en unidades BASE)
-        const stockPresentacionDtos: Array<{
+        const baseAcumuladoPorProducto: Record<number, number> = {};
+
+        const resolvePresentacionId = async (det: {
+          id: number;
+          presentacionId: number | null;
           productoId: number;
-          presentacionId: number;
-          sucursalId: number;
-          cantidadPresentacion: number;
-          costoUnitarioBase: number; // costo por unidad BASE (Decimal(12,4) en schema)
-          costoUnitarioPresentacion: number; // costo por PRESENTACIÓN (Decimal(12,4) en schema)
-          fechaIngreso: Date;
-          fechaVencimiento?: Date | null;
-        }> = [];
+          requisicionLineaId: number | null;
+          cantidad: number;
+          costoUnitario: number;
+        }): Promise<number | null> => {
+          // a) si ya viene en compra
+          if (det.presentacionId) return det.presentacionId;
 
-        const lineasRecep: Array<LineaRecep> = [];
+          // b) desde requisición (si hubo)
+          if (det.requisicionLineaId) {
+            const rl = await tx.requisicionLinea.findUnique({
+              where: { id: det.requisicionLineaId },
+              select: { presentacionId: true },
+            });
+            if (rl?.presentacionId) {
+              this.logger.debug(
+                `[RECEP] det#${det.id} -> presentacionId resuelto por RequisicionLinea: ${rl.presentacionId}`,
+              );
+              return rl.presentacionId;
+            }
+          }
 
-        let solicitadoTotal = 0;
-        let recibidoEnEsta = 0;
+          // c) desde pedido (si hubo)
+          if (compra.pedido?.lineas?.length) {
+            const matches = compra.pedido.lineas.filter(
+              (pl) =>
+                pl.productoId === det.productoId &&
+                pl.presentacionId != null &&
+                Number(pl.cantidad) === Number(det.cantidad) &&
+                Number(pl.precioUnitario) === Number(det.costoUnitario),
+            );
+            if (matches.length === 1) {
+              this.logger.debug(
+                `[RECEP] det#${det.id} -> presentacionId resuelto por PedidoLinea: ${matches[0].presentacionId}`,
+              );
+              return matches[0].presentacionId!;
+            }
+            if (matches.length > 1) {
+              this.logger.warn(
+                `[RECEP] det#${det.id} -> multiples PedidoLinea candidates; no asigno presentacionId`,
+              );
+            }
+          }
 
-        // para tracking en base
-        const productBaseAcumulado: Record<number, number> = {};
+          // d) sin match
+          return null;
+        };
 
+        // ===== 3) Procesar cada detalle usando SOLO lo que trae la compra =====
         for (const det of compra.detalles) {
-          const cantLinea = det.cantidad ?? 0; // cantidad de la línea (puede ser presentaciones)
-          const precioUnitLinea = det.costoUnitario ?? 0; // costo por esa unidad (presentación/unidad)
-          solicitadoTotal += cantLinea;
-          recibidoEnEsta += cantLinea;
+          const cantidadLinea = Number(det.cantidad ?? 0);
+          const costoUnit = Number(det.costoUnitario ?? 0);
 
-          // 👇 NUEVO: convertir a BASE si hay presentacion
-          const factor = det.presentacion?.factorUnidadBase
-            ? Number(det.presentacion.factorUnidadBase)
-            : 1;
+          solicitadoTotalUI += cantidadLinea;
+          recibidoTotalUI += cantidadLinea;
+          totalCompra += Number((cantidadLinea * costoUnit).toFixed(4));
 
-          // redondeamos a int por schema de Stock.cantidad (Int)
-          const cantidadBase = Math.round(cantLinea * factor);
+          const presId = await resolvePresentacionId({
+            id: det.id,
+            presentacionId: det.presentacionId ?? null,
+            productoId: det.productoId!,
+            requisicionLineaId: det.requisicionLineaId ?? null,
+            cantidad: cantidadLinea,
+            costoUnitario: costoUnit,
+          });
 
-          // costo base = costo presentacion / factor (si factor>0)
-          const costoUnitarioBase =
-            factor > 0 ? precioUnitLinea / factor : precioUnitLinea;
+          this.logger.debug(
+            `[RECEP] det#${det.id} p#${det.productoId} pres#${presId ?? '—'} ` +
+              `cant:${cantidadLinea} costo:${costoUnit} ==> ` +
+              (presId ? 'PRESENTACION(resuelta)' : 'BASE'),
+          );
 
-          // === a) Requisición (líneas + acumulados) ===
+          // a) Vinculación con requisición (igual)
           if (det.requisicionLineaId && requisicionRecepcionId) {
             const reqLinea = await tx.requisicionLinea.findUnique({
               where: { id: det.requisicionLineaId },
@@ -1576,142 +1619,158 @@ export class PurchaseRequisitionsService {
                   connect: { id: requisicionRecepcionId },
                 },
                 requisicionLinea: { connect: { id: det.requisicionLineaId } },
-                producto: { connect: { id: det.productoId } },
-                cantidadSolicitada: cantLinea, // se mantiene en “unidad” original de la línea
-                cantidadRecibida: cantLinea, // idem
+                producto: { connect: { id: det.productoId! } },
+                cantidadSolicitada: cantidadLinea,
+                cantidadRecibida: cantidadLinea,
                 ingresadaAStock: true,
-                // (si quisieras guardar presentacionId aquí en el futuro, habría que extender el schema)
               },
             });
 
             await tx.requisicionLinea.update({
               where: { id: det.requisicionLineaId },
               data: {
-                cantidadRecibida: (reqLinea?.cantidadRecibida ?? 0) + cantLinea,
+                cantidadRecibida:
+                  (reqLinea?.cantidadRecibida ?? 0) + cantidadLinea,
                 ingresadaAStock: true,
               },
             });
           }
 
-          // === b) Stock BASE (compatibilidad con todo lo existente) ===
-          stockDtos.push({
-            productoId: det.productoId,
-            cantidad: cantidadBase, // BASE
-            costoTotal: costoUnitarioBase * cantidadBase, // = precioUnitLinea*cantLinea
-            fechaIngreso: nowISO,
-            fechaExpiracion: null,
-            precioCosto: costoUnitarioBase, // BASE
-            sucursalId,
-            requisicionRecepcionId: requisicionRecepcionId ?? undefined,
-          });
-
-          // === c) Stock de PRESENTACIÓN (si aplica) ===
-          if (det.presentacionId) {
-            stockPresentacionDtos.push({
-              productoId: det.productoId,
-              presentacionId: det.presentacionId,
+          // b) SOLO PRODUCTO MAIN → Stock
+          if (!presId) {
+            stockBaseDtos.push({
+              productoId: det.productoId!,
+              cantidad: cantidadLinea,
+              costoTotal: Number((costoUnit * cantidadLinea).toFixed(4)),
+              fechaIngreso: nowISO,
+              fechaExpiracion: null,
+              precioCosto: costoUnit,
               sucursalId,
-              cantidadPresentacion: cantLinea, // número de presentaciones recibidas
-              costoUnitarioBase: costoUnitarioBase, // BASE (Decimal en DB)
-              costoUnitarioPresentacion: precioUnitLinea, // PRESENTACIÓN
-              fechaIngreso: dayjs().tz(TZGT).toDate(),
-              fechaVencimiento: null,
+              requisicionRecepcionId: requisicionRecepcionId ?? undefined,
             });
           }
 
-          // === d) array UI/tracking ===
+          // c) SOLO PRESENTACION → StockPresentacion
+          if (presId) {
+            stockPresentacionDtos.push({
+              productoId: det.productoId!,
+              presentacionId: presId,
+              sucursalId,
+              cantidadPresentacion: cantidadLinea,
+              fechaIngreso: dayjs().tz(TZGT).toDate(),
+              fechaVencimiento: null,
+              requisicionRecepcionId,
+            });
+          }
+
+          // d) Para respuesta/UI
           lineasRecep.push({
             compraDetalleId: det.id,
-            productoId: det.productoId,
-            cantidadSolicitada: cantLinea,
-            cantidadRecibida: cantLinea,
-            precioUnitario: precioUnitLinea,
-            cantidadRecibidaBase: cantidadBase,
+            productoId: det.productoId!,
+            cantidadSolicitada: cantidadLinea,
+            cantidadRecibida: cantidadLinea,
+            precioUnitario: costoUnit,
+            cantidadRecibidaBase: presId ? 0 : cantidadLinea,
           });
-
-          productBaseAcumulado[det.productoId] =
-            (productBaseAcumulado[det.productoId] ?? 0) + cantidadBase;
         }
-
-        // 3) Calcular cantidades anteriores por producto (antes de insertar stock BASE)
-        const productIds = Object.keys(productBaseAcumulado).map((s) =>
-          Number(s),
+        // === LOG resumen antes de insertar ===
+        this.logger.debug(
+          `[RECEP] Resumen a insertar: base=${stockBaseDtos.length}, pres=${stockPresentacionDtos.length}`,
         );
-        const cantidadesAnteriores: Record<number, number> = {};
-        await Promise.all(
-          productIds.map(async (pid) => {
-            const agg = await tx.stock.aggregate({
-              where: { productoId: pid, sucursalId },
-              _sum: { cantidad: true },
-            });
-            cantidadesAnteriores[pid] = agg._sum.cantidad ?? 0;
-          }),
-        );
-
-        // 4) Datos de entrega (monto en PRESENTACIÓN; es equivalente)
-        const entregaStockData = {
-          fechaEntrega: dayjs().tz(TZGT).toDate(),
-          montoTotal: stockDtos.reduce(
-            (acc, s) => acc + (s.costoTotal ?? 0),
-            0,
-          ),
-          proveedorId: dto.proveedorId ?? null,
-          sucursalId,
-          recibidoPorId: dto.usuarioId,
-        };
-
-        // 5) Generar STOCK BASE (helper existente, NO se toca)
-        const result = await this.utilities.generateStockFromRequisicion(
-          tx,
-          stockDtos,
-          entregaStockData,
-        );
-
-        const newStocks =
-          (result as any)?.newStocksCreated ??
-          (Array.isArray(result) ? result : []);
-        let entregaId: number | null =
-          (result as any)?.entregaStock?.id ??
-          newStocks?.[0]?.entregaStockId ??
-          null;
-
-        if (!entregaId) {
-          const entregaGuess = await tx.entregaStock.findFirst({
-            where: { sucursalId, recibidoPorId: dto.usuarioId },
-            orderBy: { id: 'desc' },
-            select: { id: true },
-          });
-          entregaId = entregaGuess?.id ?? null;
-        }
-
-        // 6) **Crear STOCK de PRESENTACIÓN** (nuevo pero sin romper nada)
-        if (stockPresentacionDtos.length > 0) {
-          await Promise.all(
-            stockPresentacionDtos.map((sp) =>
-              tx.stockPresentacion.create({
-                data: {
-                  producto: { connect: { id: sp.productoId } },
-                  presentacion: { connect: { id: sp.presentacionId } },
-                  sucursal: { connect: { id: sp.sucursalId } },
-                  cantidadPresentacion: sp.cantidadPresentacion, // Int
-                  costoUnitarioBase: sp.costoUnitarioBase, // Decimal(12,4)
-                  costoUnitarioPresentacion: sp.costoUnitarioPresentacion, // Decimal(12,4)
-                  fechaIngreso: sp.fechaIngreso,
-                  fechaVencimiento: sp.fechaVencimiento ?? null,
-                  cantidadRecibidaInicial: sp.cantidadPresentacion,
-                },
-              }),
+        this.logger.debug(
+          `[RECEP] Base -> ` +
+            JSON.stringify(
+              stockBaseDtos.map((s) => ({
+                p: s.productoId,
+                cant: s.cantidad,
+                costo: s.precioCosto,
+              })),
+              null,
+              2,
             ),
+        );
+        this.logger.debug(
+          `[RECEP] Pres -> ` +
+            JSON.stringify(
+              stockPresentacionDtos.map((s) => ({
+                p: s.productoId,
+                pres: s.presentacionId,
+                cant: s.cantidadPresentacion,
+              })),
+              null,
+              2,
+            ),
+        );
+        // ===== 4) Entrega (única) para listado histórico =====
+        // Queremos crear SIEMPRE un registro de entrega, compremos base o presentaciones.
+        let entregaId: number | null = null;
+
+        if (stockBaseDtos.length > 0) {
+          const result = await this.utilities.generateStockFromRequisicion(
+            tx,
+            stockBaseDtos,
+            {
+              fechaEntrega: dayjs().tz(TZGT).toDate(),
+              montoTotal: Number(totalCompra.toFixed(4)), // total de la compra (base + pres)
+              proveedorId: dto.proveedorId ?? null,
+              sucursalId,
+              recibidoPorId: dto.usuarioId,
+            },
+          );
+          entregaId = (result as any)?.entregaStock?.id ?? null;
+        } else {
+          const entrega = await tx.entregaStock.create({
+            data: {
+              proveedor: dto.proveedorId
+                ? { connect: { id: dto.proveedorId } }
+                : undefined,
+              montoTotal: Number(totalCompra.toFixed(4)),
+              fechaEntrega: dayjs().tz(TZGT).toDate(),
+              usuarioRecibido: { connect: { id: dto.usuarioId } },
+              sucursal: { connect: { id: sucursalId } },
+            },
+          });
+          entregaId = entrega.id;
+        }
+        // ===== 5) Insertar **presentaciones** =====
+        if (stockPresentacionDtos.length > 0) {
+          const createdPres = await this.utilities.generateStockPresentacion(
+            tx,
+            stockPresentacionDtos,
+          );
+          this.logger.debug(
+            `[RECEP] Presentaciones insertadas: ${createdPres.length}`,
           );
         }
 
-        // 7) Tracking enlazado a la ENTREGA (en UNIDADES BASE coherentes con Stock)
-        if (entregaId) {
+        // ===== 6) Tracking (base): solo si se insertó stock base =====
+        if (entregaId && stockBaseDtos.length > 0) {
+          // sumas por producto para tracker (solo base)
+          const baseAcumulado: Record<number, number> = {};
+          for (const d of stockBaseDtos) {
+            baseAcumulado[d.productoId] =
+              (baseAcumulado[d.productoId] ?? 0) + d.cantidad;
+          }
+          const productIds = Object.keys(baseAcumulado).map(Number);
+
+          // cantidades anteriores
+          const anteriores: Record<number, number> = {};
+          await Promise.all(
+            productIds.map(async (pid) => {
+              const agg = await tx.stock.aggregate({
+                where: { productoId: pid, sucursalId },
+                _sum: { cantidad: true },
+              });
+              anteriores[pid] = agg._sum.cantidad ?? 0;
+            }),
+          );
+
           const trackers = productIds.map((pid) => ({
             productoId: pid,
-            cantidadVendida: productBaseAcumulado[pid], // BASE
-            cantidadAnterior: cantidadesAnteriores[pid] ?? 0,
+            cantidadVendida: baseAcumulado[pid],
+            cantidadAnterior: anteriores[pid] ?? 0,
           }));
+
           await this.tracker.trackeEntregaStock(
             tx,
             trackers,
@@ -1719,15 +1778,53 @@ export class PurchaseRequisitionsService {
             dto.usuarioId,
             entregaId,
             'ENTREGA_STOCK',
-            `Recepción TOTAL automática desde módulo COMPRA (origen: ${compra.origen})`,
-          );
-        } else {
-          this.logger.warn(
-            '[makeRecepcionCompraAuto] No se pudo resolver entregaId para tracking.',
+            `Recepción automática desde COMPRA`,
           );
         }
 
-        // 8) Actualizaciones de requisición (igual que antes)
+        // (opcional) Log historial para presentaciones
+        if (stockPresentacionDtos.length > 0) {
+          await Promise.all(
+            stockPresentacionDtos.map((sp) =>
+              tx.historialStock.create({
+                data: {
+                  tipo: 'ENTREGA_STOCK',
+                  fechaCambio: dayjs().tz(TZGT).toDate(),
+                  sucursalId,
+                  usuarioId: dto.usuarioId,
+                  productoId: sp.productoId,
+                  presentacionId: sp.presentacionId,
+                  comentario: 'Recepción de compra (presentación)',
+                },
+              }),
+            ),
+          );
+        }
+
+        // ===== 7) Estados y totales (igual que ya lo tenías) =====
+        const estadoCompra =
+          recibidoTotalUI >= solicitadoTotalUI
+            ? 'RECIBIDO'
+            : 'RECIBIDO_PARCIAL';
+
+        await tx.compra.update({
+          where: { id: compra.id },
+          data: {
+            total: Number(totalCompra.toFixed(4)),
+            estado: estadoCompra,
+            ingresadaAStock: true,
+            cantidadRecibidaAcumulada:
+              (compra.cantidadRecibidaAcumulada ?? 0) + recibidoTotalUI,
+          },
+        });
+
+        if (compra.pedido?.id) {
+          await tx.pedido.update({
+            where: { id: compra.pedido.id },
+            data: { estado: 'RECIBIDO' },
+          });
+        }
+
         if (compra.requisicionId) {
           const req = await tx.requisicion.findUnique({
             where: { id: compra.requisicionId },
@@ -1748,75 +1845,48 @@ export class PurchaseRequisitionsService {
           }
         }
 
-        // 9) Si provino de PEDIDO, marcar como RECIBIDO
-        if (compra.pedido?.id) {
-          await tx.pedido.update({
-            where: { id: compra.pedido.id },
-            data: { estado: 'RECIBIDO' },
-          });
-        }
-
-        // 10) Estado de compra (igual que antes, a nivel “unidad de línea”)
-        const estadoCompra =
-          recibidoEnEsta >= solicitadoTotal ? 'RECIBIDO' : 'RECIBIDO_PARCIAL';
-
-        await tx.compra.update({
-          where: { id: compra.id },
-          data: {
-            estado: estadoCompra,
-            ingresadaAStock: true,
-            cantidadRecibidaAcumulada:
-              (compra.cantidadRecibidaAcumulada ?? 0) + recibidoEnEsta,
-          },
-        });
-
-        // 11) Movimiento financiero (igual que antes)
+        // ===== 8) Movimiento financiero (MISMA lógica de deltas) =====
         const metodo = dto.metodoPago ?? 'EFECTIVO';
         const canal = this.paymentChannel(metodo);
-
         let registroCajaId: number | undefined;
-        if (canal === 'CAJA') {
-          registroCajaId = dto.registroCajaId;
-          if (!registroCajaId) {
-            const turno = await tx.registroCaja.findFirst({
-              where: { sucursalId, estado: 'ABIERTO' },
-              select: { id: true },
-            });
-            if (!turno)
-              throw new BadRequestException(
-                'No hay turno de caja ABIERTO para registrar el pago en efectivo.',
-              );
-            registroCajaId = turno.id;
-          }
-          if (dto.cuentaBancariaId) {
-            throw new BadRequestException(
-              'No especifiques cuenta bancaria para pagos en efectivo.',
-            );
-          }
-        }
-
         let cuentaBancariaIdLocal: number | undefined;
-        if (canal === 'BANCO') {
-          if (!dto.cuentaBancariaId) {
+
+        if (canal === 'CAJA') {
+          registroCajaId =
+            dto.registroCajaId ??
+            (
+              await tx.registroCaja.findFirst({
+                where: { sucursalId, estado: 'ABIERTO' },
+                select: { id: true },
+              })
+            )?.id;
+          if (!registroCajaId)
+            throw new BadRequestException('No hay turno de caja ABIERTO.');
+          if (dto.cuentaBancariaId)
             throw new BadRequestException(
-              'Debes seleccionar la cuenta bancaria para pagos por banco.',
+              'No especifiques cuenta bancaria para EFECTIVO.',
             );
-          }
-          cuentaBancariaIdLocal = dto.cuentaBancariaId;
-          if (dto.registroCajaId) {
-            throw new BadRequestException(
-              'No especifiques registro de caja para pagos por banco.',
-            );
-          }
         }
 
-        const montoRecepcion = entregaStockData.montoTotal;
+        if (canal === 'BANCO') {
+          if (!dto.cuentaBancariaId)
+            throw new BadRequestException(
+              'Selecciona la cuenta bancaria para pagos por banco.',
+            );
+          cuentaBancariaIdLocal = dto.cuentaBancariaId;
+          if (dto.registroCajaId)
+            throw new BadRequestException(
+              'No especifiques registro de caja para BANCO.',
+            );
+        }
+
+        const montoRecepcion = Number(totalCompra.toFixed(4));
         const { deltaCaja, deltaBanco } = this.computeDeltas(
           metodo,
           montoRecepcion,
         );
 
-        const mFinanciero = await tx.movimientoFinanciero.create({
+        await tx.movimientoFinanciero.create({
           data: {
             fecha: dayjs().tz(TZGT).toDate(),
             sucursalId,
@@ -1837,27 +1907,25 @@ export class PurchaseRequisitionsService {
           },
         });
 
-        this.logger.log(
-          'El movimiento generado por ingreso de productos es: ',
-          mFinanciero,
-        );
-
-        // 12) Respuesta
         return {
           ok: true,
-          compra: { id: compra.id, estado: estadoCompra },
+          compra: {
+            id: compra.id,
+            estado: estadoCompra,
+            total: Number(totalCompra.toFixed(4)),
+          },
           recepcion: requisicionRecepcionId
             ? { id: requisicionRecepcionId }
             : null,
           lineas: lineasRecep,
-          stockBase: newStocks,
-          // 👇 opcional: podrías exponer cuántos StockPresentacion se crearon
+          // si hubo base, esto vendrá del helper; si no, será []
+          stockBase: stockBaseDtos.length > 0 ? 'CREATED_BY_HELPER' : [],
           stockPresentacionCount: stockPresentacionDtos.length,
         };
       });
-    } catch (error) {
-      this.logger.error('El error generado es: ', error);
-      if (error instanceof HttpException) throw error;
+    } catch (e) {
+      this.logger.error('El error generado es: ', e);
+      if (e instanceof HttpException) throw e;
       throw new InternalServerErrorException('Fatal error: Error inesperado');
     }
   }
@@ -1902,6 +1970,43 @@ export class PurchaseRequisitionsService {
 
   findOne(id: number) {
     return `This action returns a #${id} purchaseRequisition`;
+  }
+
+  async getComprasDetallesFull() {
+    try {
+      return await this.prisma.compra.findMany({
+        take: 2,
+        orderBy: {
+          creadoEn: 'desc',
+        },
+        select: {
+          detalles: {
+            select: {
+              id: true,
+              producto: {
+                select: {
+                  id: true,
+                  nombre: true,
+                  codigoProducto: true,
+                },
+              },
+              presentacion: {
+                select: {
+                  id: true,
+                  nombre: true,
+                  codigoBarras: true,
+                  sku: true,
+                },
+              },
+            },
+          },
+        },
+      });
+    } catch (error) {
+      this.logger.error('El error generado es: ', error);
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException('Fatal error: Error inesperado');
+    }
   }
 
   update(

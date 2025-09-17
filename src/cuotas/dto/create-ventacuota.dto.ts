@@ -1,75 +1,36 @@
 // create-venta-cuota.dto.ts
-import {
-  IsInt,
-  IsDateString,
-  IsArray,
-  IsEnum,
-  IsOptional,
-  IsString,
-  IsNumber,
-} from 'class-validator';
-import { Type } from 'class-transformer';
-import { EstadoCuota } from '@prisma/client';
+import { IsInt, IsArray, IsEnum, IsString } from 'class-validator';
+
+export enum Tipo { // 👈 EXPORTA EL ENUM
+  PRODUCTO = 'PRODUCTO',
+  PRESENTACION = 'PRESENTACION',
+}
 
 export class CreateVentaCuotaDto {
-  @IsInt()
-  clienteId: number;
-
-  @IsOptional()
-  @IsNumber()
-  diasEntrePagos: number;
-
-  @IsOptional()
-  @IsNumber()
-  interes: number;
-
-  @IsInt()
-  usuarioId: number;
-
-  @IsInt()
-  sucursalId: number;
-
-  @IsNumber()
-  totalVenta: number;
-
-  @IsNumber()
-  cuotaInicial: number;
-
-  @IsNumber()
-  montoTotalConInteres: number;
-
+  @IsInt() clienteId: number;
+  @IsInt() cuotaInicial: number;
+  @IsInt() diasEntrePagos: number;
+  @IsString() fechaContrato?: string;
+  @IsString() fechaInicio?: string;
+  @IsInt() garantiaMeses?: number;
+  @IsInt() montoVenta: number;
+  @IsInt() sucursalId: number;
+  @IsInt() totalVenta: number;
+  @IsInt() usuarioId: number;
   @IsInt()
   cuotasTotales: number;
-
-  @IsDateString()
-  fechaInicio: Date;
-
-  @IsEnum(EstadoCuota)
-  estado: EstadoCuota;
-
   @IsArray()
-  @IsOptional()
-  //   productos?: any[]; // Aquí puedes definir un tipo más específico si lo deseas
-  productos?: { productoId: number; cantidad: number; precioVenta: number }[]; // Productos vendidos
-
-  @IsString()
-  dpi: string;
-
-  @IsOptional()
-  testigos?: any; // Puedes definir la estructura de testigos si es necesario
-
-  @IsDateString()
-  @IsOptional()
-  fechaContrato?: Date;
-
-  @IsNumber()
-  @IsOptional()
-  montoVenta?: number;
-
+  productos: ProductsList[];
   @IsInt()
-  @IsOptional()
-  garantiaMeses?: number;
+  interes: number;
+  @IsInt()
+  montoTotalConInteres: number;
+}
 
-  @IsOptional()
-  comentario?: string;
+export class ProductsList {
+  @IsInt() cantidad: number;
+  @IsInt() precioVenta: number;
+  @IsInt() productoId?: number;
+  @IsInt() presentacionId?: number;
+  @IsEnum(Tipo) tipo: Tipo;
 }

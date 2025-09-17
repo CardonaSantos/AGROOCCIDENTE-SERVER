@@ -58,6 +58,11 @@ export class PurchaseRequisitionsController {
     return this.purchaseRequisitionsService.getRegistroCompra(id);
   }
 
+  @Get('get-all-compras')
+  getComprasDetallesFull() {
+    return this.purchaseRequisitionsService.getComprasDetallesFull();
+  }
+
   @Get(':id')
   findOne(@Param('id') id: string) {
     return this.purchaseRequisitionsService.findOne(+id);

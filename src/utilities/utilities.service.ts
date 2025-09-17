@@ -11,6 +11,9 @@ import { PrismaService } from 'src/prisma/prisma.service';
 import { EstadoTurnoCaja, Prisma } from '@prisma/client';
 import { GenerateStockDto } from './dto/generate-stock.dto';
 import { EntregaStockData } from './utils';
+import { StockPresentacionDto } from 'src/compras-requisiciones/interfaces';
+
+type GenerateStockPresentacionDto = StockPresentacionDto;
 
 @Injectable()
 export class UtilitiesService {
@@ -78,6 +81,49 @@ export class UtilitiesService {
 
     this.logger.debug('El nuevo registro de stock es: ', newStocksCreated);
     return { newStocksCreated, entregaStock }; // Retorna ambos registros
+  }
+
+  //crear stock de presentaciones
+  async generateStockPresentacion(
+    tx: Prisma.TransactionClient,
+    dtos: Array<{
+      productoId: number;
+      presentacionId: number;
+      sucursalId: number;
+      cantidadPresentacion: number;
+      fechaIngreso: Date;
+      fechaVencimiento?: Date | null;
+      requisicionRecepcionId: number | null;
+    }>,
+  ) {
+    this.logger.log('DTOS StockPresentacion -> ', dtos);
+    if (!dtos.length) return [];
+
+    const created = await Promise.all(
+      dtos.map((sp) =>
+        tx.stockPresentacion.create({
+          data: {
+            producto: { connect: { id: sp.productoId } },
+            presentacion: { connect: { id: sp.presentacionId } },
+            sucursal: { connect: { id: sp.sucursalId } },
+            cantidadPresentacion: sp.cantidadPresentacion,
+            cantidadRecibidaInicial: sp.cantidadPresentacion,
+            fechaIngreso: sp.fechaIngreso,
+            fechaVencimiento: sp.fechaVencimiento ?? null,
+            requisicionRecepcion: sp.requisicionRecepcionId
+              ? { connect: { id: sp.requisicionRecepcionId } }
+              : undefined,
+          },
+        }),
+      ),
+    );
+
+    if (!created.length) {
+      throw new InternalServerErrorException(
+        'No se pudieron registrar presentaciones',
+      );
+    }
+    return created;
   }
 
   //SERVICIOS DE UTILIDADES PARA TRUNCAR MOVIMIENTOS MAYORES Y EVITAR CAJAS NEGATIVAS

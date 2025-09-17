@@ -297,8 +297,8 @@ model StockPresentacion {
   //historico para cantidad recibida
   cantidadRecibidaInicial Int
   cantidadPresentacion      Int
-  costoUnitarioBase         Decimal   @db.Decimal(12, 4)
-  costoUnitarioPresentacion Decimal?  @db.Decimal(12, 4)
+  // costoUnitarioBase         Decimal   @db.Decimal(12, 4)
+  // costoUnitarioPresentacion Decimal?  @db.Decimal(12, 4)
   fechaIngreso              DateTime
   fechaVencimiento          DateTime?
   creadoEn                  DateTime  @default(now())
@@ -858,7 +858,7 @@ model VentaCuota {
   // productos           VentaProducto[] // Relación con los productos vendidos
   creadoEn             DateTime    @default(now())
   actualizadoEn        DateTime    @updatedAt
-  dpi                  String
+  dpi                  String?
   testigos             Json
   fechaContrato        DateTime    @default(now()) //
   montoVenta           Float

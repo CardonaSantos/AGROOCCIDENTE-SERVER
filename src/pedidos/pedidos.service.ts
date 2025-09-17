@@ -335,36 +335,185 @@ export class PedidosService {
     }
   }
 
+  // async sendPedidoToCompras(dto: ReceivePedidoComprasDto) {
+  //   try {
+  //     return await this.prisma.$transaction(async (tx) => {
+  //       const { pedidoId, proveedorId, userID, sucursalId } = dto;
+  //       console.log(
+  //         'La data llegnado es: ',
+  //         pedidoId,
+  //         proveedorId,
+  //         userID,
+  //         sucursalId,
+  //       );
+
+  //       const existing = await tx.compra.findFirst({
+  //         where: {
+  //           pedido: {
+  //             id: pedidoId,
+  //           },
+  //         },
+  //         include: { detalles: true },
+  //       });
+  //       if (existing) {
+  //         throw new BadRequestException(
+  //           'El pedido ya tiene una compra asignada',
+  //         );
+  //       }
+
+  //       const pedido = await tx.pedido.findUnique({
+  //         where: {
+  //           id: pedidoId,
+  //         },
+  //         select: {
+  //           id: true,
+  //           sucursalId: true,
+  //           lineas: {
+  //             select: {
+  //               id: true,
+  //               cantidad: true,
+  //               precioUnitario: true,
+  //               productoId: true,
+  //               producto: true,
+  //             },
+  //           },
+  //         },
+  //       });
+
+  //       if (!pedido) throw new NotFoundException('Pedido no encontrado');
+
+  //       if (pedido.lineas.length <= 0)
+  //         throw new InternalServerErrorException(
+  //           'El pedido tiene lineas vacías',
+  //         );
+
+  //       const detallesToCompra = pedido.lineas.map((ln) => ({
+  //         id: ln.id,
+  //         cantidad: ln.cantidad,
+  //         costoUnitario: ln.precioUnitario,
+  //         productoId: ln.productoId,
+  //       }));
+
+  //       const compra = await tx.compra.create({
+  //         data: {
+  //           fecha: dayjs().tz(TZGT).toDate(),
+  //           total: 0,
+  //           usuario: {
+  //             connect: {
+  //               id: userID,
+  //             },
+  //           },
+  //           sucursal: sucursalId
+  //             ? {
+  //                 connect: {
+  //                   id: sucursalId,
+  //                 },
+  //               }
+  //             : {
+  //                 connect: {
+  //                   id: pedido.sucursalId,
+  //                 },
+  //               },
+
+  //           pedido: {
+  //             connect: {
+  //               id: pedido.id,
+  //             },
+  //           },
+  //           proveedor: { connect: { id: proveedorId } },
+  //         },
+  //       });
+
+  //       for (const linea of detallesToCompra) {
+  //         await tx.compraDetalle.create({
+  //           data: {
+  //             cantidad: linea.cantidad,
+  //             costoUnitario: linea.costoUnitario,
+  //             producto: {
+  //               connect: {
+  //                 id: linea.productoId,
+  //               },
+  //             },
+  //             compra: {
+  //               connect: {
+  //                 id: compra.id,
+  //               },
+  //             },
+  //           },
+  //         });
+  //       }
+
+  //       const detallesCompra = await tx.compraDetalle.findMany({
+  //         where: {
+  //           compraId: compra.id,
+  //         },
+  //         select: {
+  //           costoUnitario: true,
+  //           cantidad: true,
+  //         },
+  //       });
+
+  //       const totalCompra = detallesCompra.reduce(
+  //         (acc, prod) => acc + prod.cantidad * prod.costoUnitario,
+  //         0,
+  //       );
+
+  //       //actualizar registro de compra
+  //       await tx.compra.update({
+  //         where: {
+  //           id: compra.id,
+  //         },
+  //         data: {
+  //           total: totalCompra,
+  //           origen: 'PEDIDO',
+  //         },
+  //       });
+
+  //       await tx.pedido.update({
+  //         where: {
+  //           id: pedido.id,
+  //         },
+  //         data: {
+  //           estado: 'ENVIADO_COMPRAS',
+  //         },
+  //       });
+
+  //       return tx.compra.findUnique({
+  //         where: { id: compra.id },
+  //         include: {
+  //           detalles: { include: { producto: true, requisicionLinea: true } },
+  //           proveedor: true,
+  //           sucursal: true,
+  //         },
+  //       });
+  //     });
+  //   } catch (error) {
+  //     this.logger.debug('El error generado es: ', error);
+  //     if (error instanceof HttpException) throw error;
+  //     throw new InternalServerErrorException(
+  //       'Fatal error: Error inesperado en enviar pedidos a compras',
+  //     );
+  //   }
+  // }
+
   async sendPedidoToCompras(dto: ReceivePedidoComprasDto) {
     try {
       return await this.prisma.$transaction(async (tx) => {
         const { pedidoId, proveedorId, userID, sucursalId } = dto;
-        console.log(
-          'La data llegnado es: ',
-          pedidoId,
-          proveedorId,
-          userID,
-          sucursalId,
-        );
 
+        // 0) Evitar compras duplicadas
         const existing = await tx.compra.findFirst({
-          where: {
-            pedido: {
-              id: pedidoId,
-            },
-          },
+          where: { pedido: { id: pedidoId } },
           include: { detalles: true },
         });
-        if (existing) {
+        if (existing)
           throw new BadRequestException(
             'El pedido ya tiene una compra asignada',
           );
-        }
 
+        // 1) Traer líneas con presentacionId
         const pedido = await tx.pedido.findUnique({
-          where: {
-            id: pedidoId,
-          },
+          where: { id: pedidoId },
           select: {
             id: true,
             sucursalId: true,
@@ -374,114 +523,103 @@ export class PedidosService {
                 cantidad: true,
                 precioUnitario: true,
                 productoId: true,
-                producto: true,
+                presentacionId: true, // 👈 necesario
+                presentacion: { select: { id: true, productoId: true } }, // sanity check
               },
             },
           },
         });
-
         if (!pedido) throw new NotFoundException('Pedido no encontrado');
-
-        if (pedido.lineas.length <= 0)
+        if (pedido.lineas.length === 0) {
           throw new InternalServerErrorException(
             'El pedido tiene lineas vacías',
           );
+        }
 
-        const detallesToCompra = pedido.lineas.map((ln) => ({
-          id: ln.id,
-          cantidad: ln.cantidad,
-          costoUnitario: ln.precioUnitario,
-          productoId: ln.productoId,
-        }));
+        // 2) Mapear detalles, copiando presentacionId
+        const detallesToCompra = pedido.lineas.map((ln) => {
+          // sanity: si trae presentación, debe pertenecer al mismo producto
+          if (
+            ln.presentacionId &&
+            ln.presentacion?.productoId !== ln.productoId
+          ) {
+            throw new BadRequestException(
+              `La presentación ${ln.presentacionId} no pertenece al producto ${ln.productoId} (pedidoLinea ${ln.id}).`,
+            );
+          }
+          return {
+            id: ln.id,
+            cantidad: ln.cantidad,
+            costoUnitario: ln.precioUnitario,
+            productoId: ln.productoId,
+            presentacionId: ln.presentacionId ?? null, // 👈 COPIAMOS
+          };
+        });
 
+        // Log de control
+        const baseCount = detallesToCompra.filter(
+          (d) => !d.presentacionId,
+        ).length;
+        const presCount = detallesToCompra.length - baseCount;
+        this.logger.debug(
+          `[PED→COMPRA] base:${baseCount} pres:${presCount} (pedido #${pedidoId})`,
+        );
+
+        // 3) Crear cabecera de compra
         const compra = await tx.compra.create({
           data: {
             fecha: dayjs().tz(TZGT).toDate(),
             total: 0,
-            usuario: {
-              connect: {
-                id: userID,
-              },
-            },
-            sucursal: sucursalId
-              ? {
-                  connect: {
-                    id: sucursalId,
-                  },
-                }
-              : {
-                  connect: {
-                    id: pedido.sucursalId,
-                  },
-                },
-
-            pedido: {
-              connect: {
-                id: pedido.id,
-              },
-            },
+            usuario: { connect: { id: userID } },
+            sucursal: { connect: { id: sucursalId ?? pedido.sucursalId } },
+            pedido: { connect: { id: pedido.id } },
             proveedor: { connect: { id: proveedorId } },
+            origen: 'PEDIDO', // opcional, pero claro
+            estado: 'ESPERANDO_ENTREGA',
           },
         });
 
+        // 4) Crear detalles (con presentacionId cuando exista)
         for (const linea of detallesToCompra) {
           await tx.compraDetalle.create({
             data: {
               cantidad: linea.cantidad,
               costoUnitario: linea.costoUnitario,
-              producto: {
-                connect: {
-                  id: linea.productoId,
-                },
-              },
-              compra: {
-                connect: {
-                  id: compra.id,
-                },
-              },
+              producto: { connect: { id: linea.productoId } },
+              ...(linea.presentacionId
+                ? { presentacion: { connect: { id: linea.presentacionId } } }
+                : {}),
+              compra: { connect: { id: compra.id } },
             },
           });
         }
 
+        // 5) Recalcular total
         const detallesCompra = await tx.compraDetalle.findMany({
-          where: {
-            compraId: compra.id,
-          },
-          select: {
-            costoUnitario: true,
-            cantidad: true,
-          },
+          where: { compraId: compra.id },
+          select: { cantidad: true, costoUnitario: true },
         });
-
         const totalCompra = detallesCompra.reduce(
-          (acc, prod) => acc + prod.cantidad * prod.costoUnitario,
+          (acc, it) => acc + it.cantidad * it.costoUnitario,
           0,
         );
 
-        //actualizar registro de compra
         await tx.compra.update({
-          where: {
-            id: compra.id,
-          },
-          data: {
-            total: totalCompra,
-            origen: 'PEDIDO',
-          },
+          where: { id: compra.id },
+          data: { total: totalCompra },
         });
 
+        // 6) Marcar pedido
         await tx.pedido.update({
-          where: {
-            id: pedido.id,
-          },
-          data: {
-            estado: 'ENVIADO_COMPRAS',
-          },
+          where: { id: pedido.id },
+          data: { estado: 'ENVIADO_COMPRAS' },
         });
 
+        // 7) Respuesta
         return tx.compra.findUnique({
           where: { id: compra.id },
           include: {
-            detalles: { include: { producto: true, requisicionLinea: true } },
+            detalles: { include: { producto: true, presentacion: true } }, // 👈 útil para revisar
             proveedor: true,
             sucursal: true,
           },
