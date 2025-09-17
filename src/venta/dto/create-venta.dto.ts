@@ -54,6 +54,7 @@ export class CreateVentaDto {
     productoId: number;
     cantidad: number;
     selectedPriceId: number;
+    presentacionId: number | null;
   }>;
 
   @IsEnum(MetodoPago)

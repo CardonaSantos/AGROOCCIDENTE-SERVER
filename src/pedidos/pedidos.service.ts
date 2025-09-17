@@ -21,6 +21,7 @@ import { GetProductosToPedidosQuery } from './Querys/get-pedidos-query.dto';
 import { UpdatePedidoDto } from './dto/update-pedidos.dto';
 import { ReceivePedidoComprasDto } from './dto/sendPedidoToCompras';
 import { text } from 'stream/consumers';
+import { TipoLinea } from './dto/create-pedido-linea';
 dayjs.extend(utc);
 dayjs.extend(timezone);
 dayjs.extend(isSameOrBefore);
@@ -48,10 +49,51 @@ export class PedidosService {
 
   constructor(private readonly prisma: PrismaService) {}
 
+  /** Actualiza costo de una presentación si trae flag y precio válido (>0) */
+  private async actualizarPrecioPresentacion(
+    tx: Prisma.TransactionClient,
+    precioNuevo: number | null | undefined,
+    presentacionID: number | null | undefined,
+    actualizarCosto: boolean | null | undefined,
+  ) {
+    if (!actualizarCosto || !presentacionID || !precioNuevo || precioNuevo <= 0)
+      return;
+
+    await tx.productoPresentacion.update({
+      where: { id: presentacionID },
+      data: { costoReferencialPresentacion: precioNuevo },
+    });
+
+    this.logger.log(
+      `Presentación ${presentacionID} costo actualizado a: ${precioNuevo}`,
+    );
+  }
+
+  /** Actualiza costo de un producto si trae flag y precio válido (>0) */
+  private async actualizarPrecioProducto(
+    tx: Prisma.TransactionClient,
+    precioNuevo: number | null | undefined,
+    productoID: number | null | undefined,
+    actualizarCosto: boolean | null | undefined,
+  ) {
+    if (!actualizarCosto || !productoID || !precioNuevo || precioNuevo <= 0)
+      return;
+
+    await tx.producto.update({
+      where: { id: productoID },
+      data: { precioCostoActual: precioNuevo },
+    });
+
+    this.logger.log(
+      `Producto ${productoID} costo actualizado a: ${precioNuevo}`,
+    );
+  }
+
   /**
-   *
-   * @param dto Props para crear un pedido estandar
-   * @returns
+   * Crea un pedido con sus líneas.
+   * - Usa precio efectivo = (dto.precioUnitario ?? precioBD).
+   * - Si viene actualizarCosto=true, actualiza costo maestro (producto/presentación).
+   * - Calcula subtotal en backend.
    */
   async createPedidoMain(dto: CreatePedidoDto) {
     try {
@@ -65,31 +107,64 @@ export class PedidosService {
         tipo,
       } = dto;
 
+      this.logger.log('El dto entrando JSON es: ', JSON.stringify(dto));
+      this.logger.log('El dto entrando JSON es: ', JSON.stringify(lineas));
+
       if (!lineas?.length) {
         throw new BadRequestException('Debe incluir al menos una línea.');
       }
 
       return await this.prisma.$transaction(async (tx) => {
+        // 1) Header del pedido
         const pedidoHead = await tx.pedido.create({
           data: {
-            folio: '', // temporal: se actualiza luego con el ID
+            folio: '',
             estado: 'PENDIENTE',
             observaciones: observaciones ?? null,
             cliente: clienteId ? { connect: { id: clienteId } } : {},
             sucursal: { connect: { id: sucursalId } },
             usuario: { connect: { id: usuarioId } },
-            prioridad: prioridad,
-            tipo: tipo,
+            prioridad,
+            tipo,
           },
           select: { id: true },
         });
 
-        const productIds = Array.from(new Set(lineas.map((l) => l.productoId)));
-        const productos = await tx.producto.findMany({
-          where: { id: { in: productIds } },
-          select: { id: true, precioCostoActual: true },
-        });
+        //Separar líneas por tipo
+        const lineasProductos = lineas.filter(
+          (l) => l.tipo === TipoLinea.PRODUCTO,
+        );
+        const lineasPresentaciones = lineas.filter(
+          (l) => l.tipo === TipoLinea.PRESENTACION,
+        );
 
+        //  IDs únicos para fetch
+        const productIds = Array.from(
+          new Set(lineasProductos.map((l) => l.productoId!).filter(Boolean)),
+        );
+        const presentacionesIds = Array.from(
+          new Set(
+            lineasPresentaciones.map((l) => l.presentacionId!).filter(Boolean),
+          ),
+        );
+
+        // Fetch precios actuales (BD)
+        const [productos, presentaciones] = await Promise.all([
+          productIds.length
+            ? tx.producto.findMany({
+                where: { id: { in: productIds } },
+                select: { id: true, precioCostoActual: true },
+              })
+            : Promise.resolve([]),
+          presentacionesIds.length
+            ? tx.productoPresentacion.findMany({
+                where: { id: { in: presentacionesIds } }, // 👈 corregido (antes usaba productIds)
+                select: { id: true, costoReferencialPresentacion: true },
+              })
+            : Promise.resolve([]),
+        ]);
+
+        // Sanity check existencia
         if (productos.length !== productIds.length) {
           const found = new Set(productos.map((p) => p.id));
           const missing = productIds.filter((id) => !found.has(id));
@@ -97,45 +172,114 @@ export class PedidosService {
             `Productos no encontrados: ${missing.join(', ')}`,
           );
         }
+        if (presentaciones.length !== presentacionesIds.length) {
+          const found = new Set(presentaciones.map((p) => p.id));
+          const missing = presentacionesIds.filter((id) => !found.has(id));
+          throw new BadRequestException(
+            `Presentaciones no encontradas: ${missing.join(', ')}`,
+          );
+        }
 
-        const priceByProduct = new Map(
+        // Mapas clave->precio BD
+        const priceByProduct = new Map<number, number>(
           productos.map((p) => [p.id, p.precioCostoActual]),
         );
+        const priceByPresentacion = new Map<number, number>(
+          presentaciones.map((pp) => [pp.id, pp.costoReferencialPresentacion]),
+        );
 
-        const linesData = lineas.map((l) => {
-          const pu = priceByProduct.get(l.productoId);
-          if (pu == null) {
+        //Actualizaciones de costos (si vienen flags)
+        await Promise.all([
+          ...lineasPresentaciones.map((lp) =>
+            this.actualizarPrecioPresentacion(
+              tx,
+              lp.precioCostoActual ?? lp.precioUnitario, // preferimos costoActual que mandas; si no, el unitario
+              lp.presentacionId,
+              lp.actualizarCosto,
+            ),
+          ),
+          // Productos
+          ...lineasProductos.map((lp) =>
+            this.actualizarPrecioProducto(
+              tx,
+              lp.precioCostoActual ?? lp.precioUnitario, // idem
+              lp.productoId,
+              lp.actualizarCosto,
+            ),
+          ),
+        ]);
+
+        // Construcción de líneas a insertar — PRODUCTOS
+        const linesProductosData = lineasProductos.map((l) => {
+          // precio efectivo = override (dto) o BD
+          const precioBD = priceByProduct.get(l.productoId!);
+          const unit = l.precioUnitario ?? precioBD;
+
+          if (unit == null) {
             throw new BadRequestException(
-              `Producto ${l.productoId} no tiene precioCostoActual definido.`,
+              `Producto ${l.productoId} no tiene precioUnitario válido.`,
             );
           }
-          const subtotal = pu * l.cantidad;
+          const subtotal = unit * l.cantidad;
+
           return {
             pedidoId: pedidoHead.id,
-            productoId: l.productoId,
+            productoId: l.productoId!,
             cantidad: l.cantidad,
-            precioUnitario: pu,
+            precioUnitario: unit,
             subtotal,
             notas: l.notas ?? null,
+            fechaExpiracion: dayjs(l.fechaVencimiento).tz(TZGT).toDate(),
+            // presentacionId queda null para este tipo
           };
         });
 
-        await tx.pedidoLinea.createMany({ data: linesData });
+        // Construcción de líneas a insertar — PRESENTACIONES
+        const linesPresentacionesData = lineasPresentaciones.map((lpp) => {
+          const precioBD = priceByPresentacion.get(lpp.presentacionId!);
+          const unit = lpp.precioUnitario ?? precioBD;
 
-        const totalLineas = linesData.length;
-        const totalPedido = linesData.reduce((acc, it) => acc + it.subtotal, 0);
+          if (unit == null) {
+            throw new BadRequestException(
+              `Presentación ${lpp.presentacionId} no tiene precioUnitario válido.`,
+            );
+          }
+          const subtotal = unit * lpp.cantidad;
+
+          return {
+            pedidoId: pedidoHead.id,
+            productoId: lpp.productoId!,
+            presentacionId: lpp.presentacionId!,
+            cantidad: lpp.cantidad,
+            precioUnitario: unit,
+            subtotal,
+            notas: lpp.notas ?? null,
+            fechaExpiracion: dayjs(lpp.fechaVencimiento).tz(TZGT).toDate(),
+          };
+        });
+
+        // Inserciones en bloque (createMany no acepta "where")
+        if (linesProductosData.length) {
+          await tx.pedidoLinea.createMany({ data: linesProductosData });
+        }
+        if (linesPresentacionesData.length) {
+          await tx.pedidoLinea.createMany({ data: linesPresentacionesData });
+        }
+
+        //  Totales y folio
+        const allLines = [...linesProductosData, ...linesPresentacionesData];
+        const totalLineas = allLines.length;
+        const totalPedido = allLines.reduce((acc, it) => acc + it.subtotal, 0);
+
         const anio = dayjs().tz(TZGT).format('YYYY');
-        const folio = `PED-${anio}-${String(pedidoHead.id).padStart(4, '0')}`; // ajusta formato si prefieres con espacios
+        const folio = `PED-${anio}-${String(pedidoHead.id).padStart(4, '0')}`;
 
         await tx.pedido.update({
           where: { id: pedidoHead.id },
-          data: {
-            folio,
-            totalLineas,
-            totalPedido,
-          },
+          data: { folio, totalLineas, totalPedido },
         });
 
+        // Devuelve el pedido completo
         const created = await tx.pedido.findUnique({
           where: { id: pedidoHead.id },
           select: {
@@ -155,6 +299,7 @@ export class PedidosService {
               select: {
                 id: true,
                 productoId: true,
+                presentacionId: true,
                 cantidad: true,
                 precioUnitario: true,
                 subtotal: true,
@@ -166,6 +311,13 @@ export class PedidosService {
                     codigoProducto: true,
                     precioCostoActual: true,
                     categorias: { select: { id: true, nombre: true } },
+                  },
+                },
+                presentacion: {
+                  select: {
+                    id: true,
+                    nombre: true,
+                    costoReferencialPresentacion: true,
                   },
                 },
               },
@@ -549,6 +701,100 @@ export class PedidosService {
     }
   }
 
+  // ANTERIOR
+  // async getProductsToPedidos(query: GetProductosToPedidosQuery) {
+  //   const {
+  //     page = 1,
+  //     pageSize = 10,
+  //     nombre,
+  //     codigoProducto,
+  //     search,
+  //     codigoProveedor,
+  //   } = query;
+  //   console.log(
+  //     'Las props son: ',
+  //     page,
+  //     pageSize,
+  //     nombre,
+  //     codigoProducto,
+  //     codigoProveedor,
+  //     search,
+  //   );
+
+  //   const where: Prisma.ProductoWhereInput = search
+  //     ? {
+  //         OR: [
+  //           { nombre: { contains: search, mode: 'insensitive' } },
+  //           { codigoProducto: { contains: search, mode: 'insensitive' } },
+  //           { codigoProveedor: { contains: search, mode: 'insensitive' } },
+  //         ],
+  //       }
+  //     : {};
+
+  //   const skip = (page - 1) * pageSize;
+  //   const take = Number(pageSize);
+
+  //   const [products, totalItems] = await this.prisma.$transaction([
+  //     this.prisma.producto.findMany({
+  //       where,
+  //       skip,
+  //       take,
+  //       select: {
+  //         id: true,
+  //         nombre: true,
+  //         codigoProducto: true,
+  //         codigoProveedor: true,
+  //         descripcion: true,
+  //         precioCostoActual: true,
+  //         stock: {
+  //           select: {
+  //             cantidad: true,
+  //             sucursal: { select: { id: true, nombre: true } },
+  //           },
+  //         },
+  //       },
+  //     }),
+  //     this.prisma.producto.count({ where }),
+  //   ]);
+
+  //   const productosFormatt = products.map((p) => {
+  //     const stockPorSucursal = p.stock.reduce<Record<number, StockPorSucursal>>(
+  //       (acc, s) => {
+  //         const suc = s.sucursal;
+  //         if (!acc[suc.id]) {
+  //           acc[suc.id] = {
+  //             sucursalId: suc.id,
+  //             sucursalNombre: suc.nombre,
+  //             cantidad: 0,
+  //           };
+  //         }
+  //         acc[suc.id].cantidad += s.cantidad;
+  //         return acc;
+  //       },
+  //       {},
+  //     );
+  //     return {
+  //       id: p.id,
+  //       nombre: p.nombre,
+  //       codigoProducto: p.codigoProducto,
+  //       codigoProveedor: p.codigoProveedor,
+  //       descripcion: p.descripcion,
+  //       stockPorSucursal: Object.values(stockPorSucursal),
+  //       precioCostoActual: p.precioCostoActual,
+  //     };
+  //   });
+
+  //   const totalPages = Math.ceil(totalItems / pageSize);
+
+  //   return {
+  //     data: productosFormatt,
+  //     page,
+  //     pageSize,
+  //     totalItems,
+  //     totalPages,
+  //   };
+  // }
+
   async getProductsToPedidos(query: GetProductosToPedidosQuery) {
     const {
       page = 1,
@@ -557,16 +803,8 @@ export class PedidosService {
       codigoProducto,
       search,
       codigoProveedor,
+      sucursalId, // opcional, puedes usarlo para filtrar agregados si más adelante lo deseas
     } = query;
-    console.log(
-      'Las props son: ',
-      page,
-      pageSize,
-      nombre,
-      codigoProducto,
-      codigoProveedor,
-      search,
-    );
 
     const where: Prisma.ProductoWhereInput = search
       ? {
@@ -576,10 +814,30 @@ export class PedidosService {
             { codigoProveedor: { contains: search, mode: 'insensitive' } },
           ],
         }
-      : {};
+      : {
+          ...(nombre
+            ? { nombre: { contains: nombre, mode: 'insensitive' } }
+            : {}),
+          ...(codigoProducto
+            ? {
+                codigoProducto: {
+                  contains: codigoProducto,
+                  mode: 'insensitive',
+                },
+              }
+            : {}),
+          ...(codigoProveedor
+            ? {
+                codigoProveedor: {
+                  contains: codigoProveedor,
+                  mode: 'insensitive',
+                },
+              }
+            : {}),
+        };
 
-    const skip = (page - 1) * pageSize;
-    const take = Number(pageSize);
+    const skip = (Number(page) - 1) * Number(pageSize);
+    const take = Math.max(1, Number(pageSize));
 
     const [products, totalItems] = await this.prisma.$transaction([
       this.prisma.producto.findMany({
@@ -593,10 +851,32 @@ export class PedidosService {
           codigoProveedor: true,
           descripcion: true,
           precioCostoActual: true,
+          unidadBase: true, // 👈 NUEVO (útil en UI)
+          // Stock base (unidades base) por sucursal
           stock: {
             select: {
               cantidad: true,
               sucursal: { select: { id: true, nombre: true } },
+            },
+          },
+          // 👇 NUEVO: presentaciones + su stock por sucursal (cantidad de PRESENTACIONES)
+          presentaciones: {
+            select: {
+              id: true,
+              nombre: true,
+              factorUnidadBase: true,
+              esDefault: true,
+              activo: true,
+              sku: true,
+              codigoBarras: true,
+              tipoPresentacion: true,
+              costoReferencialPresentacion: true,
+              stockPresentaciones: {
+                select: {
+                  cantidadPresentacion: true,
+                  sucursal: { select: { id: true, nombre: true } },
+                },
+              },
             },
           },
         },
@@ -605,6 +885,7 @@ export class PedidosService {
     ]);
 
     const productosFormatt = products.map((p) => {
+      // --- Agregado de stock base por sucursal ---
       const stockPorSucursal = p.stock.reduce<Record<number, StockPorSucursal>>(
         (acc, s) => {
           const suc = s.sucursal;
@@ -620,23 +901,63 @@ export class PedidosService {
         },
         {},
       );
+
+      // --- Presentaciones + stock por sucursal (en cantidad de PRESENTACIONES) ---
+      const presentaciones = p.presentaciones.map((pr) => {
+        const agg = pr.stockPresentaciones.reduce<
+          Record<number, StockPorSucursal>
+        >((acc, sp) => {
+          const suc = sp.sucursal;
+          if (!acc[suc.id]) {
+            acc[suc.id] = {
+              sucursalId: suc.id,
+              sucursalNombre: suc.nombre,
+              cantidad: 0,
+            };
+          }
+          acc[suc.id].cantidad += sp.cantidadPresentacion;
+          return acc;
+        }, {});
+
+        return {
+          id: pr.id,
+          nombre: pr.nombre,
+          factorUnidadBase: Number(pr.factorUnidadBase), // Decimal -> number
+          esDefault: pr.esDefault,
+          activo: pr.activo,
+          sku: pr.sku ?? null,
+          codigoBarras: pr.codigoBarras ?? null,
+          tipoPresentacion: pr.tipoPresentacion,
+          costoReferencialPresentacion:
+            pr.costoReferencialPresentacion != null
+              ? Number(pr.costoReferencialPresentacion)
+              : null,
+          // stock por sucursal en PRESENTACIONES
+          stockPorSucursal: Object.values(agg),
+        };
+      });
+
       return {
         id: p.id,
         nombre: p.nombre,
         codigoProducto: p.codigoProducto,
         codigoProveedor: p.codigoProveedor,
         descripcion: p.descripcion,
+        unidadBase: p.unidadBase ?? 'unidades', // 👈 útil para UI
+        precioCostoActual: p.precioCostoActual ?? 0,
+        // stock base (unidades base) por sucursal
         stockPorSucursal: Object.values(stockPorSucursal),
-        precioCostoActual: p.precioCostoActual,
+        // 👇 NUEVO
+        presentaciones,
       };
     });
 
-    const totalPages = Math.ceil(totalItems / pageSize);
+    const totalPages = Math.ceil(totalItems / take);
 
     return {
       data: productosFormatt,
-      page,
-      pageSize,
+      page: Number(page),
+      pageSize: take,
       totalItems,
       totalPages,
     };
@@ -823,7 +1144,6 @@ export class PedidosService {
           totalPedido: true,
           creadoEn: true,
           actualizadoEn: true,
-
           cliente: {
             select: {
               id: true,
@@ -836,18 +1156,19 @@ export class PedidosService {
           },
           sucursal: { select: { id: true, nombre: true } },
           usuario: { select: { id: true, nombre: true, correo: true } },
-
           lineas: {
             select: {
               id: true,
               pedidoId: true,
               productoId: true,
+              presentacionId: true,
               cantidad: true,
               precioUnitario: true,
               subtotal: true,
               notas: true,
               creadoEn: true,
               actualizadoEn: true,
+              fechaExpiracion: true,
               producto: {
                 select: {
                   id: true,
@@ -857,10 +1178,16 @@ export class PedidosService {
                   descripcion: true,
                   precioCostoActual: true,
                   categorias: { select: { id: true, nombre: true } },
-                  imagenesProducto: {
-                    take: 1,
-                    select: { url: true },
-                  },
+                  imagenesProducto: { take: 1, select: { url: true } },
+                },
+              },
+              presentacion: {
+                select: {
+                  id: true,
+                  nombre: true,
+                  codigoBarras: true,
+                  sku: true,
+                  tipoPresentacion: true,
                 },
               },
             },
@@ -873,7 +1200,7 @@ export class PedidosService {
         throw new NotFoundException(`Pedido con id ${id} no encontrado`);
       }
 
-      // Normalizar totales
+      // Normalizar totales (por si totalPedido viene nulo)
       const totalPedido =
         pedido.totalPedido ??
         pedido.lineas.reduce(
@@ -882,6 +1209,7 @@ export class PedidosService {
           0,
         );
 
+      // Flatten de imagen principal
       return {
         ...pedido,
         totalPedido,
@@ -898,5 +1226,10 @@ export class PedidosService {
       if (error instanceof HttpException) throw error;
       throw new InternalServerErrorException('Fatal error: Error inesperado');
     }
+  }
+
+  async deleteAll() {
+    const deletePedidos = await this.prisma.pedido.deleteMany({});
+    this.logger.log(deletePedidos);
   }
 }

@@ -4,31 +4,34 @@ import { UpdateCloudinaryDto } from './dto/update-cloudinary.dto';
 import { v2 as cloudinary } from 'cloudinary';
 import { PrismaService } from 'src/prisma/prisma.service';
 
+type cloudinaryUploadResult = { url: string; public_id: string };
+
 @Injectable()
 export class CloudinaryService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async subirImagen(
-    image: string,
-  ): Promise<{ url: string; public_id: string }> {
+  async subirImagenFile(
+    file: Express.Multer.File,
+  ): Promise<cloudinaryUploadResult> {
+    if (!file.mimetype.startsWith('image/')) {
+      throw new Error(`Tipo no permitido: ${file.mimetype}`);
+    }
+
     return new Promise((resolve, reject) => {
-      cloudinary.uploader.upload(
-        image,
-        { folder: 'AGROSERVICIO-PRODUCTOS' },
+      const stream = cloudinary.uploader.upload_stream(
+        {
+          folder: 'AGROSERVICIO-PRODUCTOS',
+          resource_type: 'image',
+        },
         (error, result) => {
           if (error) return reject(error);
           if (!result?.secure_url || !result?.public_id) {
-            return reject(new Error('Cloudinary no devolvió datos válidos.'));
+            return reject(new Error('Cloudinary no devolvió datos válidos'));
           }
-
-          console.log('🖼️ Imagen subida a Cloudinary:', result);
-
-          resolve({
-            url: result.secure_url,
-            public_id: result.public_id,
-          });
+          resolve({ url: result.secure_url, public_id: result.public_id });
         },
       );
+      stream.end(file.buffer); //subir buffer directamente
     });
   }
 
@@ -64,5 +67,13 @@ export class CloudinaryService {
         resolve();
       });
     });
+
+    //     async subirImagenBase64(imageDataUri: string): Promise<CloudinaryUploadResult> {
+    //   const result = await cloudinary.uploader.upload(imageDataUri, {
+    //     folder: 'AGROSERVICIO-PRODUCTOS',
+    //     resource_type: 'image',
+    //   });
+    //   return { url: result.secure_url, public_id: result.public_id };
+    // }
   }
 }

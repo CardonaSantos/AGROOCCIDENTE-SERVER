@@ -1,45 +1,145 @@
-import { RolPrecio, TipoPrecio } from '@prisma/client';
+import { RolPrecio, TipoEmpaque } from '@prisma/client';
 import {
   IsArray,
+  IsBoolean,
+  IsEnum,
   IsInt,
-  IsNumber,
   IsOptional,
   IsString,
+  Length,
+  MaxLength,
+  Matches,
+  Min,
+  ValidateNested,
+  ArrayUnique,
 } from 'class-validator';
-//NUEVO FORMATO PARA CREAR PRODUCTO => AHORA EL PRECIO ES UN OBJ CON PRECIO, ORDEN, ROL
-export class CreateNewProductDto {
-  @IsString()
-  nombre: string; // Nombre del producto
+import { Type } from 'class-transformer';
 
-  @IsString()
-  codigoProducto: string; // Código único del producto
+// Ajusta la escala a lo que uses en Prisma (@db.Decimal(18,6) por ejemplo)
+const DECIMAL_RE = /^\d+(\.\d{1,6})?$/;
 
-  @IsString()
-  codigoProveedor?: string;
+// --------- Sub-DTOs ---------
 
-  @IsString()
-  descripcion: string; // Código único del producto
-
-  @IsNumber()
-  precioVenta: precioProducto[]; // Precio de venta del producto
-  @IsNumber()
-  creadoPorId: number;
-  @IsArray()
-  @IsOptional()
-  categorias?: number[]; // IDs de categorías asociadas (opcional)
-
-  @IsNumber()
-  precioCostoActual: number;
+export class PrecioProductoDto {
+  @IsEnum(RolPrecio)
+  rol: RolPrecio;
 
   @IsInt()
-  stockMinimo: number;
+  @Min(1)
+  orden: number;
 
-  @IsArray()
-  imagenes: string[];
+  // string decimal positivo (evita float JS)
+  @IsString()
+  @Matches(DECIMAL_RE, { message: 'precio debe ser decimal positivo' })
+  precio: string;
 }
 
-class precioProducto {
+export class PrecioPresentacionDto {
+  @IsEnum(RolPrecio)
   rol: RolPrecio;
+
+  @IsInt()
+  @Min(1)
   orden: number;
-  precio: number;
+
+  @IsString()
+  @Matches(DECIMAL_RE, { message: 'precio debe ser decimal positivo' })
+  precio: string;
+}
+
+export class PresentacionCreateDto {
+  // 👇 OJO: al crear producto, no existe aún productoId → no lo incluyas aquí
+  @IsString()
+  @Length(1, 80)
+  nombre: string;
+
+  @IsString()
+  @Matches(DECIMAL_RE, {
+    message: 'factorUnidadBase debe ser decimal positivo',
+  })
+  factorUnidadBase: string; // "1000", "0.5", etc.
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  sku?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  codigoBarras?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  esDefault?: boolean;
+
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => PrecioPresentacionDto)
+  preciosPresentacion: PrecioPresentacionDto[];
+
+  @IsEnum(TipoEmpaque)
+  tipoPresentacion: TipoEmpaque;
+
+  @IsString()
+  costoReferencialPresentacion: string;
+}
+
+// --------- DTO principal ---------
+
+export class CreateNewProductDto {
+  @IsString()
+  @Length(1, 255)
+  nombre: string;
+
+  @IsString()
+  @Length(1, 100)
+  codigoProducto: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  codigoProveedor?: string | null;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
+  descripcion?: string | null;
+
+  // ✔ precios a nivel producto
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => PrecioProductoDto)
+  precioVenta: PrecioProductoDto[];
+
+  @IsInt()
+  creadoPorId: number;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayUnique()
+  @IsInt({ each: true })
+  categorias?: number[];
+
+  // ✔ string decimal o null
+  @IsOptional()
+  @IsString()
+  @Matches(DECIMAL_RE, {
+    message: 'precioCostoActual debe ser decimal positivo',
+  })
+  precioCostoActual?: string | null;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  stockMinimo?: number | null;
+
+  // ❌ No incluimos imágenes aquí; van como archivos en el controller.
+
+  // ✔ varias presentaciones
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => PresentacionCreateDto)
+  presentaciones?: PresentacionCreateDto[];
 }

@@ -13,10 +13,16 @@ import { PrismaService } from 'src/prisma/prisma.service';
 import { CreateNewProductDto } from './dto/create-productNew.dto';
 import { MinimunStockAlertService } from 'src/minimun-stock-alert/minimun-stock-alert.service';
 import { CloudinaryService } from 'src/cloudinary/cloudinary.service';
-import { ImagenProducto, Prisma } from '@prisma/client';
+import { ImagenProducto, Prisma, RolPrecio } from '@prisma/client';
 
 import { createReadStream } from 'fs';
 import * as csvParser from 'csv-parser';
+import { PresentacionProductoService } from 'src/presentacion-producto/presentacion-producto.service';
+import { ProductoApi } from './dto/interfacesPromise';
+
+const toDecimal = (value: string | number) => {
+  return new Prisma.Decimal(value);
+};
 
 @Injectable()
 export class ProductsService {
@@ -26,22 +32,36 @@ export class ProductsService {
 
     private readonly minimunStockAlert: MinimunStockAlertService,
     private readonly cloudinaryService: CloudinaryService,
+    private readonly presentacionPrducto: PresentacionProductoService,
   ) {}
-  async create(dto: CreateNewProductDto) {
+  //AJUSTAR CREACION DE IMAGENES
+  async create(dto: CreateNewProductDto, imagenes: Express.Multer.File[]) {
     try {
-      console.log('ESTO ES UNA PETICION PARA CREAR UN SOLO PRODUCTO');
-      console.log('llegando al server:', dto);
+      // const { presentacion } = dto;
+      const {
+        codigoProducto,
+        creadoPorId,
+        nombre,
+        precioVenta,
+        categorias,
+        codigoProveedor,
+        descripcion,
+        precioCostoActual,
+        presentaciones,
+        stockMinimo,
+      } = dto;
+      this.logger.log('Data para crear un producto:', JSON.stringify(dto));
 
       return await this.prisma.$transaction(async (tx) => {
         const newProduct = await tx.producto.create({
           data: {
-            precioCostoActual: dto.precioCostoActual,
-            codigoProducto: dto.codigoProducto,
-            codigoProveedor: dto.codigoProveedor,
-            nombre: dto.nombre,
-            descripcion: dto.descripcion,
+            precioCostoActual: parseInt(precioCostoActual),
+            codigoProducto: codigoProducto,
+            codigoProveedor: codigoProveedor,
+            nombre: nombre,
+            descripcion: descripcion,
             categorias: {
-              connect: dto.categorias?.map((id) => ({ id })) ?? [],
+              connect: categorias?.map((id) => ({ id })) ?? [],
             },
           },
         });
@@ -78,18 +98,18 @@ export class ProductsService {
           this.logger.debug('Lumbra de stock minimo creado');
         }
 
-        if (!dto.imagenes?.length) {
+        if (!imagenes?.length) {
           this.logger.debug('No hay imágenes para subir o crear');
         } else {
-          const promesas = dto.imagenes.map((base64) =>
-            this.cloudinaryService.subirImagen(base64),
+          const promesas = imagenes.map((bufferImagen) =>
+            this.cloudinaryService.subirImagenFile(bufferImagen),
           );
 
           const resultados = await Promise.allSettled(promesas);
 
           for (let idx = 0; idx < resultados.length; idx++) {
             const res = resultados[idx];
-            const imagenBase64 = dto.imagenes[idx];
+            const imagenBuffer = imagenes[idx];
             if (res.status === 'fulfilled') {
               const { url, public_id } = res.value;
               console.log(`OK: Imagen ${idx} subida → ${url}`);
@@ -101,12 +121,51 @@ export class ProductsService {
               );
             } else {
               this.logger.error(
-                `Error subiendo imagen [${idx}] (${imagenBase64}):`,
+                `Error subiendo imagen [${idx}] (${imagenBuffer}):`,
                 res.reason,
               );
             }
           }
         }
+
+        const presentacionesValidas = presentaciones.every((p) => {
+          if (typeof p.codigoBarras !== 'string' || p.codigoBarras === '')
+            return false;
+          if (typeof p.esDefault !== 'boolean') return false;
+          if (
+            typeof p.factorUnidadBase !== 'string' ||
+            parseInt(p.factorUnidadBase) <= 0
+          )
+            return false;
+          if (typeof p.nombre !== 'string' || p.nombre === '') return false;
+          if (typeof p.sku !== 'string' || p.sku === '') return false;
+
+          const preciosValidos = p.preciosPresentacion.every((precio) => {
+            if (precio.orden <= 0) return false;
+            if (toDecimal(precio.precio).lte(0)) return false;
+            const RolesPrecios = Object.values(RolPrecio) as RolPrecio[];
+            if (!RolesPrecios.includes(precio.rol)) return false;
+
+            return true;
+          });
+
+          if (!preciosValidos) return false;
+
+          return true;
+        });
+
+        if (!presentacionesValidas) {
+          throw new BadRequestException(
+            'Alguna presentación tiene un formato no válido',
+          );
+        }
+
+        await this.presentacionPrducto.create(
+          tx,
+          presentaciones,
+          newProduct.id,
+        );
+
         return { newProduct, preciosCreados };
       });
     } catch (error) {
@@ -153,9 +212,7 @@ export class ProductsService {
           },
           stock: {
             where: {
-              cantidad: {
-                gt: 0,
-              },
+              cantidad: { gt: 0 },
               sucursalId: id,
             },
             select: {
@@ -163,6 +220,29 @@ export class ProductsService {
               cantidad: true,
               fechaIngreso: true,
               fechaVencimiento: true,
+            },
+          },
+          presentaciones: {
+            include: {
+              stockPresentaciones: {
+                where: {
+                  cantidadPresentacion: { gt: 0 },
+                  sucursalId: id,
+                },
+                select: {
+                  id: true,
+                  cantidadPresentacion: true,
+                  fechaIngreso: true,
+                  fechaVencimiento: true,
+                },
+              },
+              precios: {
+                select: {
+                  id: true,
+                  precio: true,
+                  rol: true,
+                },
+              },
             },
           },
         },
@@ -183,18 +263,36 @@ export class ProductsService {
         })),
         precios: prod.precios.map((p) => ({
           id: p.id,
-          precio: p.precio, // now a number
-          rol: p.rol, // matches interface
+          precio: p.precio,
+          rol: p.rol,
         })),
         imagenesProducto: prod.imagenesProducto.map((img) => ({
           id: img.id,
           url: img.url,
         })),
+        presentaciones: prod.presentaciones.map((pres) => ({
+          id: pres.id,
+          nombre: pres.nombre,
+          sku: pres.sku,
+          codigoBarras: pres.codigoBarras,
+          tipoPresentacion: pres.tipoPresentacion,
+          precios: pres.precios.map((pp) => ({
+            id: pp.id,
+            precio: pp.precio,
+            rol: pp.rol,
+          })),
+          stockPresentaciones: pres.stockPresentaciones.map((s) => ({
+            id: s.id,
+            cantidadPresentacion: s.cantidadPresentacion,
+            fechaIngreso: s.fechaIngreso,
+            fechaVencimiento: s.fechaVencimiento,
+          })),
+        })),
       }));
 
       return formattedProducts;
     } catch (error) {
-      this.logger.error('Error en findAll productos:', error); // Proporcionar más contexto en el error
+      this.logger.error('Error en findAll productos:', error);
       throw new InternalServerErrorException('Error al obtener los productos');
     }
   }
@@ -505,28 +603,28 @@ export class ProductsService {
         }
 
         // 2.5) Subida y vinculación de imágenes
-        if (updateProductDto.imagenes?.length) {
-          const promesas = updateProductDto.imagenes.map((base64) =>
-            this.cloudinaryService.subirImagen(base64),
-          );
-          const resultados = await Promise.allSettled(promesas);
+        // if (updateProductDto.imagenes?.length) {
+        //   const promesas = updateProductDto.imagenes.map((base64) =>
+        //     this.cloudinaryService.subirImagenFile(base64),
+        //   );
+        //   const resultados = await Promise.allSettled(promesas);
 
-          for (let idx = 0; idx < resultados.length; idx++) {
-            const res = resultados[idx];
-            if (res.status === 'fulfilled') {
-              const { url, public_id } = res.value;
-              // Usamos tx para la vinculación
-              await this.vincularProductoImagen(
-                tx,
-                productoUpdate.id,
-                url,
-                public_id,
-              );
-            } else {
-              console.error(`Error subiendo imagen [${idx}]:`, res.reason);
-            }
-          }
-        }
+        //   for (let idx = 0; idx < resultados.length; idx++) {
+        //     const res = resultados[idx];
+        //     if (res.status === 'fulfilled') {
+        //       const { url, public_id } = res.value;
+        //       // Usamos tx para la vinculación
+        //       await this.vincularProductoImagen(
+        //         tx,
+        //         productoUpdate.id,
+        //         url,
+        //         public_id,
+        //       );
+        //     } else {
+        //       console.error(`Error subiendo imagen [${idx}]:`, res.reason);
+        //     }
+        //   }
+        // }
 
         return productoUpdate;
       });
@@ -635,6 +733,129 @@ export class ProductsService {
       console.log(error);
       throw new BadRequestException(
         'Error al conseguir datos de los productos',
+      );
+    }
+  }
+
+  async getBySearchProducts(
+    q: string,
+    sucursalId: string,
+  ): Promise<ProductoApi[]> {
+    try {
+      let where: Prisma.ProductoWhereInput = {};
+
+      if (q) {
+        where.OR = [
+          { nombre: { contains: q.trim().toLowerCase(), mode: 'insensitive' } },
+          {
+            descripcion: {
+              contains: q.trim().toLowerCase(),
+              mode: 'insensitive',
+            },
+          },
+          {
+            codigoProducto: {
+              contains: q.trim().toLowerCase(),
+              mode: 'insensitive',
+            },
+          },
+          {
+            codigoProveedor: {
+              contains: q.trim().toLowerCase(),
+              mode: 'insensitive',
+            },
+          },
+        ];
+      }
+
+      if (sucursalId) {
+        where = {
+          ...where,
+        };
+      }
+
+      const productsFind = await this.prisma.producto.findMany({
+        where,
+        select: {
+          id: true,
+          nombre: true,
+          descripcion: true,
+          codigoProducto: true,
+          precios: {
+            orderBy: { orden: 'desc' },
+            select: { id: true, precio: true, rol: true },
+          },
+          stock: {
+            where: { sucursalId: parseInt(sucursalId), cantidad: { gt: 0 } },
+            select: { id: true, cantidad: true },
+          },
+          imagenesProducto: { select: { id: true, url: true } },
+          presentaciones: {
+            select: {
+              id: true,
+              nombre: true,
+              codigoBarras: true,
+              tipoPresentacion: true,
+              sku: true,
+              stockPresentaciones: {
+                where: {
+                  sucursalId: parseInt(sucursalId),
+                  cantidadPresentacion: { gt: 0 },
+                },
+                select: { id: true, cantidadPresentacion: true },
+              },
+              precios: {
+                orderBy: { orden: 'desc' },
+                select: { id: true, precio: true, rol: true },
+              },
+            },
+          },
+        },
+      });
+
+      // === Map Prisma → ProductoApi ===
+      const productos: ProductoApi[] = productsFind.map((p) => ({
+        id: p.id,
+        nombre: p.nombre,
+        descripcion: p.descripcion,
+        codigoProducto: p.codigoProducto,
+        precios: p.precios.map((pr) => ({
+          id: pr.id,
+          precio: pr.precio.toString(),
+          rol: pr.rol,
+        })),
+        stock: p.stock.map((s) => ({
+          id: s.id,
+          cantidad: s.cantidad,
+        })),
+        imagenesProducto: p.imagenesProducto?.map((img) => ({
+          id: img.id,
+          url: img.url,
+        })),
+        presentaciones: p.presentaciones.map((pres) => ({
+          id: pres.id,
+          nombre: pres.nombre,
+          sku: pres.sku,
+          codigoBarras: pres.codigoBarras,
+          tipoPresentacion: pres.tipoPresentacion,
+          precios: pres.precios.map((pr) => ({
+            id: pr.id,
+            precio: pr.precio.toString(),
+            rol: pr.rol,
+          })),
+          stockPresentaciones: pres.stockPresentaciones.map((sp) => ({
+            id: sp.id,
+            cantidad: sp.cantidadPresentacion,
+          })),
+        })),
+      }));
+
+      return productos;
+    } catch (error) {
+      this.logger.error('Error generado en search productos: ', error);
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException(
+        'Error inesperado al buscar productos',
       );
     }
   }

@@ -30,7 +30,11 @@ export class CategoriaService {
   async findAll() {
     try {
       const categorias = await this.prisma.categoria.findMany({});
-      return categorias;
+
+      return categorias.map((c) => ({
+        id: c.id,
+        nombre: c.nombre,
+      }));
     } catch (error) {
       console.error(error);
       throw new InternalServerErrorException('Error al obtener las categorias');

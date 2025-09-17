@@ -10,6 +10,7 @@ import {
   Min,
   MaxLength,
   ValidateNested,
+  IsBoolean,
 } from 'class-validator';
 import { Type, Transform } from 'class-transformer';
 
@@ -20,7 +21,10 @@ export enum PedidoEstado {
   RECIBIDO = 'RECIBIDO',
   CANCELADO = 'CANCELADO',
 }
-
+export enum TipoLinea {
+  PRESENTACION = 'PRESENTACION',
+  PRODUCTO = 'PRODUCTO',
+}
 /**
  * DTO para una línea del pedido
  * - `subtotal` no se recibe: lo calcula el backend (cantidad × precioUnitario)
@@ -29,7 +33,12 @@ export class CreatePedidoLineaDto {
   @IsInt()
   @Type(() => Number)
   @Min(1, { message: 'productoId inválido' })
-  productoId!: number;
+  productoId?: number;
+
+  @IsInt()
+  @Type(() => Number)
+  @Min(1, { message: 'presentacion ID inválido' })
+  presentacionId?: number;
 
   @IsInt()
   @Type(() => Number)
@@ -46,4 +55,15 @@ export class CreatePedidoLineaDto {
   @MaxLength(300)
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   notas?: string;
+  //decidir si actualizar producto precio
+  @IsBoolean()
+  actualizarCosto: boolean;
+
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  precioCostoActual: number;
+
+  @IsEnum(TipoLinea)
+  tipo: TipoLinea;
+  @IsString()
+  fechaVencimiento: string;
 }

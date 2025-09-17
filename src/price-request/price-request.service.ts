@@ -123,7 +123,7 @@ export class PriceRequestService {
           tipo: 'CREADO_POR_SOLICITUD', // Enum, ¡ajusta si hace falta!
           orden: (maxOrden._max.orden || 0) + 1, // siguiente orden
           usado: false,
-          rol: 'ESPECIAL',
+          rol: 'PUBLICO',
         },
       });
 

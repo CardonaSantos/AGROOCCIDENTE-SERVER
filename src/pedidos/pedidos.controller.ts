@@ -52,6 +52,11 @@ export class PedidosController {
     return this.pedidosService.deletePedidoRegist(id);
   }
 
+  @Delete('delete-all')
+  deleteAll() {
+    return this.pedidosService.deleteAll();
+  }
+
   // GET Y UPDATE
 
   // GET /pedidos/:id

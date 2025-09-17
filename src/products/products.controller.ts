@@ -9,6 +9,11 @@ import {
   ParseIntPipe,
   UploadedFiles,
   UseInterceptors,
+  BadRequestException,
+  Logger,
+  HttpException,
+  InternalServerErrorException,
+  Query,
 } from '@nestjs/common';
 import { ProductsService } from './products.service';
 import { CreateProductDto } from './dto/create-product.dto';
@@ -16,39 +21,215 @@ import { UpdateProductDto } from './dto/update-product.dto';
 import { CreateNewProductDto } from './dto/create-productNew.dto';
 import { FileFieldsInterceptor } from '@nestjs/platform-express';
 import { join } from 'path';
+import { RolPrecio, TipoEmpaque } from '@prisma/client';
+import { plainToInstance } from 'class-transformer';
+import { validateOrReject } from 'class-validator';
+
+// ---- DTOS del payload que esperas en tu servicio ----
+interface PrecioProductoDto {
+  rol: RolPrecio;
+  orden: number;
+  precio: string; // decimal string
+}
+
+interface PrecioPresentacionDto {
+  rol: RolPrecio;
+  orden: number;
+  precio: string; // decimal string
+}
+
+interface PresentacionDto {
+  nombre: string;
+  factorUnidadBase: string; // decimal string
+  sku?: string | null;
+  codigoBarras?: string | null;
+  esDefault?: boolean;
+  preciosPresentacion: PrecioPresentacionDto[];
+  tipoPresentacion: TipoEmpaque;
+  costoReferencialPresentacion: string;
+}
+
+// -------- Helpers de parsing/validación --------
+const isDecimalStr = (s: string) => /^\d+(\.\d+)?$/.test(s);
+const cleanStr = (v: unknown) =>
+  v === undefined || v === null ? '' : String(v).trim();
+
+const toNullableInt = (v: unknown) => {
+  const s = cleanStr(v);
+  if (!s || s.toLowerCase() === 'null') return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+};
+
+const toIntOrThrow = (v: unknown, label: string) => {
+  const n = Number(v);
+  if (!Number.isInteger(n)) {
+    throw new BadRequestException(`${label} debe ser entero`);
+  }
+  return n;
+};
+
+const toBool = (v: unknown) => {
+  const s = cleanStr(v).toLowerCase();
+  return s === 'true' || s === '1' || s === 'on';
+};
+
+const toDecimalStringOrNull = (v: unknown, label: string) => {
+  const s = cleanStr(v);
+  if (!s || s.toLowerCase() === 'null') return null;
+  if (!isDecimalStr(s)) {
+    throw new BadRequestException(`${label} debe ser decimal positivo`);
+  }
+  return s;
+};
+
+const safeJsonParse = <T>(raw: unknown, fallback: T, label: string): T => {
+  const s = cleanStr(raw);
+  if (!s) return fallback;
+  try {
+    return JSON.parse(s) as T;
+  } catch {
+    throw new BadRequestException(`${label} tiene un JSON inválido`);
+  }
+};
+
+const mapPrecioProductoArray = (
+  arr: any[],
+  label: string,
+): PrecioProductoDto[] =>
+  (Array.isArray(arr) ? arr : []).map((p, i) => {
+    const idx = `${label}[${i}]`;
+    const rol = cleanStr(p?.rol) as RolPrecio;
+    const orden = toIntOrThrow(p?.orden, `${idx}.orden`);
+    const precioStr = cleanStr(p?.precio);
+    if (!isDecimalStr(precioStr)) {
+      throw new BadRequestException(`${idx}.precio debe ser decimal positivo`);
+    }
+    return { rol, orden, precio: precioStr };
+  });
+
+const mapPresentacionesArray = (arr: any[]): PresentacionDto[] =>
+  (Array.isArray(arr) ? arr : []).map((pr, i) => {
+    const idx = `presentaciones[${i}]`;
+    const nombre = cleanStr(pr?.nombre);
+    if (!nombre) throw new BadRequestException(`${idx}.nombre es requerido`);
+
+    const factor = cleanStr(pr?.factorUnidadBase);
+    if (!isDecimalStr(factor)) {
+      throw new BadRequestException(
+        `${idx}.factorUnidadBase debe ser decimal positivo`,
+      );
+    }
+
+    //precios de las presentaciones
+    const precios = mapPrecioProductoArray(
+      pr?.preciosPresentacion ?? [],
+      `${idx}.preciosPresentacion`,
+    );
+
+    // Validate tipoPresentacion
+    const tipoPresentacion = pr?.tipoPresentacion;
+    if (!tipoPresentacion) {
+      throw new BadRequestException(`${idx}.tipoPresentacion es requerido`);
+    }
+
+    // Validate costoReferencialPresentacion
+    const costoReferencialPresentacion = cleanStr(
+      pr?.costoReferencialPresentacion,
+    );
+    if (!isDecimalStr(costoReferencialPresentacion)) {
+      throw new BadRequestException(
+        `${idx}.costoReferencialPresentacion debe ser decimal positivo`,
+      );
+    }
+
+    return {
+      nombre,
+      factorUnidadBase: factor,
+      sku: cleanStr(pr?.sku) || null,
+      codigoBarras: cleanStr(pr?.codigoBarras) || null,
+      esDefault: !!pr?.esDefault, // ya viene boolean del front; si viniera string: toBool(pr?.esDefault)
+      preciosPresentacion: precios,
+      tipoPresentacion: tipoPresentacion,
+      costoReferencialPresentacion: costoReferencialPresentacion,
+    };
+  });
 
 @Controller('products')
 export class ProductsController {
+  private readonly logger = new Logger(ProductsController.name);
   constructor(private readonly productsService: ProductsService) {}
   //CREAR
 
   @Post()
-  @UseInterceptors(FileFieldsInterceptor([{ name: 'images', maxCount: 10 }]))
+  @UseInterceptors(
+    FileFieldsInterceptor([{ name: 'images', maxCount: 10 }], {
+      limits: { fileSize: 5 * 1024 * 1024 },
+    }),
+  )
   async create(
     @UploadedFiles() files: { images?: Express.Multer.File[] },
-    @Body() body: Record<string, any>, // recibimos todo en crudo
+    @Body() body: Record<string, any>,
   ) {
-    // 1) Parseamos/convertimos los campos que vienen como string
-    const dto = new CreateNewProductDto();
-    dto.nombre = body.nombre;
-    dto.descripcion = body.descripcion || null;
-    dto.codigoProducto = body.codigoProducto;
-    dto.codigoProveedor = body.codigoProveedor || null;
-    dto.stockMinimo = Number(body.stockMinimo) || null;
-    dto.precioCostoActual = Number(body.precioCostoActual);
-    // categorías y precios vienen serializados como JSON
-    dto.categorias = JSON.parse(body.categorias || '[]');
-    dto.precioVenta = JSON.parse(body.precioVenta || '[]');
-    dto.creadoPorId = Number(body.creadoPorId);
+    // ---- 1) Parsear/normalizar primitivas ----
+    this.logger.debug(
+      'RAW presentaciones:',
+      typeof body.presentaciones,
+      body.presentaciones?.slice?.(0, 200),
+    );
+    const parsed = safeJsonParse<any[]>(
+      body.presentaciones,
+      [],
+      'presentaciones',
+    );
+    this.logger.debug('Parsed p[0] keys:', Object.keys(parsed?.[0] ?? {}));
 
-    // 2) Convertimos los archivos a base64 (si tu servicio espera base64)
-    dto.imagenes = (files.images || []).map((file) => {
-      const b64 = file.buffer.toString('base64');
-      return `data:${file.mimetype};base64,${b64}`;
+    const dtoPlain: Partial<CreateNewProductDto> = {
+      nombre: cleanStr(body.nombre),
+      descripcion: cleanStr(body.descripcion) || null,
+      codigoProducto: cleanStr(body.codigoProducto),
+      codigoProveedor: cleanStr(body.codigoProveedor) || null,
+      stockMinimo: toNullableInt(body.stockMinimo),
+
+      precioCostoActual: toDecimalStringOrNull(
+        body.precioCostoActual,
+        'precioCostoActual',
+      ),
+
+      creadoPorId: toIntOrThrow(body.creadoPorId, 'creadoPorId'),
+
+      categorias: safeJsonParse<number[]>(body.categorias, [], 'categorias'),
+
+      precioVenta: mapPrecioProductoArray(
+        safeJsonParse<any[]>(body.precioVenta, [], 'precioVenta'),
+        'precioVenta',
+      ),
+
+      presentaciones: mapPresentacionesArray(
+        safeJsonParse<any[]>(body.presentaciones, [], 'presentaciones'),
+      ),
+    };
+
+    // 🔒 Validación con class-validator
+    const dto = plainToInstance(CreateNewProductDto, dtoPlain);
+    await validateOrReject(dto, {
+      whitelist: true,
+      forbidNonWhitelisted: true,
     });
 
-    // 3) Llamamos al servicio “normal” pasándole el DTO completo
-    return this.productsService.create(dto);
+    // Regla de negocio adicional: 1 sola default
+    const defaults = (dto.presentaciones ?? []).filter(
+      (p) => p.esDefault,
+    ).length;
+    if (defaults > 1) {
+      throw new BadRequestException(
+        'Solo puede haber una presentación por defecto',
+      );
+    }
+
+    const imagenes = files.images ?? [];
+
+    return this.productsService.create(dto, imagenes);
   }
 
   @Get('/sucursal/:id')
@@ -96,6 +277,22 @@ export class ProductsController {
   async makeCargaMasiva() {
     const ruta = join(process.cwd(), 'src', 'assets', 'productos_ejemplo.csv');
     // return await this.productsService.loadCSVandImportProducts(ruta);
+  }
+
+  @Get('search')
+  async getBySearchProducts(
+    @Query('q') q: string,
+    @Query('sucursalId') sucursalId: string,
+  ) {
+    try {
+      return await this.productsService.getBySearchProducts(q, sucursalId);
+    } catch (error) {
+      this.logger.error('Error generado en search productos: ', error);
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException(
+        'Error inesperado al buscar productos',
+      );
+    }
   }
 
   @Get(':id')

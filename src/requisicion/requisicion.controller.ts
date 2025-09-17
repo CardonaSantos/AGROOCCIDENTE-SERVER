@@ -9,6 +9,7 @@ import {
   ParseIntPipe,
   Query,
   Put,
+  DefaultValuePipe,
 } from '@nestjs/common';
 import { RequisicionService } from './requisicion.service';
 import { CreateRequisicionDto } from './dto/create-requisicion.dto';
@@ -19,6 +20,7 @@ import {
   StockAlertItem,
 } from './utils';
 import { UpdateRequisitionDto } from './dto/update-requisiciones.dto';
+import { RequisicionLineasDTO } from './interfaces/requiscionWithPresentaciones';
 
 @Controller('requisicion')
 export class RequisicionController {
@@ -32,6 +34,33 @@ export class RequisicionController {
     return this.requisicionService.getStockAlerts(sucursalId);
   }
 
+  /** Nuevo endpoint v2 con paginación, búsqueda y orden */
+  @Get('candidatos-requisicion')
+  async getRequisitionProductsV2(
+    @Query('sucursalId', ParseIntPipe) sucursalId: number,
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
+    @Query('pageSize', new DefaultValuePipe(10), ParseIntPipe) pageSize: number,
+    @Query('q') q?: string,
+    @Query('sortBy')
+    sortBy:
+      | 'priority'
+      | 'nombre'
+      | 'codigoProducto'
+      | 'stockTotalEq'
+      | 'stockMinimo'
+      | 'faltanteSugerido' = 'priority',
+    @Query('sortDir') sortDir: 'asc' | 'desc' = 'asc',
+  ) {
+    return this.requisicionService.getRequisitionProductsV2({
+      sucursalId,
+      page,
+      pageSize,
+      q: q?.trim() || '',
+      sortBy,
+      sortDir,
+    });
+  }
+
   @Get('requisicion-to-edit/:requisicionId')
   getRequisicionToEdit(
     @Param('requisicionId', ParseIntPipe) requisicionId: number,
@@ -41,7 +70,7 @@ export class RequisicionController {
 
   /** Paso C: crear requisición con las líneas seleccionadas */
   @Post()
-  create(@Body() dto: CreateRequisitionDto): Promise<RequisitionResponse> {
+  create(@Body() dto: RequisicionLineasDTO) {
     return this.requisicionService.createWithLines(dto);
   }
 

@@ -75,16 +75,34 @@ export class PurchaseRequisitionsService {
         withDetalles = true,
       } = q;
 
-      // ---- WHERE para detalles (solo si search aplica a productos)
+      // ---- WHERE para detalles
+      // ▶ ahora también buscamos por presentacion.nombre / sku / codigoBarras
       const detalleWhere: Prisma.CompraDetalleWhereInput = search
         ? {
             OR: [
+              // Producto
               {
                 producto: { nombre: { contains: search, mode: 'insensitive' } },
               },
               {
                 producto: {
                   codigoProducto: { contains: search, mode: 'insensitive' },
+                },
+              },
+              // Presentación
+              {
+                presentacion: {
+                  nombre: { contains: search, mode: 'insensitive' },
+                },
+              },
+              {
+                presentacion: {
+                  sku: { contains: search, mode: 'insensitive' },
+                },
+              },
+              {
+                presentacion: {
+                  codigoBarras: { contains: search, mode: 'insensitive' },
                 },
               },
             ],
@@ -145,7 +163,7 @@ export class PurchaseRequisitionsService {
                     ],
                   },
                 },
-                // Búsqueda en productos a través de detalles
+                // Búsqueda en productos/presentaciones a través de detalles
                 { detalles: { some: detalleWhere } },
               ],
             }
@@ -161,7 +179,7 @@ export class PurchaseRequisitionsService {
             ? { creadoEn: order }
             : { fecha: order }; // default
 
-      // ---- SELECT (withDetalles puede aligerar carga)
+      // ---- SELECT (withDetalles para aligerar)
       const baseSelect = {
         id: true,
         creadoEn: true,
@@ -174,13 +192,7 @@ export class PurchaseRequisitionsService {
         fecha: true,
         proveedor: { select: { id: true, nombre: true } },
         usuario: { select: { id: true, nombre: true, correo: true } },
-        pedido: {
-          select: {
-            id: true,
-            folio: true,
-          },
-        },
-
+        pedido: { select: { id: true, folio: true } },
         requisicion: {
           select: {
             id: true,
@@ -195,6 +207,7 @@ export class PurchaseRequisitionsService {
         },
       } as const;
 
+      // ▶ detallesSelect ahora incluye presentacion
       const detallesSelect = {
         detalles: {
           orderBy: { cantidad: 'desc' },
@@ -210,6 +223,17 @@ export class PurchaseRequisitionsService {
                 nombre: true,
                 codigoProducto: true,
                 precioCostoActual: true,
+              },
+            },
+            presentacion: {
+              select: {
+                id: true,
+                nombre: true,
+                sku: true,
+                codigoBarras: true,
+                tipoPresentacion: true,
+                factorUnidadBase: true, // Decimal
+                costoReferencialPresentacion: true, // Decimal?
               },
             },
           },
@@ -230,12 +254,22 @@ export class PurchaseRequisitionsService {
         }),
       ]);
 
-      // ---- Mapping seguro para UI
+      // Helper: Decimal|number|null → number
+      const toNum = (v: any, fallback = 0): number => {
+        if (v == null) return fallback;
+        if (typeof v === 'number') return v;
+        if (typeof v === 'string') return parseFloat(v);
+        // Prisma.Decimal u otros
+        return parseFloat(v.toString?.() ?? `${fallback}`);
+      };
+
+      // ---- Mapping seguro para UI (ahora con presentacion)
       const items = compras.map((c) => {
-        const folioOrigen = c.requisicion?.folio ?? c.pedido?.folio ?? null;
-        const tipoOrigen = c.requisicion
+        const folioOrigen =
+          (c as any).requisicion?.folio ?? (c as any).pedido?.folio ?? null;
+        const tipoOrigen = (c as any).requisicion
           ? 'REQUISICION'
-          : c.pedido
+          : (c as any).pedido
             ? 'PEDIDO'
             : 'DIRECTA';
 
@@ -253,12 +287,40 @@ export class PurchaseRequisitionsService {
             codigoProducto?: string;
             precioCostoActual?: number | null;
           } | null;
+          presentacion?: {
+            id: number;
+            nombre: string | null;
+            sku: string | null;
+            codigoBarras: string | null;
+            tipoPresentacion: string | null;
+            factorUnidadBase: any; // Decimal
+            costoReferencialPresentacion: any; // Decimal
+          } | null;
         }>;
 
         const detallesUI = detalles.map((d) => {
-          const costoUnitario =
-            d.costoUnitario ?? d.producto?.precioCostoActual ?? 0;
+          const costoUnitario = toNum(
+            d.costoUnitario,
+            toNum(d.producto?.precioCostoActual, 0),
+          );
           const cantidad = d.cantidad ?? 0;
+
+          // ▶ desbloqueamos datos de presentación para la UI
+          const pres = d.presentacion
+            ? {
+                id: d.presentacion.id,
+                nombre: d.presentacion.nombre ?? '',
+                sku: d.presentacion.sku ?? null,
+                codigoBarras: d.presentacion.codigoBarras ?? null,
+                tipoPresentacion: d.presentacion.tipoPresentacion ?? null,
+                factorUnidadBase: toNum(d.presentacion.factorUnidadBase, 1),
+                costoReferencialPresentacion: toNum(
+                  d.presentacion.costoReferencialPresentacion,
+                  0,
+                ),
+              }
+            : null;
+
           return {
             id: d.id,
             cantidad,
@@ -272,6 +334,7 @@ export class PurchaseRequisitionsService {
               codigo: d.producto?.codigoProducto ?? '',
               precioCostoActual: d.producto?.precioCostoActual ?? null,
             },
+            presentacion: pres, // ▶ nuevo bloque en el detalle
           };
         });
 
@@ -286,57 +349,63 @@ export class PurchaseRequisitionsService {
         );
 
         return {
-          id: c.id,
-          estado: c.estado ?? 'ESPERANDO_ENTREGA',
-          total: c.total ?? resumen.subtotal,
-          fecha: (c.fecha as any)?.toISOString?.() ?? null,
+          id: (c as any).id,
+          estado: (c as any).estado ?? 'ESPERANDO_ENTREGA',
+          total: (c as any).total ?? resumen.subtotal,
+          fecha: ((c as any).fecha as any)?.toISOString?.() ?? null,
 
-          folioOrigen, // NUEVO
-          tipoOrigen, // NUEVO
+          folioOrigen,
+          tipoOrigen,
 
-          conFactura: !!c.conFactura,
-          proveedor: c.proveedor
-            ? { id: c.proveedor.id, nombre: c.proveedor.nombre }
-            : null,
-          factura: c.conFactura
+          conFactura: !!(c as any).conFactura,
+          proveedor: (c as any).proveedor
             ? {
-                numero: c.facturaNumero ?? null,
-                fecha: (c.facturaFecha as any)?.toISOString?.() ?? null,
+                id: (c as any).proveedor.id,
+                nombre: (c as any).proveedor.nombre,
+              }
+            : null,
+          factura: (c as any).conFactura
+            ? {
+                numero: (c as any).facturaNumero ?? null,
+                fecha:
+                  ((c as any).facturaFecha as any)?.toISOString?.() ?? null,
               }
             : null,
           usuario: {
-            id: c.usuario?.id ?? null,
-            nombre: c.usuario?.nombre ?? '',
-            correo: c.usuario?.correo ?? '',
+            id: (c as any).usuario?.id ?? null,
+            nombre: (c as any).usuario?.nombre ?? '',
+            correo: (c as any).usuario?.correo ?? '',
           },
-          pedido: c.pedido
-            ? {
-                id: c.pedido.id,
-                folio: c.pedido.folio,
-              }
+          pedido: (c as any).pedido
+            ? { id: (c as any).pedido.id, folio: (c as any).pedido.folio }
             : {},
-          requisicion: c.requisicion
+          requisicion: (c as any).requisicion
             ? {
-                id: c.requisicion.id,
-                folio: c.requisicion.folio ?? c.pedido?.folio,
-                estado: c.requisicion.estado ?? 'PENDIENTE',
-                fecha: (c.requisicion.fecha as any)?.toISOString?.() ?? null,
-                totalLineas: c.requisicion.totalLineas ?? 0,
+                id: (c as any).requisicion.id,
+                folio: (c as any).requisicion.folio ?? (c as any).pedido?.folio,
+                estado: (c as any).requisicion.estado ?? 'PENDIENTE',
+                fecha:
+                  ((c as any).requisicion.fecha as any)?.toISOString?.() ??
+                  null,
+                totalLineas: (c as any).requisicion.totalLineas ?? 0,
                 usuario: {
-                  id: c.requisicion.usuario?.id ?? null,
-                  nombre: c.requisicion.usuario?.nombre ?? '',
-                  correo: c.requisicion.usuario?.correo ?? '',
+                  id: (c as any).requisicion.usuario?.id ?? null,
+                  nombre: (c as any).requisicion.usuario?.nombre ?? '',
+                  correo: (c as any).requisicion.usuario?.correo ?? '',
                 },
                 createdAt:
-                  (c.requisicion.createdAt as any)?.toISOString?.() ?? null,
+                  ((c as any).requisicion.createdAt as any)?.toISOString?.() ??
+                  null,
                 updatedAt:
-                  (c.requisicion.updatedAt as any)?.toISOString?.() ?? null,
+                  ((c as any).requisicion.updatedAt as any)?.toISOString?.() ??
+                  null,
               }
             : null,
-          creadoEn: (c.creadoEn as any)?.toISOString?.() ?? null,
-          actualizadoEn: (c.actualizadoEn as any)?.toISOString?.() ?? null,
-          detalles: detallesUI,
+          creadoEn: ((c as any).creadoEn as any)?.toISOString?.() ?? null,
+          actualizadoEn:
+            ((c as any).actualizadoEn as any)?.toISOString?.() ?? null,
 
+          detalles: detallesUI,
           resumen,
         };
       });
@@ -431,6 +500,7 @@ export class PurchaseRequisitionsService {
               cliente: { select: { id: true, nombre: true } },
             },
           },
+          // ▶ DETALLES con PRESENTACIÓN
           detalles: {
             orderBy: { cantidad: 'desc' },
             select: {
@@ -447,6 +517,17 @@ export class PurchaseRequisitionsService {
                   precioCostoActual: true,
                 },
               },
+              presentacion: {
+                select: {
+                  id: true,
+                  nombre: true,
+                  sku: true,
+                  codigoBarras: true,
+                  tipoPresentacion: true,
+                  factorUnidadBase: true, // Decimal
+                  costoReferencialPresentacion: true, // Decimal?
+                },
+              },
             },
           },
         },
@@ -454,15 +535,41 @@ export class PurchaseRequisitionsService {
 
       if (!c) throw new NotFoundException('Compra no encontrada');
 
-      // ---- map null-safe a formato UI
+      // Helper: Decimal|string|number|null → number
+      const toNum = (v: any, fallback = 0): number => {
+        if (v == null) return fallback;
+        if (typeof v === 'number') return v;
+        if (typeof v === 'string') return parseFloat(v);
+        return parseFloat(v?.toString?.() ?? `${fallback}`);
+      };
+
+      // ---- map null-safe a formato UI (con presentacion)
       const detalles = (c.detalles ?? []).map((d) => {
-        const costoUnitario =
-          d.costoUnitario ?? d.producto?.precioCostoActual ?? 0;
+        const costoUnitario = toNum(
+          d.costoUnitario,
+          toNum(d.producto?.precioCostoActual, 0),
+        );
         const cantidad = d.cantidad ?? 0;
+
+        const presentacion = d.presentacion
+          ? {
+              id: d.presentacion.id,
+              nombre: d.presentacion.nombre ?? '',
+              sku: d.presentacion.sku ?? null,
+              codigoBarras: d.presentacion.codigoBarras ?? null,
+              tipoPresentacion: d.presentacion.tipoPresentacion ?? null,
+              factorUnidadBase: toNum(d.presentacion.factorUnidadBase, 1),
+              costoReferencialPresentacion: toNum(
+                d.presentacion.costoReferencialPresentacion,
+                0,
+              ),
+            }
+          : null;
+
         return {
           id: d.id,
           cantidad,
-          costoUnitario,
+          costoUnitario, // costo por PRESENTACIÓN
           subtotal: cantidad * costoUnitario,
           creadoEn: (d.creadoEn as any)?.toISOString?.() ?? null,
           actualizadoEn: (d.actualizadoEn as any)?.toISOString?.() ?? null,
@@ -472,6 +579,7 @@ export class PurchaseRequisitionsService {
             codigo: d.producto?.codigoProducto ?? '',
             precioCostoActual: d.producto?.precioCostoActual ?? null,
           },
+          presentacion, // ▶ nuevo bloque
         };
       });
 
@@ -499,8 +607,8 @@ export class PurchaseRequisitionsService {
             }
           : null,
 
-        origen: c.origen, // 👈 tomado de DB
-        folioOrigen: c.requisicion?.folio ?? c.pedido?.folio ?? null, // 👈 dinámico
+        origen: c.origen, // DB
+        folioOrigen: c.requisicion?.folio ?? c.pedido?.folio ?? null,
 
         proveedor: c.proveedor
           ? { id: c.proveedor.id, nombre: c.proveedor.nombre }
@@ -534,7 +642,7 @@ export class PurchaseRequisitionsService {
           : null,
 
         pedido:
-          !c.requisicion && c.pedido // 👈 solo si NO hay requisición
+          !c.requisicion && c.pedido
             ? {
                 id: c.pedido.id,
                 folio: c.pedido.folio,
@@ -976,6 +1084,360 @@ export class PurchaseRequisitionsService {
   //   }
   // }
 
+  // EL ANTERIOR
+  // async makeRecepcionCompraAuto(dto: RecepcionarCompraAutoDto) {
+  //   try {
+  //     this.logger.log('La data llegando es: ', dto);
+  //     const { cuentaBancariaId } = dto;
+  //     console.log('la cuenta es_:', cuentaBancariaId);
+
+  //     return await this.prisma.$transaction(async (tx) => {
+  //       const compra = await tx.compra.findUnique({
+  //         where: { id: dto.compraId },
+  //         include: {
+  //           detalles: {
+  //             select: {
+  //               id: true,
+  //               cantidad: true,
+  //               costoUnitario: true,
+  //               productoId: true,
+  //               requisicionLineaId: true,
+  //             },
+  //           },
+  //           proveedor: { select: { id: true } },
+  //           pedido: {
+  //             select: {
+  //               id: true,
+  //               estado: true,
+  //               folio: true,
+  //               tipo: true,
+  //             },
+  //           },
+  //         },
+  //       });
+  //       if (!compra) throw new NotFoundException('Compra no encontrada');
+
+  //       const sucursalId = compra.sucursalId;
+  //       if (!sucursalId) {
+  //         throw new BadRequestException(
+  //           'La compra no tiene sucursal asociada.',
+  //         );
+  //       }
+  //       // const proveedorIdEfectivo = compra.proveedorId ?? undefined;
+
+  //       // 1) Si hay requisición, crear la recepción (igual que antes)
+  //       let requisicionRecepcionId: number | null = null;
+  //       if (compra.requisicionId) {
+  //         const reqMain = await tx.requisicion.findUnique({
+  //           where: { id: compra.requisicionId },
+  //         });
+  //         if (!reqMain)
+  //           throw new NotFoundException(
+  //             'Requisición origen no encontrada para la compra',
+  //           );
+
+  //         const recep = await tx.requisicionRecepcion.create({
+  //           data: {
+  //             observaciones: dto.observaciones ?? null,
+  //             usuario: { connect: { id: dto.usuarioId } },
+  //             requisicion: { connect: { id: reqMain.id } },
+  //             fechaRecepcion: dayjs().tz(TZGT).toDate(),
+  //           },
+  //         });
+  //         requisicionRecepcionId = recep.id;
+  //       }
+
+  //       // 2) Armar DTOs para stock y líneas de recepción (igual que antes)
+  //       const nowISO = dayjs().tz(TZGT).toISOString();
+  //       const stockDtos: Array<any> = [];
+  //       const lineasRecep: Array<{
+  //         compraDetalleId: number;
+  //         productoId: number;
+  //         cantidadSolicitada: number;
+  //         cantidadRecibida: number;
+  //         precioUnitario: number;
+  //       }> = [];
+
+  //       let solicitadoTotal = 0;
+  //       let recibidoEnEsta = 0;
+
+  //       for (const det of compra.detalles) {
+  //         const cantidadSolicitada = det.cantidad ?? 0;
+  //         const cantidadRecibida = cantidadSolicitada;
+  //         solicitadoTotal += cantidadSolicitada;
+  //         recibidoEnEsta += cantidadRecibida;
+
+  //         const precioUnitario = det.costoUnitario ?? 0;
+
+  //         // Actualizaciones de recepción/linea de requisición (igual que antes)
+  //         if (det.requisicionLineaId && requisicionRecepcionId) {
+  //           const reqLinea = await tx.requisicionLinea.findUnique({
+  //             where: { id: det.requisicionLineaId },
+  //             select: { cantidadRecibida: true },
+  //           });
+
+  //           await tx.requisicionRecepcionLinea.create({
+  //             data: {
+  //               requisicionRecepcion: {
+  //                 connect: { id: requisicionRecepcionId },
+  //               },
+  //               requisicionLinea: { connect: { id: det.requisicionLineaId } },
+  //               producto: { connect: { id: det.productoId } },
+  //               cantidadSolicitada,
+  //               cantidadRecibida,
+  //               ingresadaAStock: true,
+  //             },
+  //           });
+
+  //           await tx.requisicionLinea.update({
+  //             where: { id: det.requisicionLineaId },
+  //             data: {
+  //               cantidadRecibida:
+  //                 (reqLinea?.cantidadRecibida ?? 0) + cantidadRecibida,
+  //               ingresadaAStock: true,
+  //             },
+  //           });
+  //         }
+
+  //         stockDtos.push({
+  //           productoId: det.productoId,
+  //           cantidad: cantidadRecibida,
+  //           costoTotal: precioUnitario * cantidadRecibida,
+  //           fechaIngreso: nowISO,
+  //           fechaExpiracion: null,
+  //           precioCosto: precioUnitario,
+  //           sucursalId,
+  //           requisicionRecepcionId: requisicionRecepcionId ?? undefined,
+  //         });
+
+  //         lineasRecep.push({
+  //           compraDetalleId: det.id,
+  //           productoId: det.productoId,
+  //           cantidadSolicitada,
+  //           cantidadRecibida,
+  //           precioUnitario,
+  //         });
+  //       }
+
+  //       // 3) Calcular cantidades anteriores por producto (antes de insertar stock)
+  //       const productIds = Array.from(
+  //         new Set(lineasRecep.map((l) => l.productoId)),
+  //       );
+  //       const cantidadesAnteriores: Record<number, number> = {};
+  //       await Promise.all(
+  //         productIds.map(async (pid) => {
+  //           const agg = await tx.stock.aggregate({
+  //             where: { productoId: pid, sucursalId },
+  //             _sum: { cantidad: true },
+  //           });
+  //           cantidadesAnteriores[pid] = agg._sum.cantidad ?? 0;
+  //         }),
+  //       );
+
+  //       // 4) Datos de entrega que usará el util
+  //       const entregaStockData = {
+  //         fechaEntrega: dayjs().tz(TZGT).toDate(),
+  //         montoTotal: stockDtos.reduce(
+  //           (acc, s) => acc + (s.costoTotal ?? 0),
+  //           0,
+  //         ),
+  //         proveedorId: dto.proveedorId ?? null,
+  //         sucursalId,
+  //         recibidoPorId: dto.usuarioId,
+  //       };
+
+  //       // 5) Generar stock desde requisición (igual que antes) — crea la entrega internamente
+  //       const newStocks = await this.utilities.generateStockFromRequisicion(
+  //         tx,
+  //         stockDtos,
+  //         entregaStockData,
+  //       );
+
+  //       // 6) Resolver entregaId para tracking (no cambiamos el util; resolvemos robusto)
+  //       let entregaId: number | null = null;
+
+  //       // a) Si tu util devuelve un objeto con entrega (ideal)
+  //       if (
+  //         newStocks &&
+  //         typeof newStocks === 'object' &&
+  //         'entrega' in newStocks
+  //       ) {
+  //         const maybeEntrega = (newStocks as any).entrega;
+  //         if (maybeEntrega?.id) entregaId = maybeEntrega.id;
+  //       }
+
+  //       // b) Si tu util devuelve arreglo de stocks con entregaStockId
+  //       if (!entregaId && Array.isArray(newStocks) && newStocks.length > 0) {
+  //         const first = newStocks[0] as any;
+  //         if (first?.entregaStockId) entregaId = first.entregaStockId;
+  //       }
+
+  //       // c) Fallback: buscar la última entrega del usuario en la sucursal dentro de la tx
+  //       if (!entregaId) {
+  //         const entregaGuess = await tx.entregaStock.findFirst({
+  //           where: { sucursalId, recibidoPorId: dto.usuarioId },
+  //           orderBy: { id: 'desc' },
+  //           select: { id: true },
+  //         });
+  //         entregaId = entregaGuess?.id ?? null;
+  //       }
+
+  //       // 7) Tracking correcto enlazado a la entrega
+  //       if (entregaId) {
+  //         const trackers = lineasRecep.map((l) => ({
+  //           productoId: l.productoId,
+  //           cantidadVendida: l.cantidadRecibida, // recibido = “vendida” en tu tracker
+  //           cantidadAnterior: cantidadesAnteriores[l.productoId] ?? 0,
+  //         }));
+  //         await this.tracker.trackeEntregaStock(
+  //           tx,
+  //           trackers,
+  //           sucursalId,
+  //           dto.usuarioId,
+  //           entregaId,
+  //           'ENTREGA_STOCK',
+  //           `Recepción TOTAL automática desde módulo COMPRA (origen: ${compra.origen})`,
+  //         );
+  //       } else {
+  //         this.logger.warn(
+  //           '[makeRecepcionCompraAuto] No se pudo resolver entregaId para tracking.',
+  //         );
+  //       }
+
+  //       // 8) Actualizaciones de requisición (igual que antes)
+  //       if (compra.requisicionId) {
+  //         const req = await tx.requisicion.findUnique({
+  //           where: { id: compra.requisicionId },
+  //           include: { lineas: true },
+  //         });
+  //         if (req) {
+  //           const todasRecibidas = req.lineas.every(
+  //             (ln) => (ln.cantidadRecibida ?? 0) >= ln.cantidadSugerida,
+  //           );
+  //           await tx.requisicion.update({
+  //             where: { id: req.id },
+  //             data: {
+  //               fechaRecepcion: dayjs().tz(TZGT).toDate(),
+  //               ingresadaAStock: true,
+  //               estado: todasRecibidas ? 'COMPLETADA' : 'RECIBIDA',
+  //             },
+  //           });
+  //         }
+  //       }
+
+  //       // 👇 NUEVO: si provino de PEDIDO, lo marcamos como RECIBIDO
+  //       if (compra.pedido?.id) {
+  //         await tx.pedido.update({
+  //           where: { id: compra.pedido.id },
+  //           data: { estado: 'RECIBIDO' },
+  //         });
+  //       }
+
+  //       // 9) Estado de compra (igual que antes)
+  //       const estadoCompra =
+  //         recibidoEnEsta >= solicitadoTotal ? 'RECIBIDO' : 'RECIBIDO_PARCIAL';
+
+  //       await tx.compra.update({
+  //         where: { id: compra.id },
+  //         data: {
+  //           estado: estadoCompra,
+  //           ingresadaAStock: true,
+  //           // cantidadRecibidaAcumulada: compra.detalles.length,
+  //           cantidadRecibidaAcumulada:
+  //             (compra.cantidadRecibidaAcumulada ?? 0) + recibidoEnEsta,
+  //         },
+  //       });
+
+  //       // 10) Movimiento financiero (igual que antes)
+  //       const metodo = dto.metodoPago ?? 'EFECTIVO';
+  //       const canal = this.paymentChannel(metodo);
+
+  //       let registroCajaId: number | undefined;
+  //       if (canal === 'CAJA') {
+  //         registroCajaId = dto.registroCajaId;
+  //         if (!registroCajaId) {
+  //           const turno = await tx.registroCaja.findFirst({
+  //             where: { sucursalId, estado: 'ABIERTO' },
+  //             select: { id: true },
+  //           });
+  //           if (!turno)
+  //             throw new BadRequestException(
+  //               'No hay turno de caja ABIERTO para registrar el pago en efectivo.',
+  //             );
+  //           registroCajaId = turno.id;
+  //         }
+  //         if (dto.cuentaBancariaId) {
+  //           throw new BadRequestException(
+  //             'No especifiques cuenta bancaria para pagos en efectivo.',
+  //           );
+  //         }
+  //       }
+
+  //       let cuentaBancariaId: number | undefined;
+  //       if (canal === 'BANCO') {
+  //         if (!dto.cuentaBancariaId) {
+  //           throw new BadRequestException(
+  //             'Debes seleccionar la cuenta bancaria para pagos por banco.',
+  //           );
+  //         }
+  //         cuentaBancariaId = dto.cuentaBancariaId;
+  //         if (dto.registroCajaId) {
+  //           throw new BadRequestException(
+  //             'No especifiques registro de caja para pagos por banco.',
+  //           );
+  //         }
+  //       }
+
+  //       const montoRecepcion = entregaStockData.montoTotal;
+  //       const { deltaCaja, deltaBanco } = this.computeDeltas(
+  //         metodo,
+  //         montoRecepcion,
+  //       );
+
+  //       const mFinanciero = await tx.movimientoFinanciero.create({
+  //         data: {
+  //           fecha: dayjs().tz(TZGT).toDate(),
+  //           sucursalId,
+  //           clasificacion: 'COSTO_VENTA',
+  //           motivo: 'COMPRA_MERCADERIA',
+  //           metodoPago: metodo,
+  //           deltaCaja,
+  //           deltaBanco,
+  //           afectaInventario: true,
+  //           costoVentaTipo: 'MERCADERIA',
+  //           referencia: `COMPRA#${compra.id}`,
+  //           descripcion: `Compra #${compra.id} - recepción a stock`,
+  //           cuentaBancariaId,
+  //           registroCajaId,
+  //           proveedorId: compra.proveedor?.id ?? null,
+  //           usuarioId: dto.usuarioId,
+  //           conFactura: (compra as any).conFactura ?? undefined,
+  //         },
+  //       });
+
+  //       this.logger.log(
+  //         'El movimiento generado por ingreso de productos es: ',
+  //         mFinanciero,
+  //       );
+
+  //       // 11) Respuesta (misma forma que ya tenías)
+  //       return {
+  //         ok: true,
+  //         compra: { id: compra.id, estado: estadoCompra },
+  //         recepcion: requisicionRecepcionId
+  //           ? { id: requisicionRecepcionId }
+  //           : null,
+  //         lineas: lineasRecep,
+  //         stock: newStocks,
+  //       };
+  //     });
+  //   } catch (error) {
+  //     this.logger.error('El error generado es: ', error);
+  //     if (error instanceof HttpException) throw error;
+  //     throw new InternalServerErrorException('Fatal error: Error inesperado');
+  //   }
+  // }
+
   async makeRecepcionCompraAuto(dto: RecepcionarCompraAutoDto) {
     try {
       this.logger.log('La data llegando es: ', dto);
@@ -983,16 +1445,27 @@ export class PurchaseRequisitionsService {
       console.log('la cuenta es_:', cuentaBancariaId);
 
       return await this.prisma.$transaction(async (tx) => {
+        // 0) Cargar compra con PRESENTACIONES en detalles
         const compra = await tx.compra.findUnique({
           where: { id: dto.compraId },
           include: {
             detalles: {
               select: {
                 id: true,
-                cantidad: true,
-                costoUnitario: true,
+                cantidad: true, // cantidad en la UNIDAD de la línea (presentación o unidad)
+                costoUnitario: true, // costo por esa unidad (presentación o unidad)
                 productoId: true,
                 requisicionLineaId: true,
+                // 👇 NUEVO: traemos presentacion (si existe) para convertir a base
+                presentacionId: true,
+                presentacion: {
+                  select: {
+                    id: true,
+                    factorUnidadBase: true, // Decimal(18,6)
+                    nombre: true,
+                    sku: true,
+                  },
+                },
               },
             },
             proveedor: { select: { id: true } },
@@ -1004,6 +1477,8 @@ export class PurchaseRequisitionsService {
                 tipo: true,
               },
             },
+            // necesitamos sucursalId para stock
+            // (ya lo usabas antes)
           },
         });
         if (!compra) throw new NotFoundException('Compra no encontrada');
@@ -1014,7 +1489,6 @@ export class PurchaseRequisitionsService {
             'La compra no tiene sucursal asociada.',
           );
         }
-        // const proveedorIdEfectivo = compra.proveedorId ?? undefined;
 
         // 1) Si hay requisición, crear la recepción (igual que antes)
         let requisicionRecepcionId: number | null = null;
@@ -1038,29 +1512,58 @@ export class PurchaseRequisitionsService {
           requisicionRecepcionId = recep.id;
         }
 
-        // 2) Armar DTOs para stock y líneas de recepción (igual que antes)
+        // 2) Armar DTOs para stock (BASE) y líneas de recepción (igual que antes)
         const nowISO = dayjs().tz(TZGT).toISOString();
-        const stockDtos: Array<any> = [];
-        const lineasRecep: Array<{
+
+        type LineaRecep = {
           compraDetalleId: number;
           productoId: number;
-          cantidadSolicitada: number;
-          cantidadRecibida: number;
-          precioUnitario: number;
+          cantidadSolicitada: number; // en unidad declarada por la línea (presentación o unidad)
+          cantidadRecibida: number; // idem arriba
+          precioUnitario: number; // costo por esa unidad (presentación o unidad)
+          // 👇 NUEVO: cantidad en base (para tracking/stock)
+          cantidadRecibidaBase: number; // unidades base (int)
+        };
+
+        const stockDtos: Array<any> = []; // para helper generateStockFromRequisicion (en unidades BASE)
+        const stockPresentacionDtos: Array<{
+          productoId: number;
+          presentacionId: number;
+          sucursalId: number;
+          cantidadPresentacion: number;
+          costoUnitarioBase: number; // costo por unidad BASE (Decimal(12,4) en schema)
+          costoUnitarioPresentacion: number; // costo por PRESENTACIÓN (Decimal(12,4) en schema)
+          fechaIngreso: Date;
+          fechaVencimiento?: Date | null;
         }> = [];
+
+        const lineasRecep: Array<LineaRecep> = [];
 
         let solicitadoTotal = 0;
         let recibidoEnEsta = 0;
 
+        // para tracking en base
+        const productBaseAcumulado: Record<number, number> = {};
+
         for (const det of compra.detalles) {
-          const cantidadSolicitada = det.cantidad ?? 0;
-          const cantidadRecibida = cantidadSolicitada;
-          solicitadoTotal += cantidadSolicitada;
-          recibidoEnEsta += cantidadRecibida;
+          const cantLinea = det.cantidad ?? 0; // cantidad de la línea (puede ser presentaciones)
+          const precioUnitLinea = det.costoUnitario ?? 0; // costo por esa unidad (presentación/unidad)
+          solicitadoTotal += cantLinea;
+          recibidoEnEsta += cantLinea;
 
-          const precioUnitario = det.costoUnitario ?? 0;
+          // 👇 NUEVO: convertir a BASE si hay presentacion
+          const factor = det.presentacion?.factorUnidadBase
+            ? Number(det.presentacion.factorUnidadBase)
+            : 1;
 
-          // Actualizaciones de recepción/linea de requisición (igual que antes)
+          // redondeamos a int por schema de Stock.cantidad (Int)
+          const cantidadBase = Math.round(cantLinea * factor);
+
+          // costo base = costo presentacion / factor (si factor>0)
+          const costoUnitarioBase =
+            factor > 0 ? precioUnitLinea / factor : precioUnitLinea;
+
+          // === a) Requisición (líneas + acumulados) ===
           if (det.requisicionLineaId && requisicionRecepcionId) {
             const reqLinea = await tx.requisicionLinea.findUnique({
               where: { id: det.requisicionLineaId },
@@ -1074,45 +1577,65 @@ export class PurchaseRequisitionsService {
                 },
                 requisicionLinea: { connect: { id: det.requisicionLineaId } },
                 producto: { connect: { id: det.productoId } },
-                cantidadSolicitada,
-                cantidadRecibida,
+                cantidadSolicitada: cantLinea, // se mantiene en “unidad” original de la línea
+                cantidadRecibida: cantLinea, // idem
                 ingresadaAStock: true,
+                // (si quisieras guardar presentacionId aquí en el futuro, habría que extender el schema)
               },
             });
 
             await tx.requisicionLinea.update({
               where: { id: det.requisicionLineaId },
               data: {
-                cantidadRecibida:
-                  (reqLinea?.cantidadRecibida ?? 0) + cantidadRecibida,
+                cantidadRecibida: (reqLinea?.cantidadRecibida ?? 0) + cantLinea,
                 ingresadaAStock: true,
               },
             });
           }
 
+          // === b) Stock BASE (compatibilidad con todo lo existente) ===
           stockDtos.push({
             productoId: det.productoId,
-            cantidad: cantidadRecibida,
-            costoTotal: precioUnitario * cantidadRecibida,
+            cantidad: cantidadBase, // BASE
+            costoTotal: costoUnitarioBase * cantidadBase, // = precioUnitLinea*cantLinea
             fechaIngreso: nowISO,
             fechaExpiracion: null,
-            precioCosto: precioUnitario,
+            precioCosto: costoUnitarioBase, // BASE
             sucursalId,
             requisicionRecepcionId: requisicionRecepcionId ?? undefined,
           });
 
+          // === c) Stock de PRESENTACIÓN (si aplica) ===
+          if (det.presentacionId) {
+            stockPresentacionDtos.push({
+              productoId: det.productoId,
+              presentacionId: det.presentacionId,
+              sucursalId,
+              cantidadPresentacion: cantLinea, // número de presentaciones recibidas
+              costoUnitarioBase: costoUnitarioBase, // BASE (Decimal en DB)
+              costoUnitarioPresentacion: precioUnitLinea, // PRESENTACIÓN
+              fechaIngreso: dayjs().tz(TZGT).toDate(),
+              fechaVencimiento: null,
+            });
+          }
+
+          // === d) array UI/tracking ===
           lineasRecep.push({
             compraDetalleId: det.id,
             productoId: det.productoId,
-            cantidadSolicitada,
-            cantidadRecibida,
-            precioUnitario,
+            cantidadSolicitada: cantLinea,
+            cantidadRecibida: cantLinea,
+            precioUnitario: precioUnitLinea,
+            cantidadRecibidaBase: cantidadBase,
           });
+
+          productBaseAcumulado[det.productoId] =
+            (productBaseAcumulado[det.productoId] ?? 0) + cantidadBase;
         }
 
-        // 3) Calcular cantidades anteriores por producto (antes de insertar stock)
-        const productIds = Array.from(
-          new Set(lineasRecep.map((l) => l.productoId)),
+        // 3) Calcular cantidades anteriores por producto (antes de insertar stock BASE)
+        const productIds = Object.keys(productBaseAcumulado).map((s) =>
+          Number(s),
         );
         const cantidadesAnteriores: Record<number, number> = {};
         await Promise.all(
@@ -1125,7 +1648,7 @@ export class PurchaseRequisitionsService {
           }),
         );
 
-        // 4) Datos de entrega que usará el util
+        // 4) Datos de entrega (monto en PRESENTACIÓN; es equivalente)
         const entregaStockData = {
           fechaEntrega: dayjs().tz(TZGT).toDate(),
           montoTotal: stockDtos.reduce(
@@ -1137,33 +1660,21 @@ export class PurchaseRequisitionsService {
           recibidoPorId: dto.usuarioId,
         };
 
-        // 5) Generar stock desde requisición (igual que antes) — crea la entrega internamente
-        const newStocks = await this.utilities.generateStockFromRequisicion(
+        // 5) Generar STOCK BASE (helper existente, NO se toca)
+        const result = await this.utilities.generateStockFromRequisicion(
           tx,
           stockDtos,
           entregaStockData,
         );
 
-        // 6) Resolver entregaId para tracking (no cambiamos el util; resolvemos robusto)
-        let entregaId: number | null = null;
+        const newStocks =
+          (result as any)?.newStocksCreated ??
+          (Array.isArray(result) ? result : []);
+        let entregaId: number | null =
+          (result as any)?.entregaStock?.id ??
+          newStocks?.[0]?.entregaStockId ??
+          null;
 
-        // a) Si tu util devuelve un objeto con entrega (ideal)
-        if (
-          newStocks &&
-          typeof newStocks === 'object' &&
-          'entrega' in newStocks
-        ) {
-          const maybeEntrega = (newStocks as any).entrega;
-          if (maybeEntrega?.id) entregaId = maybeEntrega.id;
-        }
-
-        // b) Si tu util devuelve arreglo de stocks con entregaStockId
-        if (!entregaId && Array.isArray(newStocks) && newStocks.length > 0) {
-          const first = newStocks[0] as any;
-          if (first?.entregaStockId) entregaId = first.entregaStockId;
-        }
-
-        // c) Fallback: buscar la última entrega del usuario en la sucursal dentro de la tx
         if (!entregaId) {
           const entregaGuess = await tx.entregaStock.findFirst({
             where: { sucursalId, recibidoPorId: dto.usuarioId },
@@ -1173,12 +1684,33 @@ export class PurchaseRequisitionsService {
           entregaId = entregaGuess?.id ?? null;
         }
 
-        // 7) Tracking correcto enlazado a la entrega
+        // 6) **Crear STOCK de PRESENTACIÓN** (nuevo pero sin romper nada)
+        if (stockPresentacionDtos.length > 0) {
+          await Promise.all(
+            stockPresentacionDtos.map((sp) =>
+              tx.stockPresentacion.create({
+                data: {
+                  producto: { connect: { id: sp.productoId } },
+                  presentacion: { connect: { id: sp.presentacionId } },
+                  sucursal: { connect: { id: sp.sucursalId } },
+                  cantidadPresentacion: sp.cantidadPresentacion, // Int
+                  costoUnitarioBase: sp.costoUnitarioBase, // Decimal(12,4)
+                  costoUnitarioPresentacion: sp.costoUnitarioPresentacion, // Decimal(12,4)
+                  fechaIngreso: sp.fechaIngreso,
+                  fechaVencimiento: sp.fechaVencimiento ?? null,
+                  cantidadRecibidaInicial: sp.cantidadPresentacion,
+                },
+              }),
+            ),
+          );
+        }
+
+        // 7) Tracking enlazado a la ENTREGA (en UNIDADES BASE coherentes con Stock)
         if (entregaId) {
-          const trackers = lineasRecep.map((l) => ({
-            productoId: l.productoId,
-            cantidadVendida: l.cantidadRecibida, // recibido = “vendida” en tu tracker
-            cantidadAnterior: cantidadesAnteriores[l.productoId] ?? 0,
+          const trackers = productIds.map((pid) => ({
+            productoId: pid,
+            cantidadVendida: productBaseAcumulado[pid], // BASE
+            cantidadAnterior: cantidadesAnteriores[pid] ?? 0,
           }));
           await this.tracker.trackeEntregaStock(
             tx,
@@ -1216,7 +1748,7 @@ export class PurchaseRequisitionsService {
           }
         }
 
-        // 👇 NUEVO: si provino de PEDIDO, lo marcamos como RECIBIDO
+        // 9) Si provino de PEDIDO, marcar como RECIBIDO
         if (compra.pedido?.id) {
           await tx.pedido.update({
             where: { id: compra.pedido.id },
@@ -1224,7 +1756,7 @@ export class PurchaseRequisitionsService {
           });
         }
 
-        // 9) Estado de compra (igual que antes)
+        // 10) Estado de compra (igual que antes, a nivel “unidad de línea”)
         const estadoCompra =
           recibidoEnEsta >= solicitadoTotal ? 'RECIBIDO' : 'RECIBIDO_PARCIAL';
 
@@ -1233,13 +1765,12 @@ export class PurchaseRequisitionsService {
           data: {
             estado: estadoCompra,
             ingresadaAStock: true,
-            // cantidadRecibidaAcumulada: compra.detalles.length,
             cantidadRecibidaAcumulada:
               (compra.cantidadRecibidaAcumulada ?? 0) + recibidoEnEsta,
           },
         });
 
-        // 10) Movimiento financiero (igual que antes)
+        // 11) Movimiento financiero (igual que antes)
         const metodo = dto.metodoPago ?? 'EFECTIVO';
         const canal = this.paymentChannel(metodo);
 
@@ -1264,14 +1795,14 @@ export class PurchaseRequisitionsService {
           }
         }
 
-        let cuentaBancariaId: number | undefined;
+        let cuentaBancariaIdLocal: number | undefined;
         if (canal === 'BANCO') {
           if (!dto.cuentaBancariaId) {
             throw new BadRequestException(
               'Debes seleccionar la cuenta bancaria para pagos por banco.',
             );
           }
-          cuentaBancariaId = dto.cuentaBancariaId;
+          cuentaBancariaIdLocal = dto.cuentaBancariaId;
           if (dto.registroCajaId) {
             throw new BadRequestException(
               'No especifiques registro de caja para pagos por banco.',
@@ -1298,7 +1829,7 @@ export class PurchaseRequisitionsService {
             costoVentaTipo: 'MERCADERIA',
             referencia: `COMPRA#${compra.id}`,
             descripcion: `Compra #${compra.id} - recepción a stock`,
-            cuentaBancariaId,
+            cuentaBancariaId: cuentaBancariaIdLocal,
             registroCajaId,
             proveedorId: compra.proveedor?.id ?? null,
             usuarioId: dto.usuarioId,
@@ -1311,7 +1842,7 @@ export class PurchaseRequisitionsService {
           mFinanciero,
         );
 
-        // 11) Respuesta (misma forma que ya tenías)
+        // 12) Respuesta
         return {
           ok: true,
           compra: { id: compra.id, estado: estadoCompra },
@@ -1319,7 +1850,9 @@ export class PurchaseRequisitionsService {
             ? { id: requisicionRecepcionId }
             : null,
           lineas: lineasRecep,
-          stock: newStocks,
+          stockBase: newStocks,
+          // 👇 opcional: podrías exponer cuántos StockPresentacion se crearon
+          stockPresentacionCount: stockPresentacionDtos.length,
         };
       });
     } catch (error) {
@@ -1383,19 +1916,19 @@ export class PurchaseRequisitionsService {
   }
 
   /**
-   *
-   * @param createPurchaseRequisitionDto ID de la requisicion y Usuario
-   * @param opts
-   * @returns
+   * Crea una Compra (origen: REQUISICION) a partir de la requisición dada.
+   * - Mantiene tu patrón: cabecera con total=0 -> detalles en loop -> recálculo total -> update.
+   * - Ahora soporta presentaciones: si la RequisicionLinea trae presentacionId, el detalle la conecta.
    */
   async createCompraFromRequisiciones(
     createPurchaseRequisitionDto: CreatePurchaseRequisitionDto,
-    opts?: { proveedorId?: number; sucursalId?: number }, // opcional: ya lo dejaste nullable en el schema
+    opts?: { proveedorId?: number; sucursalId?: number }, // sigue opcional por compatibilidad; usamos DTO.proveedorId como fuente principal
   ) {
     try {
       this.logger.log('La data del envio es: ', createPurchaseRequisitionDto);
       const { requisicionID, userID, proveedorId } =
         createPurchaseRequisitionDto;
+
       return await this.prisma.$transaction(async (tx) => {
         const existing = await tx.compra.findFirst({
           where: { requisicionId: requisicionID },
@@ -1412,6 +1945,13 @@ export class PurchaseRequisitionsService {
             lineas: {
               include: {
                 producto: { select: { id: true, precioCostoActual: true } },
+                presentacion: {
+                  select: {
+                    id: true,
+                    productoId: true,
+                    costoReferencialPresentacion: true,
+                  },
+                },
               },
             },
           },
@@ -1421,15 +1961,32 @@ export class PurchaseRequisitionsService {
           throw new BadRequestException('La requisición no tiene líneas');
         }
 
-        const detallesData = req.lineas.map((ln) => ({
-          cantidad: ln.cantidadSugerida,
-          costoUnitario:
-            ln.precioUnitario ?? ln.producto.precioCostoActual ?? 0,
-          productoId: ln.productoId,
-          requisicionLineaId: ln.id,
-        }));
+        const detallesData = req.lineas.map((ln) => {
+          const costoUnitario =
+            ln.precioUnitario ??
+            ln.presentacion?.costoReferencialPresentacion ??
+            ln.producto.precioCostoActual ??
+            0;
 
-        // Crear compra (cabecera)
+          // sanity: si viene presentacion, debe pertenecer al mismo producto
+          if (
+            ln.presentacion &&
+            ln.presentacion.productoId !== ln.producto.id
+          ) {
+            throw new BadRequestException(
+              `Inconsistencia: la presentación ${ln.presentacion.id} no pertenece al producto ${ln.producto.id} (línea ${ln.id}).`,
+            );
+          }
+
+          return {
+            cantidad: ln.cantidadSugerida,
+            costoUnitario,
+            productoId: ln.producto.id,
+            presentacionId: ln.presentacion?.id ?? null,
+            requisicionLineaId: ln.id,
+          };
+        });
+
         const compra = await tx.compra.create({
           data: {
             fecha: dayjs().tz(TZGT).toDate(),
@@ -1437,26 +1994,27 @@ export class PurchaseRequisitionsService {
             usuario: { connect: { id: userID } },
             sucursal: { connect: { id: opts?.sucursalId ?? req.sucursal.id } },
             requisicion: { connect: { id: req.id } },
-            ...(opts?.proveedorId
-              ? { proveedor: { connect: { id: opts.proveedorId } } }
-              : {}), // puede quedar null y luego elegir proveedor
+            estado: 'ESPERANDO_ENTREGA',
+            origen: 'REQUISICION',
           },
         });
 
-        // Crear detalles
-        // createMany no permite conectar relaciones opcionales como requisicionLinea; usa create en loop.
         for (const d of detallesData) {
           await tx.compraDetalle.create({
             data: {
               cantidad: d.cantidad,
-              costoUnitario: d.costoUnitario,
+              costoUnitario: Number(d.costoUnitario),
               producto: { connect: { id: d.productoId } },
+              ...(d.presentacionId
+                ? { presentacion: { connect: { id: d.presentacionId } } }
+                : {}),
               compra: { connect: { id: compra.id } },
               requisicionLinea: { connect: { id: d.requisicionLineaId } },
             },
           });
         }
 
+        // 6) Recalcular total (puedes calcular a partir de detallesData y ahorrarte esta query si quieres)
         const detalles = await tx.compraDetalle.findMany({
           where: { compraId: compra.id },
           select: { cantidad: true, costoUnitario: true },
@@ -1466,28 +2024,34 @@ export class PurchaseRequisitionsService {
           0,
         );
 
+        // 7) Actualizar compra con total y proveedor
         await tx.compra.update({
           where: { id: compra.id },
           data: {
             total,
-            origen: 'REQUISICION',
-            proveedor: {
-              connect: {
-                id: proveedorId,
-              },
-            },
+            proveedor: proveedorId
+              ? { connect: { id: proveedorId } }
+              : undefined,
           },
         });
 
+        // 8) Marcar requisición como enviada a compras
         await tx.requisicion.update({
           where: { id: req.id },
           data: { estado: 'ENVIADA_COMPRAS' },
         });
 
+        // 9) Respuesta enriquecida
         return tx.compra.findUnique({
           where: { id: compra.id },
           include: {
-            detalles: { include: { producto: true, requisicionLinea: true } },
+            detalles: {
+              include: {
+                producto: true,
+                presentacion: true,
+                requisicionLinea: true,
+              },
+            },
             proveedor: true,
             sucursal: true,
           },
