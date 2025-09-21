@@ -15,6 +15,7 @@ import {
 import { CrearMovimientoDto } from './dto/crear-movimiento.dto';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { UtilitiesService } from 'src/utilities/utilities.service';
+import { CreateMFUtility } from './utilities/createMFDto';
 type Tx = Prisma.TransactionClient;
 @Injectable()
 export class MovimientoFinancieroService {
@@ -63,14 +64,6 @@ export class MovimientoFinancieroService {
       dto.motivo === 'DEPOSITO_CIERRE' || !!dto.esDepositoCierre;
     const esBancoACaja = dto.motivo === 'BANCO_A_CAJA';
 
-    // if (dto.metodoPago === 'EFECTIVO' && afectaBanco) {
-    //   throw new BadRequestException('Efectivo no puede afectar banco.');
-    // }
-    // if (dto.metodoPago !== 'EFECTIVO' && afectaCaja && !esDepositoCierre) {
-    //   throw new BadRequestException(
-    //     'Un movimiento no-efectivo no debe afectar caja (salvo depósito de cierre).',
-    //   );
-    // }
     if (dto.metodoPago === 'EFECTIVO' && afectaBanco) {
       throw new BadRequestException('Efectivo no puede afectar banco.');
     }
@@ -87,40 +80,61 @@ export class MovimientoFinancieroService {
     // 3) Transacción: todo lo que mire/grabe en DB va adentro
     return this.prisma.$transaction(
       async (tx: Tx) => {
-        // 3.1) Resolver/validar turno dentro de la transacción
         let registroCajaId: number | null = dto.registroCajaId ?? null;
+        const permitirTurnoAjeno = (dto as any).permitirTurnoAjeno === true; // opcional
 
         if (afectaCaja) {
+          // Siempre ligar a la caja del USUARIO en esa sucursal
           if (!registroCajaId) {
             const abierto = await tx.registroCaja.findFirst({
               where: {
                 sucursalId,
+                usuarioInicioId: usuarioId,
                 estado: EstadoTurnoCaja.ABIERTO,
                 fechaCierre: null,
               },
-              select: { id: true, sucursalId: true },
+              orderBy: { fechaApertura: 'desc' },
+              select: { id: true },
             });
             if (!abierto) {
               throw new BadRequestException(
-                'No hay caja abierta para movimientos con efectivo.',
+                'No tienes una caja abierta en esta sucursal para movimientos en efectivo.',
               );
             }
             registroCajaId = abierto.id;
           } else {
             const turno = await tx.registroCaja.findUnique({
               where: { id: registroCajaId },
-              select: { id: true, estado: true, sucursalId: true },
+              select: {
+                id: true,
+                estado: true,
+                sucursalId: true,
+                usuarioInicioId: true,
+              },
             });
-            if (
-              !turno ||
-              turno.estado !== EstadoTurnoCaja.ABIERTO ||
-              turno.sucursalId !== sucursalId
-            ) {
+            if (!turno || turno.estado !== EstadoTurnoCaja.ABIERTO) {
               throw new BadRequestException(
-                'Turno inválido para este movimiento.',
+                'Turno no encontrado o ya cerrado.',
+              );
+            }
+            if (turno.sucursalId !== sucursalId) {
+              throw new BadRequestException(
+                'El turno pertenece a otra sucursal.',
+              );
+            }
+            if (turno.usuarioInicioId !== usuarioId && !permitirTurnoAjeno) {
+              throw new BadRequestException(
+                'El turno no pertenece a este usuario.',
               );
             }
           }
+
+          // candado para evitar carreras
+          await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+          await tx.$queryRaw`
+                  SELECT id FROM "RegistroCaja"
+                  WHERE id = ${registroCajaId}
+                  FOR UPDATE NOWAIT`;
         } else {
           if (registroCajaId) {
             throw new BadRequestException(
@@ -145,23 +159,6 @@ export class MovimientoFinancieroService {
         }
 
         // 3.3) Reglas especiales
-        // if (esDepositoCierre) {
-        //   if (!(deltaCaja < 0 && deltaBanco > 0)) {
-        //     throw new BadRequestException(
-        //       'Depósito de cierre debe mover caja(-) y banco(+).',
-        //     );
-        //   }
-        //   if (!registroCajaId) {
-        //     throw new BadRequestException(
-        //       'Depósito de cierre requiere turno de caja.',
-        //     );
-        //   }
-        //   if (!dto.cuentaBancariaId) {
-        //     throw new BadRequestException(
-        //       'Depósito de cierre requiere cuenta bancaria de destino.',
-        //     );
-        //   }
-        // }
         if (esDepositoCierre) {
           if (!(deltaCaja < 0 && deltaBanco > 0)) {
             throw new BadRequestException(
@@ -252,7 +249,7 @@ export class MovimientoFinancieroService {
           },
         });
 
-        // 3.6) POST-CHECK: revalidar que la caja no quedó negativa
+        // 3.6 check: revalidar que la caja no quedó negativa
         if (afectaCaja && registroCajaId) {
           const { enCaja } = await this.utilities.getCajaEstado(
             tx,
@@ -266,117 +263,226 @@ export class MovimientoFinancieroService {
         return mov;
       },
       {
-        // Si tu motor lo soporta, esto minimiza condiciones de carrera
         isolationLevel: 'Serializable',
       },
     );
   }
 
+  // private mapMotivoToEffects(dto: CrearMovimientoDto) {
+  //   const m = dto.motivo;
+  //   const x = dto.monto;
+
+  //   // Defaults
+  //   let clasificacion: ClasificacionAdmin = ClasificacionAdmin.TRANSFERENCIA;
+  //   let deltaCaja = 0,
+  //     deltaBanco = 0;
+  //   let necesitaTurno = false;
+
+  //   switch (m) {
+  //     case MotivoMovimiento.VENTA:
+  //       clasificacion = ClasificacionAdmin.INGRESO;
+  //       if (dto.metodoPago === 'EFECTIVO') {
+  //         deltaCaja = +x;
+  //         necesitaTurno = true;
+  //       } else {
+  //         deltaBanco = +x;
+  //       }
+  //       break;
+  //     //NUEVO
+  //     case MotivoMovimiento.BANCO_A_CAJA: {
+  //       clasificacion = ClasificacionAdmin.TRANSFERENCIA;
+  //       deltaCaja = +x; // entra efectivo a caja
+  //       deltaBanco = -x; // sale del banco
+  //       necesitaTurno = true; // requiere caja abierta
+  //       break;
+  //     }
+
+  //     case MotivoMovimiento.OTRO_INGRESO:
+  //       clasificacion = ClasificacionAdmin.INGRESO;
+  //       if (dto.metodoPago === 'EFECTIVO') {
+  //         deltaCaja = +x;
+  //         necesitaTurno = true;
+  //       } else {
+  //         deltaBanco = +x;
+  //       }
+  //       break;
+
+  //     case MotivoMovimiento.GASTO_OPERATIVO:
+  //       clasificacion = ClasificacionAdmin.GASTO_OPERATIVO;
+  //       if (dto.metodoPago === 'EFECTIVO') {
+  //         deltaCaja = -x;
+  //         necesitaTurno = true;
+  //       } else {
+  //         deltaBanco = -x;
+  //       }
+  //       break;
+
+  //     case MotivoMovimiento.COMPRA_MERCADERIA:
+  //     case MotivoMovimiento.COSTO_ASOCIADO:
+  //       clasificacion = ClasificacionAdmin.COSTO_VENTA;
+  //       if (dto.metodoPago === 'EFECTIVO') {
+  //         deltaCaja = -x;
+  //         necesitaTurno = true;
+  //       } else {
+  //         deltaBanco = -x;
+  //       } // pago desde banco
+  //       break;
+
+  //     case MotivoMovimiento.DEPOSITO_CIERRE:
+  //       clasificacion = ClasificacionAdmin.TRANSFERENCIA;
+  //       deltaCaja = -x;
+  //       deltaBanco = +x;
+  //       necesitaTurno = true;
+  //       break;
+
+  //     case MotivoMovimiento.DEPOSITO_PROVEEDOR:
+  //       clasificacion = ClasificacionAdmin.COSTO_VENTA;
+  //       deltaCaja = -x;
+  //       deltaBanco = 0;
+  //       necesitaTurno = true;
+  //       break;
+
+  //     case MotivoMovimiento.PAGO_PROVEEDOR_BANCO:
+  //       clasificacion = ClasificacionAdmin.COSTO_VENTA;
+  //       deltaCaja = 0;
+  //       deltaBanco = -x;
+  //       break;
+
+  //     case MotivoMovimiento.AJUSTE_SOBRANTE:
+  //       clasificacion = ClasificacionAdmin.AJUSTE;
+  //       deltaCaja = +x;
+  //       necesitaTurno = true;
+  //       break;
+
+  //     case MotivoMovimiento.AJUSTE_FALTANTE:
+  //       clasificacion = ClasificacionAdmin.AJUSTE;
+  //       deltaCaja = -x;
+  //       necesitaTurno = true;
+  //       break;
+
+  //     case MotivoMovimiento.DEVOLUCION:
+  //       clasificacion = ClasificacionAdmin.CONTRAVENTA;
+  //       if (dto.metodoPago === 'EFECTIVO') {
+  //         deltaCaja = -x;
+  //         necesitaTurno = true;
+  //       } else {
+  //         deltaBanco = -x;
+  //       }
+  //       break;
+
+  //     default:
+  //       throw new BadRequestException('Motivo no soportado');
+  //   }
+
+  //   return { clasificacion, deltaCaja, deltaBanco, necesitaTurno };
+  // }
+
   private mapMotivoToEffects(dto: CrearMovimientoDto) {
     const m = dto.motivo;
-    const x = dto.monto;
+    const x = Number(dto.monto);
 
-    // Defaults
     let clasificacion: ClasificacionAdmin = ClasificacionAdmin.TRANSFERENCIA;
-    let deltaCaja = 0,
-      deltaBanco = 0;
-    let necesitaTurno = false;
+    let deltaCaja = 0;
+    let deltaBanco = 0;
+
+    const esEfectivo = dto.metodoPago === 'EFECTIVO';
+
+    // helpers para DRY
+    const ingreso = () => {
+      if (esEfectivo) deltaCaja = +x;
+      else deltaBanco = +x;
+    };
+    const egreso = () => {
+      if (esEfectivo) deltaCaja = -x;
+      else deltaBanco = -x;
+    };
 
     switch (m) {
-      case MotivoMovimiento.VENTA:
-        clasificacion = ClasificacionAdmin.INGRESO;
-        if (dto.metodoPago === 'EFECTIVO') {
-          deltaCaja = +x;
-          necesitaTurno = true;
-        } else {
-          deltaBanco = +x;
-        }
+      case MotivoMovimiento.VENTA: {
+        // Venta de contado (ingreso inmediato)
+        clasificacion = ClasificacionAdmin.INGRESO; // o INGRESO_OPERATIVO si lo tienes
+        ingreso();
         break;
-      //NUEVO
+      }
+
+      case MotivoMovimiento.COBRO_CREDITO: {
+        // Anticipos y cuotas de un crédito
+        clasificacion = ClasificacionAdmin.INGRESO; // o INGRESO_OPERATIVO si existe en tu enum
+        ingreso(); // ✅ +x a caja o banco según método
+        break;
+      }
+
       case MotivoMovimiento.BANCO_A_CAJA: {
         clasificacion = ClasificacionAdmin.TRANSFERENCIA;
         deltaCaja = +x; // entra efectivo a caja
         deltaBanco = -x; // sale del banco
-        necesitaTurno = true; // requiere caja abierta
         break;
       }
 
-      case MotivoMovimiento.OTRO_INGRESO:
+      case MotivoMovimiento.OTRO_INGRESO: {
         clasificacion = ClasificacionAdmin.INGRESO;
-        if (dto.metodoPago === 'EFECTIVO') {
-          deltaCaja = +x;
-          necesitaTurno = true;
-        } else {
-          deltaBanco = +x;
-        }
+        ingreso();
         break;
+      }
 
-      case MotivoMovimiento.GASTO_OPERATIVO:
+      case MotivoMovimiento.GASTO_OPERATIVO: {
         clasificacion = ClasificacionAdmin.GASTO_OPERATIVO;
-        if (dto.metodoPago === 'EFECTIVO') {
-          deltaCaja = -x;
-          necesitaTurno = true;
-        } else {
-          deltaBanco = -x;
-        }
+        egreso();
         break;
+      }
 
       case MotivoMovimiento.COMPRA_MERCADERIA:
-      case MotivoMovimiento.COSTO_ASOCIADO:
+      case MotivoMovimiento.COSTO_ASOCIADO: {
         clasificacion = ClasificacionAdmin.COSTO_VENTA;
-        if (dto.metodoPago === 'EFECTIVO') {
-          deltaCaja = -x;
-          necesitaTurno = true;
-        } else {
-          deltaBanco = -x;
-        } // pago desde banco
+        egreso();
         break;
+      }
 
-      case MotivoMovimiento.DEPOSITO_CIERRE:
+      case MotivoMovimiento.DEPOSITO_CIERRE: {
         clasificacion = ClasificacionAdmin.TRANSFERENCIA;
         deltaCaja = -x;
         deltaBanco = +x;
-        necesitaTurno = true;
         break;
+      }
 
-      case MotivoMovimiento.DEPOSITO_PROVEEDOR:
+      case MotivoMovimiento.DEPOSITO_PROVEEDOR: {
         clasificacion = ClasificacionAdmin.COSTO_VENTA;
         deltaCaja = -x;
         deltaBanco = 0;
-        necesitaTurno = true;
         break;
+      }
 
-      case MotivoMovimiento.PAGO_PROVEEDOR_BANCO:
+      case MotivoMovimiento.PAGO_PROVEEDOR_BANCO: {
         clasificacion = ClasificacionAdmin.COSTO_VENTA;
         deltaCaja = 0;
         deltaBanco = -x;
         break;
+      }
 
-      case MotivoMovimiento.AJUSTE_SOBRANTE:
+      case MotivoMovimiento.AJUSTE_SOBRANTE: {
         clasificacion = ClasificacionAdmin.AJUSTE;
         deltaCaja = +x;
-        necesitaTurno = true;
         break;
+      }
 
-      case MotivoMovimiento.AJUSTE_FALTANTE:
+      case MotivoMovimiento.AJUSTE_FALTANTE: {
         clasificacion = ClasificacionAdmin.AJUSTE;
         deltaCaja = -x;
-        necesitaTurno = true;
         break;
+      }
 
-      case MotivoMovimiento.DEVOLUCION:
+      case MotivoMovimiento.DEVOLUCION: {
         clasificacion = ClasificacionAdmin.CONTRAVENTA;
-        if (dto.metodoPago === 'EFECTIVO') {
-          deltaCaja = -x;
-          necesitaTurno = true;
-        } else {
-          deltaBanco = -x;
-        }
+        egreso(); // devuelve dinero al cliente (caja o banco)
         break;
+      }
 
       default:
         throw new BadRequestException('Motivo no soportado');
     }
+
+    // Cualquier caso que toque caja requiere turno abierto
+    const necesitaTurno = deltaCaja !== 0;
 
     return { clasificacion, deltaCaja, deltaBanco, necesitaTurno };
   }
@@ -402,18 +508,239 @@ export class MovimientoFinancieroService {
     });
   }
 
-  findOne(id: number) {
-    return `This action returns a #${id} movimientoFinanciero`;
-  }
-
-  update(
-    id: number,
-    updateMovimientoFinancieroDto: UpdateMovimientoFinancieroDto,
+  /**
+   *
+   * @param rawDto DTO PARA CREAR UN MOVIMIENTO FINANCIERO
+   * @param opts Transaccion o permitir turno ajeno
+   * @returns
+   */
+  async createMovimiento(
+    rawDto: CreateMFUtility,
+    opts?: { tx?: Tx; permitirTurnoAjeno?: boolean },
   ) {
-    return `This action updates a #${id} movimientoFinanciero`;
-  }
+    const run = async (tx: Tx) => {
+      const dto = { ...rawDto };
+      // A) Normalizar metodoPago (solo si falta)
+      if (!dto.metodoPago) {
+        if (
+          dto.motivo === 'DEPOSITO_CIERRE' ||
+          dto.motivo === 'PAGO_PROVEEDOR_BANCO' ||
+          dto.motivo === 'BANCO_A_CAJA'
+        ) {
+          dto.metodoPago = 'TRANSFERENCIA';
+        } else {
+          dto.metodoPago = dto.cuentaBancariaId ? 'TRANSFERENCIA' : 'EFECTIVO';
+        }
+      }
 
-  remove(id: number) {
-    return `This action removes a #${id} movimientoFinanciero`;
+      // B) Derivar efectos (no tocar DB)
+      const { clasificacion, deltaCaja, deltaBanco } =
+        this.mapMotivoToEffects(dto); // tu función existente
+
+      const afectaCaja = Number(deltaCaja) !== 0;
+      const afectaBanco = Number(deltaBanco) !== 0;
+
+      if (!afectaCaja && !afectaBanco) {
+        throw new BadRequestException(
+          'El movimiento no afecta ni caja ni banco.',
+        );
+      }
+
+      // C) Reglas método↔efectos
+      const esDepositoCierre =
+        dto.motivo === 'DEPOSITO_CIERRE' || !!dto.esDepositoCierre;
+      const esBancoACaja = dto.motivo === 'BANCO_A_CAJA';
+
+      if (dto.metodoPago === 'EFECTIVO' && afectaBanco) {
+        throw new BadRequestException('Efectivo no puede afectar banco.');
+      }
+      if (
+        dto.metodoPago !== 'EFECTIVO' &&
+        afectaCaja &&
+        !(esDepositoCierre || esBancoACaja)
+      ) {
+        throw new BadRequestException(
+          'Un movimiento no-efectivo no debe afectar caja (salvo depósito de cierre o banco→caja).',
+        );
+      }
+
+      // D) Resolver/validar turno de caja si aplica
+      let registroCajaId = dto.registroCajaId ?? null;
+      if (afectaCaja) {
+        if (!registroCajaId) {
+          const abierto = await tx.registroCaja.findFirst({
+            where: {
+              sucursalId: dto.sucursalId,
+              usuarioInicioId: dto.usuarioId,
+              estado: EstadoTurnoCaja.ABIERTO,
+              fechaCierre: null,
+            },
+            orderBy: { fechaApertura: 'desc' },
+            select: { id: true },
+          });
+          if (!abierto) {
+            throw new BadRequestException(
+              'No tienes una caja abierta en esta sucursal para movimientos en efectivo.',
+            );
+          }
+          registroCajaId = abierto.id;
+        } else {
+          const turno = await tx.registroCaja.findUnique({
+            where: { id: registroCajaId },
+            select: {
+              id: true,
+              estado: true,
+              sucursalId: true,
+              usuarioInicioId: true,
+            },
+          });
+          if (!turno || turno.estado !== EstadoTurnoCaja.ABIERTO) {
+            throw new BadRequestException('Turno no encontrado o ya cerrado.');
+          }
+          if (turno.sucursalId !== dto.sucursalId) {
+            throw new BadRequestException(
+              'El turno pertenece a otra sucursal.',
+            );
+          }
+          if (
+            turno.usuarioInicioId !== dto.usuarioId &&
+            !opts?.permitirTurnoAjeno
+          ) {
+            throw new BadRequestException(
+              'El turno no pertenece a este usuario.',
+            );
+          }
+        }
+
+        // Lock optimista anti-carrera
+        await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+        await tx.$queryRaw`
+          SELECT id FROM "RegistroCaja"
+          WHERE id = ${registroCajaId}
+          FOR UPDATE NOWAIT`;
+      } else {
+        if (dto.registroCajaId) {
+          throw new BadRequestException(
+            'Movimientos solo bancarios no deben adjuntar registroCajaId.',
+          );
+        }
+      }
+
+      // E) Reglas de banco
+      if (afectaBanco) {
+        if (!dto.cuentaBancariaId) {
+          throw new BadRequestException(
+            'Cuenta bancaria requerida para movimientos bancarios.',
+          );
+        }
+      } else if (dto.cuentaBancariaId) {
+        throw new BadRequestException(
+          'No envíes cuenta bancaria si el movimiento no afecta banco.',
+        );
+      }
+
+      // F) Reglas especiales
+      if (esDepositoCierre) {
+        if (!(deltaCaja < 0 && deltaBanco > 0)) {
+          throw new BadRequestException(
+            'Depósito de cierre debe mover caja(-) y banco(+).',
+          );
+        }
+        if (!registroCajaId)
+          throw new BadRequestException('Depósito de cierre requiere turno.');
+        if (!dto.cuentaBancariaId) {
+          throw new BadRequestException(
+            'Depósito de cierre requiere cuenta bancaria destino.',
+          );
+        }
+      }
+
+      if (esBancoACaja) {
+        if (!(deltaCaja > 0 && deltaBanco < 0)) {
+          throw new BadRequestException(
+            'Banco→Caja debe mover caja(+) y banco(-).',
+          );
+        }
+        if (!registroCajaId)
+          throw new BadRequestException('Banco→Caja requiere turno.');
+        if (!dto.cuentaBancariaId) {
+          throw new BadRequestException(
+            'Banco→Caja requiere cuenta bancaria origen.',
+          );
+        }
+      }
+
+      if (dto.esDepositoProveedor) {
+        if (
+          !(
+            afectaCaja &&
+            deltaCaja < 0 &&
+            !afectaBanco &&
+            clasificacion === ClasificacionAdmin.COSTO_VENTA
+          )
+        ) {
+          throw new BadRequestException(
+            'Depósito a proveedor debe ser egreso de caja y costo de venta.',
+          );
+        }
+      }
+
+      // G) Pre-guards efectivo (anti caja negativa + depósito cierre válido)
+      if (afectaCaja && registroCajaId) {
+        await this.utilities.validarMovimientoEfectivo(
+          tx,
+          registroCajaId,
+          Number(deltaCaja),
+        );
+        if (esDepositoCierre) {
+          await this.utilities.validarDepositoCierre(
+            tx,
+            registroCajaId,
+            Math.abs(Number(deltaCaja)),
+          );
+        }
+      }
+      this.logger.log('el id de la caja encontrada es: ', registroCajaId);
+      // H) Crear (usar FK escalares para evitar connect indefinidos)
+      const mov = await tx.movimientoFinanciero.create({
+        data: {
+          sucursalId: dto.sucursalId,
+          usuarioId: dto.usuarioId,
+          registroCajaId: registroCajaId ?? null,
+          cuentaBancariaId: dto.cuentaBancariaId ?? null,
+          proveedorId: dto.proveedorId ?? null,
+
+          clasificacion,
+          motivo: dto.motivo,
+          metodoPago: dto.metodoPago ?? null,
+          deltaCaja,
+          deltaBanco,
+          descripcion: dto.descripcion ?? null,
+          referencia: dto.referencia ?? null,
+          esDepositoCierre: !!dto.esDepositoCierre,
+          esDepositoProveedor: !!dto.esDepositoProveedor,
+          gastoOperativoTipo: (dto.gastoOperativoTipo as any) ?? null,
+          costoVentaTipo: (dto.costoVentaTipo as any) ?? null,
+          afectaInventario: this.afectaInventario(dto.motivo),
+        },
+      });
+
+      // I) Re-chequeo caja
+      if (afectaCaja && registroCajaId) {
+        const { enCaja } = await this.utilities.getCajaEstado(
+          tx,
+          registroCajaId,
+        );
+        if (enCaja < 0)
+          throw new Error('Caja negativa tras el movimiento; rollback.');
+      }
+
+      return mov;
+    };
+
+    if (opts?.tx) return run(opts.tx);
+    return this.prisma.$transaction((tx) => run(tx), {
+      isolationLevel: 'Serializable',
+    });
   }
 }

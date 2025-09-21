@@ -1,8 +1,10 @@
 import {
   BadRequestException,
   ConflictException,
+  HttpException,
   Injectable,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { UpdateMetaDto } from './dto/update-meta.dto';
@@ -12,9 +14,10 @@ import { CreateMetaCobrosDto } from './dto/MetaCobrosDTO.dto';
 import { CreateDepositoCobroDto } from './dto/DepositoCobroDTO.dto';
 import * as bcrypt from 'bcryptjs';
 import { UpdateMetaCobroDto } from './dto/update-meta-cobro.dto';
-import { EstadoMetaCobro, EstadoMetaTienda } from '@prisma/client';
+import { EstadoMetaCobro, EstadoMetaTienda, Prisma } from '@prisma/client';
 @Injectable()
 export class MetasService {
+  private readonly logger = new Logger(MetasService.name);
   constructor(private readonly prisma: PrismaService) {}
 
   async createSellerGoal(createMetaDTO: CreateMetaUsuarioDto) {
@@ -629,18 +632,6 @@ export class MetasService {
     }
   }
 
-  findAll() {
-    return `This action returns all metas`;
-  }
-
-  findOne(id: number) {
-    return `This action returns a #${id} meta`;
-  }
-
-  update(id: number, updateMetaDto: UpdateMetaDto) {
-    return `This action updates a #${id} meta`;
-  }
-
   async updateMetaTienda(id: number, updateMetaDto: UpdateMetaDto) {
     try {
       const { tituloMeta, EstadoMetaTienda, montoMeta, montoActual } =
@@ -733,7 +724,74 @@ export class MetasService {
     }
   }
 
-  remove(id: number) {
-    return `This action removes a #${id} meta`;
+  async incrementarMeta(
+    userID: number,
+    monto: number,
+    tipo: 'tienda' | 'cobro',
+    tx: Prisma.TransactionClient,
+  ) {
+    try {
+      if (!userID || monto <= 0) {
+        throw new BadRequestException(
+          'Error al incrementar meta datos no válidos',
+        );
+      }
+
+      if (tipo === 'tienda') {
+        const meta = await this.prisma.metaUsuario.findFirst({
+          where: {
+            usuarioId: userID,
+            estado: 'ABIERTO',
+          },
+        });
+
+        if (!meta) {
+          this.logger.debug('No hay meta asignada a este usuario');
+          return;
+        }
+
+        await this.prisma.metaUsuario.update({
+          where: {
+            id: meta.id,
+          },
+          data: {
+            montoActual: {
+              increment: monto,
+            },
+          },
+        });
+        this.logger.log('Meta de tiendas actualizada');
+      }
+
+      if (tipo === 'cobro') {
+        const meta = await this.prisma.metaCobros.findFirst({
+          where: {
+            usuarioId: userID,
+            estado: 'ABIERTO',
+          },
+        });
+
+        if (!meta) {
+          this.logger.debug('No hay meta asignada a este usuario');
+          return;
+        }
+
+        await this.prisma.metaCobros.update({
+          where: {
+            id: meta.id,
+          },
+          data: {
+            montoActual: {
+              increment: monto,
+            },
+          },
+        });
+        this.logger.log('Meta de cobros actualizada');
+      }
+    } catch (error) {
+      this.logger.error('Error en incrementar meta: ', error);
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException('Fatal error: Error inesperado');
+    }
   }
 }

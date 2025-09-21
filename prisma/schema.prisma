@@ -1017,7 +1017,10 @@ model RegistroCaja {
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
-  @@index([sucursalId, estado])
+  // @@index([sucursalId, estado])
+    @@index([sucursalId, estado, fechaCierre])
+    @@index([sucursalId, usuarioInicioId, estado, fechaCierre]) // ✅ nuevo
+
 }
 
 enum EstadoTurnoCaja {
@@ -1154,6 +1157,7 @@ enum MotivoMovimiento {
   AJUSTE_FALTANTE
   DEVOLUCION
   BANCO_A_CAJA //nuevo
+  COBRO_CREDITO//nuevo
 }
 
 // Subtipos útiles (se pueden volver tablas si el cliente quiere editar)
@@ -1575,6 +1579,8 @@ model MetaUsuario {
   numeroVentas  Float // El numero de ventas hasta el momento
   tituloMeta    String?
   estado        EstadoMetaTienda
+  creadoEn DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 enum EstadoMetaTienda {

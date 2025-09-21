@@ -1,4 +1,5 @@
 // create-venta-cuota.dto.ts
+import { MetodoPago } from '@prisma/client';
 import { IsInt, IsArray, IsEnum, IsString } from 'class-validator';
 
 export enum Tipo { // 👈 EXPORTA EL ENUM
@@ -25,6 +26,10 @@ export class CreateVentaCuotaDto {
   interes: number;
   @IsInt()
   montoTotalConInteres: number;
+  @IsEnum(MetodoPago)
+  metodoPago: MetodoPago;
+  @IsInt()
+  cuentaBancariaId: number;
 }
 
 export class ProductsList {

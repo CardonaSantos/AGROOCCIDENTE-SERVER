@@ -235,23 +235,24 @@ export class ResumenesAdminService {
     const ingresosBanco = N(banIn._sum.deltaBanco);
     const egresosBanco = Math.abs(N(banOut._sum.deltaBanco));
 
-    // 3) Snapshot previo + apertura del día
-    const [snapPrev, apertura] = await Promise.all([
+    // 3) Snapshot previo + aperturas del día (suma)
+    const [snapPrev, aperturasAgg] = await Promise.all([
       this.prisma.sucursalSaldoDiario.findFirst({
         where: { sucursalId, fecha: { lt: inicio } },
         orderBy: { fecha: 'desc' },
         select: { saldoFinalCaja: true, saldoFinalBanco: true },
       }),
-      this.prisma.registroCaja.findFirst({
+      this.prisma.registroCaja.aggregate({
+        _sum: { saldoInicial: true },
         where: { sucursalId, fechaApertura: { gte: inicio, lte: fin } },
-        orderBy: { fechaApertura: 'asc' },
-        select: { saldoInicial: true },
       }),
     ]);
 
-    const inicioCaja = N(
-      apertura?.saldoInicial ?? snapPrev?.saldoFinalCaja ?? 0,
-    );
+    // Si hay snapshot, ese manda. Si NO, usa la SUMA de aperturas del día.
+    const inicioCaja = snapPrev
+      ? N(snapPrev.saldoFinalCaja)
+      : N(aperturasAgg._sum.saldoInicial);
+
     const inicioBanco = N(snapPrev?.saldoFinalBanco ?? 0);
 
     // 4) Ventas y métodos
@@ -274,6 +275,20 @@ export class ResumenesAdminService {
     const ventasCantidad = N(ventasAgg._count._all);
     const ticketPromedio = ventasCantidad ? ventasTotal / ventasCantidad : 0;
 
+    // 4.x) Efectivo por cobros de crédito (COBRO_CREDITO en caja)
+    const cobroCreditoEfectivoAgg =
+      await this.prisma.movimientoFinanciero.aggregate({
+        _sum: { deltaCaja: true },
+        where: {
+          ...whereMov,
+          motivo: MotivoMovimiento.COBRO_CREDITO,
+          deltaCaja: { gt: 0 }, // efectivo entra a caja
+        },
+      });
+    const efectivoCobrosCredito = Number(
+      cobroCreditoEfectivoAgg._sum.deltaCaja ?? 0,
+    );
+
     const porMetodo: Record<string, number> = {};
     for (const g of pagosGroup)
       porMetodo[g.metodoPago as string] = N(g._sum.monto);
@@ -291,7 +306,7 @@ export class ResumenesAdminService {
           _sum: { deltaCaja: true },
           where: {
             ...whereMov,
-            clasificacion: 'COSTO_VENTA', // si es enum, cambia a tu enum
+            clasificacion: 'COSTO_VENTA',
             deltaCaja: { lt: 0 },
           },
         }),
@@ -423,7 +438,7 @@ export class ResumenesAdminService {
       _sum: { deltaCaja: true },
       where: {
         ...whereMov,
-        clasificacion: 'TRANSFERENCIA', // si es enum, cambia a tu enum
+        clasificacion: 'TRANSFERENCIA',
         deltaCaja: { gt: 0 },
         deltaBanco: { lt: 0 },
       },
@@ -481,27 +496,38 @@ export class ResumenesAdminService {
     }
 
     // 7.2) Comparativos
-    const netoCajaOperativo = ingresosCaja - egresosSinCierre; // informativo
-    const variacionVsEfectivo = netoCajaOperativo - efectivoVentas; // informativo
+    // const netoCajaOperativo = ingresosCaja - egresosSinCierre; // informativo
+    // const variacionVsEfectivo = netoCajaOperativo - efectivoVentas; // informativo
 
-    const deltaVentasCajaVsEfectivo = ingresosCajaPorVentas - efectivoVentas; // semáforo principal
+    // 7.2) Comparativos (unificando POS + cobros de crédito en efectivo)
+    const netoCajaOperativo = ingresosCaja - egresosSinCierre; // informativo
+
+    // Lo que "esperamos" en caja por ventas: POS contado + cobros de crédito en efectivo
+    const efectivoObjetivo = efectivoVentas + efectivoCobrosCredito;
+
+    // Ingresos efectivos POS registrados en MF (sigue siendo solo Motivo: VENTA)
+    const deltaVentasCajaVsEfectivo = ingresosCajaPorVentas - efectivoObjetivo; // semáforo principal
+
+    // Informativo (si lo usas en la UI)
+    const variacionVsEfectivo = netoCajaOperativo - efectivoObjetivo;
+
     const ventasOk = Math.abs(deltaVentasCajaVsEfectivo) <= 0.01;
     const excesoDeposito = Math.max(0, depositoCierreCaja - cajaDisponible);
     const depositoOk = excesoDeposito <= 0.01;
 
     const alertas: string[] = [];
-    if (!ventasOk)
+    if (!ventasOk) {
       alertas.push(
-        'Ingresos de caja por ventas no coincide con ventas en efectivo',
+        'Ingresos de caja por ventas no coincide con ventas en efectivo (incluye cobros de crédito).',
       );
-    if (!depositoOk)
+    }
+    if (!depositoOk) {
       alertas.push('Depósito de cierre mayor que la caja disponible');
-    if (
-      !apertura &&
-      snapPrev &&
-      Math.abs(inicioCaja - N(snapPrev.saldoFinalCaja)) > 0.01
-    ) {
-      alertas.push('Inicio de caja no coincide con snapshot previo');
+    }
+    if (!snapPrev && inicioCaja > 0) {
+      alertas.push(
+        `Sin snapshot previo. Inicio de caja asumido como suma de aperturas del día (Q ${inicioCaja.toFixed(2)}).`,
+      );
     }
 
     // 8) Respuesta
@@ -528,6 +554,7 @@ export class ResumenesAdminService {
         ticketPromedio,
         porMetodo,
         efectivo: efectivoVentas,
+        efectivoCobrosCredito, // ⬅️ NUEVO: cobros de crédito en efectivo
       },
       egresos: {
         costosVenta: {
@@ -577,7 +604,8 @@ export class ResumenesAdminService {
           caja: N(snapPrev?.saldoFinalCaja) ?? null,
           banco: N(snapPrev?.saldoFinalBanco) ?? null,
         },
-        aperturaCaja: N(apertura?.saldoInicial) ?? null,
+        // Para visibilidad: suma de todas las aperturas del día
+        aperturaCaja: N(aperturasAgg._sum.saldoInicial ?? 0),
         chequeos: {
           identidadCajaOk,
           identidadBancoOk,

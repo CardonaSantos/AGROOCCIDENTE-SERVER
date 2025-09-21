@@ -32,25 +32,4 @@ export class MovimientoFinancieroController {
   getMovimientosFinancieros() {
     return this.movimientoFinancieroService.getMovimientosFinancierosSimple();
   }
-
-  @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.movimientoFinancieroService.findOne(+id);
-  }
-
-  @Patch(':id')
-  update(
-    @Param('id') id: string,
-    @Body() updateMovimientoFinancieroDto: UpdateMovimientoFinancieroDto,
-  ) {
-    return this.movimientoFinancieroService.update(
-      +id,
-      updateMovimientoFinancieroDto,
-    );
-  }
-
-  @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.movimientoFinancieroService.remove(+id);
-  }
 }

@@ -26,11 +26,8 @@ import * as isSameOrAfter from 'dayjs/plugin/isSameOrAfter';
 import * as isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
 import { VentaLigadaACajaDTO } from './dto/new-dto';
 import { IniciarCajaDto } from './dto/iniciar-caja.dto';
-import { CerrarCajaDto } from './dto/CerrarCajaDto';
-import { CerrarCajaV2Dto } from './cerrarCajaTypes';
 import { GetCajasQueryDto } from './GetCajasQueryDto ';
 import { UtilitiesService } from 'src/utilities/utilities.service';
-import { getCajasToCompraDto } from './getCajasToCompra.dto';
 import { TZGT } from 'src/utils/utils';
 import { CerrarCajaV3Dto } from './dto/CerrarCajaV3Dto';
 import {
@@ -49,7 +46,6 @@ type Paginated<T> = {
   pages: number;
   items: T[];
 };
-const CASH_LIKE = ['EFECTIVO', 'CHEQUE', 'CONTADO'] as const;
 
 @Injectable()
 export class CajaService {
@@ -200,254 +196,77 @@ export class CajaService {
     return where;
   }
 
-  //HELPERS
-
-  /**
-   *
-   * @param dto datos primarios para abrir un registro de turno en caja
-   * @returns un registro de caja semi-terminado
-   */
   async iniciarCaja(dto: IniciarCajaDto) {
-    const { sucursalId, usuarioInicioId, comentario } = dto;
-    if ([sucursalId, usuarioInicioId].some((p) => p == null)) {
-      throw new BadRequestException(
-        'sucursalId y usuarioInicioId son obligatorios',
-      );
-    }
-
-    return this.prisma.$transaction(async (tx) => {
-      // 1) No permitir dos turnos abiertos en la sucursal
-      const abierta = await tx.registroCaja.findFirst({
-        where: {
-          sucursalId,
-          estado: EstadoTurnoCaja.ABIERTO,
-          fechaCierre: null,
-        },
-        select: { id: true },
-      });
-      if (abierta) {
+    try {
+      const { sucursalId, usuarioInicioId, comentario } = dto;
+      if ([sucursalId, usuarioInicioId].some((p) => p == null)) {
         throw new BadRequestException(
-          'Ya existe una caja abierta en esta sucursal',
+          'sucursalId y usuarioInicioId son obligatorios',
         );
       }
 
-      // 2) Calcular saldo inicial si no viene
-      const saldoInicial =
-        dto.saldoInicial != null
-          ? dto.saldoInicial
-          : await this.getSaldoInicial(tx, sucursalId);
+      return this.prisma.$transaction(async (tx) => {
+        // (Opcional pero recomendado en PG) minimizar race conditions al abrir:
+        // await tx.$queryRaw`SELECT pg_advisory_xact_lock(${sucursalId}, ${usuarioInicioId})`;
 
-      // 3) Crear el turno
-      const newTurno = await tx.registroCaja.create({
-        data: {
-          sucursal: { connect: { id: sucursalId } },
-          usuarioInicio: { connect: { id: usuarioInicioId } },
-          comentario: comentario ?? null,
-          saldoInicial, // Decimal soporta number de entrada
-          estado: EstadoTurnoCaja.ABIERTO,
-          fondoFijo: dto.fondoFijo ?? 0,
-        },
+        // 1) No permitir dos turnos abiertos para ESTE usuario en ESTA sucursal
+        const abiertaUsuario = await tx.registroCaja.findFirst({
+          where: {
+            sucursalId,
+            usuarioInicioId,
+            estado: EstadoTurnoCaja.ABIERTO,
+            fechaCierre: null,
+          },
+          select: { id: true, fechaApertura: true },
+        });
+
+        if (abiertaUsuario) {
+          throw new BadRequestException(
+            `Ya tienes una caja abierta (turno #${abiertaUsuario.id}) en esta sucursal.`,
+          );
+        }
+
+        // 3) Calcular saldo inicial si no viene
+        const saldoInicial =
+          dto.saldoInicial != null
+            ? dto.saldoInicial
+            : await this.getSaldoInicial(tx, sucursalId);
+
+        // 4) Crear el turno
+        const newTurno = await tx.registroCaja.create({
+          data: {
+            sucursal: { connect: { id: sucursalId } },
+            usuarioInicio: { connect: { id: usuarioInicioId } },
+            comentario: comentario ?? null,
+            saldoInicial,
+            estado: EstadoTurnoCaja.ABIERTO,
+            fondoFijo: dto.fondoFijo ?? 0,
+          },
+          select: {
+            id: true,
+            sucursalId: true,
+            usuarioInicioId: true,
+            saldoInicial: true,
+            fechaApertura: true,
+            estado: true,
+          },
+        });
+
+        // Log útil
+        this.logger?.log(
+          `[Caja] Apertura OK -> turno=${newTurno.id} sucursal=${newTurno.sucursalId} usuario=${newTurno.usuarioInicioId} saldoInicial=${newTurno.saldoInicial}`,
+        );
+
+        return newTurno;
       });
-
-      return newTurno;
-    });
+    } catch (error) {
+      this.logger.error('Error al iniciar caja', error as any);
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException(
+        'Fatal Error: Error inesperado en iniciar caja',
+      );
+    }
   }
-
-  /**
-   * Para cerrar una caja manualmente sin depositar, solo cerrar turno en caja
-   * @param dto datos para cerrar la caja, monto final, ids de ventas y movimientos como egresos y depositos, que son movimientos de cajas
-   * @returns
-   */
-  // async cerrarCaja(dto: CerrarCajaDto) {
-  //   const { registroCajaId, comentarioFinal } = dto;
-  //   this.logger.debug('Los datos son: ', registroCajaId, comentarioFinal);
-  //   return this.prisma.$transaction(async (tx) => {
-  //     const turno = await tx.registroCaja.findUnique({
-  //       where: { id: registroCajaId },
-  //       select: {
-  //         id: true,
-  //         estado: true,
-  //         saldoInicial: true,
-  //         fondoFijo: true,
-  //         sucursalId: true,
-  //       },
-  //     });
-  //     if (!turno || turno.estado !== 'ABIERTO') {
-  //       throw new BadRequestException('Turno no encontrado o ya cerrado');
-  //     }
-
-  //     const sumas = await this.momentoMovimientoFinancieroSum(turno.id); // ← ver helper abajo
-  //     const saldoFinal = Number(turno.saldoInicial) + Number(sumas.deltaCaja);
-
-  //     // Cerrar
-  //     const cerrado = await tx.registroCaja.update({
-  //       where: { id: turno.id },
-  //       data: {
-  //         estado: 'CERRADO',
-  //         fechaCierre: new Date(),
-  //         saldoFinal,
-  //         comentarioFinal: comentarioFinal ?? null,
-  //       },
-  //     });
-
-  //     return { ...cerrado, sumas };
-  //   });
-  // }
-
-  // async cerrarCajaV2(dto: CerrarCajaV2Dto) {
-  //   const fechaCorte = dayjs().tz(TZGT).toDate();
-  //   const {
-  //     registroCajaId,
-  //     usuarioCierreId,
-  //     comentarioFinal,
-  //     modo,
-  //     cuentaBancariaId,
-  //     montoParcial,
-  //     abrirSiguiente,
-  //     usuarioInicioSiguienteId,
-  //     fondoFijoSiguiente,
-  //     comentarioAperturaSiguiente,
-  //   } = dto;
-
-  //   return this.prisma.$transaction(async (tx) => {
-  //     // 1) Traer turno y validar estado
-  //     const turno = await tx.registroCaja.findUnique({
-  //       where: { id: registroCajaId },
-  //       select: {
-  //         id: true,
-  //         estado: true,
-  //         saldoInicial: true,
-  //         fondoFijo: true,
-  //         sucursalId: true,
-  //       },
-  //     });
-  //     if (!turno || turno.estado !== 'ABIERTO') {
-  //       throw new BadRequestException('Turno no encontrado o ya cerrado');
-  //     }
-
-  //     // helpers
-  //     const n = (v: any) => Number(v ?? 0);
-  //     const round2 = (x: number) => Math.round(x * 100) / 100;
-
-  //     // 2) Σ deltaCaja del turno para calcular efectivo disponible
-  //     const agg = await tx.movimientoFinanciero.aggregate({
-  //       _sum: { deltaCaja: true },
-  //       where: { registroCajaId: turno.id },
-  //     });
-
-  //     const enCaja = round2(n(turno.saldoInicial) + n(agg._sum.deltaCaja));
-  //     const enCajaOperable = Math.max(0, enCaja); // nunca depositamos negativo
-
-  //     // 3) Calcular depósito según modo (con clamps)
-  //     let deposito = 0;
-  //     switch (modo) {
-  //       case 'DEPOSITO_TODO': {
-  //         // Si la caja está negativa o 0, depósito=0
-  //         deposito = enCajaOperable;
-  //         break;
-  //       }
-  //       case 'DEPOSITO_PARCIAL': {
-  //         if (!montoParcial || montoParcial <= 0) {
-  //           throw new BadRequestException('Monto parcial inválido');
-  //         }
-  //         deposito = Math.min(montoParcial, enCajaOperable);
-  //         deposito = round2(deposito);
-  //         break;
-  //       }
-  //       case 'SIN_DEPOSITO':
-  //       case 'CAMBIO_TURNO': {
-  //         deposito = 0;
-  //         break;
-  //       }
-  //       default:
-  //         throw new BadRequestException('Modo de cierre no soportado');
-  //     }
-
-  //     // 4) Si hay depósito (>0), exigir cuenta y crear movimiento
-  //     let movDeposito: any = null;
-  //     if (deposito > 0) {
-  //       if (!cuentaBancariaId) {
-  //         throw new BadRequestException(
-  //           'Cuenta bancaria requerida para depósito',
-  //         );
-  //       }
-  //       movDeposito = await tx.movimientoFinanciero.create({
-  //         data: {
-  //           sucursalId: turno.sucursalId,
-  //           registroCajaId: turno.id,
-  //           clasificacion: 'TRANSFERENCIA',
-  //           motivo: 'DEPOSITO_CIERRE',
-  //           metodoPago: 'TRANSFERENCIA',
-  //           deltaCaja: -deposito,
-  //           deltaBanco: +deposito,
-  //           cuentaBancariaId,
-  //           esDepositoCierre: true,
-  //           descripcion: 'Depósito de cierre',
-  //           usuarioId: usuarioCierreId,
-  //         },
-  //       });
-  //     }
-
-  //     // 5) Recalcular saldo final real y cerrar turno
-  //     const agg2 = await tx.movimientoFinanciero.aggregate({
-  //       _sum: { deltaCaja: true },
-  //       where: { registroCajaId: turno.id },
-  //     });
-  //     const saldoFinal = round2(n(turno.saldoInicial) + n(agg2._sum.deltaCaja));
-
-  //     const cerrado = await tx.registroCaja.update({
-  //       where: { id: turno.id },
-  //       data: {
-  //         estado: 'CERRADO',
-  //         fechaCierre: new Date(),
-  //         saldoFinal,
-  //         comentarioFinal: comentarioFinal ?? null,
-  //         depositado: deposito > 0,
-  //       },
-  //     });
-
-  //     await this.upsertSucursalSnapshot(tx, turno.sucursalId, fechaCorte);
-  //     await this.refreshGlobalSnapshot(tx, fechaCorte);
-
-  //     // 6) Cambio de turno (opcional). Arrastra el saldoFinal (puede ser negativo).
-  //     let nuevoTurno: any = null;
-  //     const abrir = modo === 'CAMBIO_TURNO' ? (abrirSiguiente ?? true) : false;
-  //     if (abrir) {
-  //       const nextUser = usuarioInicioSiguienteId ?? usuarioCierreId;
-  //       const nextFondo = n(fondoFijoSiguiente ?? turno.fondoFijo);
-  //       nuevoTurno = await tx.registroCaja.create({
-  //         data: {
-  //           sucursalId: turno.sucursalId,
-  //           usuarioInicioId: nextUser,
-  //           saldoInicial: saldoFinal, // arrastra lo que quedó (positivo o negativo)
-  //           fondoFijo: nextFondo,
-  //           comentario:
-  //             comentarioAperturaSiguiente ?? 'Apertura por cambio de turno',
-  //           estado: 'ABIERTO',
-  //         },
-  //       });
-  //     }
-
-  //     // 7) Retorno enriquecido (útil para UI/logs)
-  //     const warnings: string[] = [];
-  //     if (enCaja < 0) {
-  //       warnings.push('Saldo en caja negativo al momento del cierre.');
-  //     }
-
-  //     return {
-  //       turnoCerrado: {
-  //         id: cerrado.id,
-  //         saldoFinal,
-  //         depositoRealizado: deposito,
-  //       },
-  //       movimientoDeposito: movDeposito,
-  //       nuevoTurno,
-  //       enCajaAntes: enCaja,
-  //       enCajaOperable,
-  //       warnings,
-  //     };
-  //   });
-  // }
 
   /**
    * NUEVO SERVICIO QUE USAREMOS
@@ -485,19 +304,37 @@ export class CajaService {
       // 2) ASIENTO de ventas EFECTIVO por DIFERENCIA (idempotente)
       let ventasEfectivoTurno = 0;
       if (dto.asentarVentas !== false) {
-        // 2.1 total por pagos efectivo del turno (fuente de verdad)
+        // ✅ solo ventas EFECTIVO ligadas a ESTA caja/turno
+        // const pagosAgg = await tx.pago.aggregate({
+        //   _sum: { monto: true },
+        //   where: {
+        //     venta: {
+        //       is: {
+        //         registroCajaId: turno.id, // 👈 clave
+        //         fechaVenta: { gte: turno.fechaApertura, lte: ahora },
+        //       },
+        //     },
+        //     metodoPago: { in: CASH_LIKE as any },
+        //   },
+        // });
+
         const pagosAgg = await tx.pago.aggregate({
           _sum: { monto: true },
           where: {
             venta: {
               is: {
-                sucursalId: turno.sucursalId,
+                registroCajaId: turno.id,
                 fechaVenta: { gte: turno.fechaApertura, lte: ahora },
+                ventaCuota: null,
               },
             },
-            metodoPago: { in: CASH_LIKE as any },
+            // Si quieres considerar solo efectivo:
+            // metodoPago: 'EFECTIVO',
+            // Si quieres tratar CHEQUE como efectivo (si así operan físicamente), usa:
+            metodoPago: { in: ['EFECTIVO', 'CONTADO'] },
           },
         });
+
         ventasEfectivoTurno = n(pagosAgg._sum.monto);
 
         // 2.2 cuánto ya está en MF como venta POS (excluye asientos)
@@ -515,6 +352,13 @@ export class CajaService {
 
         // 2.3 diferencia a cubrir por asiento
         const faltante = Math.max(0, r2(ventasEfectivoTurno - yaRegistradoPOS));
+
+        this.logger.log(
+          `[CierreCaja] turno=${turno.id} ` +
+            `ventasEfectivoTurno=${ventasEfectivoTurno} ` +
+            `yaRegistradoPOS=${yaRegistradoPOS} ` +
+            `faltante=${Math.max(0, r2(ventasEfectivoTurno - yaRegistradoPOS))}`,
+        );
 
         const refAsiento = `SYS:ASIENTO_VENTAS_TURNO_${turno.id}`;
         const asientoPrev = await tx.movimientoFinanciero.findUnique({
@@ -698,6 +542,16 @@ export class CajaService {
         );
       }
 
+      this.logger.log(
+        `[CierreCaja] turno=${turno.id} ` +
+          `enCajaAntes=${enCaja} baseDeseada=${baseDeseada} disponible=${disponibleParaDepositar} ` +
+          `montoDeposito=${montoDeposito}`,
+      );
+
+      this.logger.log(
+        `[CierreCaja] turno=${turno.id} saldoFinal=${saldoFinal} (esperado≈base ${baseDeseada})`,
+      );
+
       return {
         turnoCerrado: {
           id: cerrado.id,
@@ -770,9 +624,14 @@ export class CajaService {
    * @param params ID de sucursal e usuarioID para encontrar la ultima caja abierta
    * @returns caja abierta con datos previos lista para cerrar
    */
-  async conseguirCajaAbierta(sucursalId: number) {
+  async conseguirCajaAbierta(sucursalId: number, userID: number) {
     const caja = await this.prisma.registroCaja.findFirst({
-      where: { sucursalId, estado: EstadoTurnoCaja.ABIERTO, fechaCierre: null },
+      where: {
+        sucursalId,
+        estado: EstadoTurnoCaja.ABIERTO,
+        fechaCierre: null,
+        usuarioInicioId: userID,
+      },
       select: {
         id: true,
         saldoInicial: true,
@@ -803,110 +662,13 @@ export class CajaService {
    *
    * @returns Registros de cajas cerrados con toda la data necesaria para entender los movimientos
    */
-  async getCajasRegistros() {
-    // try {
-    //   const cajasRegistros = await this.prisma.registroCaja.findMany({
-    //     where: {
-    //       estado: 'CERRADO',
-    //     },
-    //     select: {
-    //       id: true,
-    //       comentario: true,
-    //       estado: true,
-    //       creadoEn: true,
-    //       actualizadoEn: true,
-    //       fechaApertura: true,
-    //       fechaCierre: true,
-    //       sucursal: true,
-    //       movimientos: {
-    //         include: {
-    //           usuario: true,
-    //         },
-    //       },
-    //       saldoFinal: true,
-    //       saldoInicial: true,
-    //       usuarioCierre: true,
-    //       usuarioInicio: true,
-    //       venta: {
-    //         include: {
-    //           cliente: true,
-    //           productos: true,
-    //           metodoPago: {
-    //             select: {
-    //               metodoPago: true,
-    //             },
-    //           },
-    //         },
-    //       },
-    //     },
-    //   });
-    //   const cajasFormatt = cajasRegistros.map((c) => ({
-    //     cajaID: c.id,
-    //     cajaComentario: c.comentario,
-    //     fechaApertura: c.fechaApertura,
-    //     fechaCierre: c.fechaCierre,
-    //     creadoEn: c.creadoEn,
-    //     actualizadoEn: c.actualizadoEn,
-    //     saldoInicial: c.saldoInicial,
-    //     saldoFinal: c.saldoFinal,
-    //     estado: c.estado,
-    //     usuario: {
-    //       id: c.usuarioInicio.id,
-    //       nombre: c.usuarioInicio.nombre,
-    //       rol: c.usuarioInicio.rol,
-    //       correo: c.usuarioInicio.correo,
-    //     },
-    //     sucursal: {
-    //       id: c.sucursal.id,
-    //       nombre: c.sucursal.nombre,
-    //     },
-    //     ventasEnTurno: c.venta.map((v) => ({
-    //       id: v.id,
-    //       fechaVenta: v.fechaVenta,
-    //       referenciaPago: v.referenciaPago,
-    //       tipoComprobante: v.tipoComprobante,
-    //       totalVenta: v.totalVenta,
-    //       productos: v.productos.map((prod) => ({
-    //         id: prod.id,
-    //         cantidadVentida: prod.cantidad,
-    //         precioVendido: prod.precioVenta,
-    //         estado: prod.estado,
-    //       })),
-    //     })),
-    //     movimientosEnTurno: c.movimientos.map((m) => ({
-    //       id: m.id,
-    //       banco: m.banco,
-    //       fechaMovimiento: m.fecha,
-    //       tipoDeMovimiento: m.tipo,
-    //       categoriaDeMovimiento: m.categoria,
-    //       creadoEn: m.creadoEn,
-    //       actualizadoEn: m.actualizadoEn,
-    //       descripcionMovimiento: m.descripcion,
-    //       monto: m.monto,
-    //       numeroBoleta: m.numeroBoleta,
-    //       referencia: m.referencia,
-    //       usadoParaCierre: m.usadoParaCierre,
-    //       usuarioRegistra: {
-    //         id: m.usuario.id,
-    //         nombre: m.usuario.nombre,
-    //         rol: m.usuario.rol,
-    //       },
-    //     })),
-    //   }));
-    //   return cajasFormatt;
-    // } catch (err) {
-    //   if (err instanceof BadRequestException) throw err;
-    //   this.logger.error('Error cerrando caja:', err);
-    //   throw new InternalServerErrorException('Error inesperado al cerrar caja');
-    // }
-  }
+  async getCajasRegistros() {}
 
   /**
    * Liga una venta al turno de caja abierto de su sucursal.
    * - Requiere caja abierta si la venta tiene pagos en EFECTIVO (configurable).
    * - Idempotente: si ya está ligada, no falla.
    */
-
   // Wrapper opcional: si alguien llama sin tx, abrimos una.
   async linkVentaToCaja(
     ventaID: number,
@@ -1164,11 +926,6 @@ export class CajaService {
       }),
     ]);
 
-    // const saldoInicial = Number(turno.saldoInicial ?? 0);
-    // const fondoFijo = Number(turno.fondoFijo ?? 0);
-    // const deltaCaja = Number(sumAll._sum.deltaCaja ?? 0);
-    // const enCaja = saldoInicial + deltaCaja;
-
     const { saldoInicial, fondoFijo, enCaja, enCajaOperable, maxDeposito } =
       await this.utilities.getCajaEstado(this.prisma, turno.id);
 
@@ -1239,70 +996,7 @@ export class CajaService {
    * Obtiene el snapshot diario de saldo de una sucursal. Si no existe,
    * intenta recalcular mínimos usando cierres de caja del día.
    */
-  async getSaldoDiario(sucursalId: number, fechaISO?: string) {
-    //   try {
-    //     const fecha = fechaISO ? new Date(fechaISO) : new Date();
-    //     // normalizamos a inicio y fin del día
-    //     const startOfDay = new Date(
-    //       fecha.getFullYear(),
-    //       fecha.getMonth(),
-    //       fecha.getDate(),
-    //     );
-    //     const endOfDay = new Date(
-    //       fecha.getFullYear(),
-    //       fecha.getMonth(),
-    //       fecha.getDate() + 1,
-    //     );
-    //     // 1) Buscar snapshot guardado del día
-    //     const snap = await this.prisma.sucursalSaldoDiario.findFirst({
-    //       where: { sucursalId, fechaGenerado: startOfDay },
-    //       select: {
-    //         saldoInicio: true,
-    //         saldoFinal: true,
-    //         totalIngresos: true,
-    //         totalEgresos: true,
-    //       },
-    //     });
-    //     if (snap) {
-    //       // normalizamos por si vienen nulls desde DB
-    //       return {
-    //         saldoInicio: Number(snap.saldoInicio ?? 0),
-    //         saldoFinal: Number(snap.saldoFinal ?? 0),
-    //         totalIngresos:
-    //           snap.totalIngresos === null ? null : Number(snap.totalIngresos),
-    //         totalEgresos:
-    //           snap.totalEgresos === null ? null : Number(snap.totalEgresos),
-    //       };
-    //     }
-    //     // 2) Recalcular básico desde cierres de caja del día
-    //     const cierres = await this.prisma.registroCaja.findMany({
-    //       where: {
-    //         sucursalId,
-    //         fechaCierre: { gte: startOfDay, lt: endOfDay },
-    //       },
-    //       select: { saldoInicial: true, saldoFinal: true, id: true },
-    //       orderBy: { fechaCierre: 'asc' },
-    //     });
-    //     const saldoInicio = cierres.length
-    //       ? Number(cierres[0].saldoInicial ?? 0)
-    //       : 0;
-    //     const saldoFinal = cierres.length
-    //       ? Number(cierres[cierres.length - 1].saldoFinal ?? 0)
-    //       : 0;
-    //     // Si más adelante quieres sumar ingresos/egresos del día, acá es el lugar:
-    //     // const totalIngresos = await this.prisma.movimientoCaja.aggregate({...})
-    //     // const totalEgresos = await this.prisma.movimientoCaja.aggregate({...})
-    //     const totalIngresos: number | null = null;
-    //     const totalEgresos: number | null = null;
-    //     return { saldoInicio, saldoFinal, totalIngresos, totalEgresos };
-    //   } catch (error) {
-    //     console.error('[SucursalSaldoQueryService.getSaldoDiario]', error);
-    //     throw new InternalServerErrorException(
-    //       'Error al obtener el saldo diario',
-    //     );
-    //   }
-    // }
-  }
+  async getSaldoDiario(sucursalId: number, fechaISO?: string) {}
 
   /**
    * Sugerencia de saldo para abrir la próxima caja:
@@ -1312,36 +1006,70 @@ export class CajaService {
    *    - Si no hay, usa snapshot diario (saldoFinalCaja si existe; fallback saldoFinal).
    *    - Si tampoco hay, 0.
    */
-  async getUltimoSaldoSucursal(sucursalId: number): Promise<number> {
-    // 1) Si hay turno ABIERTO, sugerimos 0 (evita doble apertura)
-    const abierta = await this.prisma.registroCaja.findFirst({
-      where: { sucursalId, estado: EstadoTurnoCaja.ABIERTO, fechaCierre: null },
-      select: { id: true },
-    });
-    if (abierta) return 0;
+  // async getUltimoSaldoSucursal(sucursalId: number): Promise<number> {
+  //   // 1) Si hay turno ABIERTO, sugerimos 0 (evita doble apertura)
+  //   const abierta = await this.prisma.registroCaja.findFirst({
+  //     where: { sucursalId, estado: EstadoTurnoCaja.ABIERTO, fechaCierre: null },
+  //     select: { id: true },
+  //   });
+  //   if (abierta) return 0;
 
-    // 2) Último turno CERRADO/ARQUEO: su saldoFinal YA incluye deltas (incluye parciales)
+  //   // 2) Último turno CERRADO/ARQUEO: su saldoFinal YA incluye deltas (incluye parciales)
+  //   const ultima = await this.prisma.registroCaja.findFirst({
+  //     where: {
+  //       sucursalId,
+  //       estado: { in: [EstadoTurnoCaja.CERRADO, EstadoTurnoCaja.ARQUEO] },
+  //     },
+  //     orderBy: { fechaCierre: 'desc' },
+  //     select: { saldoFinal: true },
+  //   });
+  //   if (ultima?.saldoFinal != null) {
+  //     const sf = Number(ultima.saldoFinal);
+  //     return Math.abs(sf) < 0.01 ? 0 : sf;
+  //   }
+
+  //   // 3) Fallback: snapshot diario (tu modelo actual usa saldoFinalCaja)
+  //   const snap = await this.prisma.sucursalSaldoDiario.findFirst({
+  //     where: { sucursalId },
+  //     orderBy: { fecha: 'desc' }, // tu campo de fecha en el snapshot
+  //     select: { saldoFinalCaja: true }, // <-- ¡Úsalo, no 'saldoFinal'!
+  //   });
+
+  //   return snap ? Number(snap.saldoFinalCaja) : 0;
+  // }
+
+  /**
+   * Sugerencia de saldo para abrir caja a NIVEL SUCURSAL (no por usuario).
+   * Preferimos el snapshot diario; si no existe, caemos al último turno cerrado.
+   * Nota: NO bloquea por cajas abiertas en la sucursal (multiusuario).
+   */
+  async getUltimoSaldoSucursal(sucursalId: number): Promise<number> {
+    // 1) Preferir snapshot más reciente (lo que “quedó” en sucursal)
+    const snap = await this.prisma.sucursalSaldoDiario.findFirst({
+      where: { sucursalId },
+      orderBy: { fecha: 'desc' },
+      select: { saldoFinalCaja: true },
+    });
+    if (snap) return Number(snap.saldoFinalCaja ?? 0);
+
+    // 2) Fallback: último turno CERRADO/ARQUEO/AJUSTADO de la sucursal
     const ultima = await this.prisma.registroCaja.findFirst({
       where: {
         sucursalId,
-        estado: { in: [EstadoTurnoCaja.CERRADO, EstadoTurnoCaja.ARQUEO] },
+        estado: {
+          in: [
+            EstadoTurnoCaja.CERRADO,
+            EstadoTurnoCaja.ARQUEO,
+            EstadoTurnoCaja.AJUSTADO,
+          ],
+        },
       },
       orderBy: { fechaCierre: 'desc' },
       select: { saldoFinal: true },
     });
-    if (ultima?.saldoFinal != null) {
-      const sf = Number(ultima.saldoFinal);
-      return Math.abs(sf) < 0.01 ? 0 : sf;
-    }
 
-    // 3) Fallback: snapshot diario (tu modelo actual usa saldoFinalCaja)
-    const snap = await this.prisma.sucursalSaldoDiario.findFirst({
-      where: { sucursalId },
-      orderBy: { fecha: 'desc' }, // tu campo de fecha en el snapshot
-      select: { saldoFinalCaja: true }, // <-- ¡Úsalo, no 'saldoFinal'!
-    });
-
-    return snap ? Number(snap.saldoFinalCaja) : 0;
+    const sf = Number(ultima?.saldoFinal ?? 0);
+    return Math.abs(sf) < 0.01 ? 0 : sf;
   }
 
   //NUEVO GET CAJAS A TABLE
@@ -1570,16 +1298,111 @@ export class CajaService {
 
   //VINCULAR CON CAJA TURNO
   // En tu CajaService o un “VentasFinanzasService”
+  // async attachAndRecordSaleTx(
+  //   tx: Prisma.TransactionClient,
+  //   ventaId: number,
+  //   sucursalId: number,
+  //   usuarioId: number, // quien registró la venta
+  //   opts?: { exigirCajaSiEfectivo?: boolean },
+  // ) {
+  //   const { exigirCajaSiEfectivo = true } = opts ?? {};
+
+  //   // 1) traigo venta con método de pago
+  //   const venta = await tx.venta.findUnique({
+  //     where: { id: ventaId },
+  //     select: {
+  //       id: true,
+  //       totalVenta: true,
+  //       registroCajaId: true,
+  //       sucursalId: true,
+  //       referenciaPago: true,
+  //       usuarioId: true,
+  //       metodoPago: { select: { metodoPago: true } }, // string enum: CONTADO | TRANSFERENCIA | TARJETA | CREDITO...
+  //     },
+  //   });
+  //   if (!venta) throw new NotFoundException('Venta no encontrada');
+
+  //   const metodo = venta.metodoPago?.metodoPago ?? 'CONTADO';
+  //   const requiereCaja = metodo === 'CONTADO' && venta.totalVenta > 0;
+
+  //   let registroCajaId: number | null = venta.registroCajaId ?? null;
+
+  //   // 2) si es CONTADO, asegurar caja abierta y linkear
+  //   if (requiereCaja) {
+  //     // busca caja abierta
+  //     const cajaAbierta = await tx.registroCaja.findFirst({
+  //       where: { sucursalId, estado: 'ABIERTO', fechaCierre: null },
+  //       orderBy: { fechaApertura: 'desc' },
+  //       select: { id: true },
+  //     });
+
+  //     if (!cajaAbierta) {
+  //       if (exigirCajaSiEfectivo) {
+  //         throw new BadRequestException(
+  //           'No hay caja abierta para venta en efectivo.',
+  //         );
+  //       }
+  //     } else {
+  //       // lock & recheck
+  //       await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+  //       await tx.$queryRaw`
+  //       SELECT id FROM "RegistroCaja"
+  //       WHERE id = ${cajaAbierta.id}
+  //       FOR UPDATE NOWAIT
+  //     `;
+  //       // linkear si aún no estaba linkeada
+  //       await tx.venta.updateMany({
+  //         where: { id: venta.id, registroCajaId: null },
+  //         data: { registroCajaId: cajaAbierta.id },
+  //       });
+  //       const linked = await tx.venta.findUnique({
+  //         where: { id: venta.id },
+  //         select: { registroCajaId: true },
+  //       });
+  //       registroCajaId = linked?.registroCajaId ?? null;
+  //     }
+  //   }
+
+  //   // 3) Crear MovimientoFinanciero desde la venta (una sola verdad contable)
+  //   //    - CONTADO: deltaCaja +total
+  //   //    - TARJETA/TRANSFERENCIA: deltaBanco +total
+  //   //    - CREDITO: no crear movimiento (se creará al cobrar)
+  //   if (metodo !== 'CREDITO' && venta.totalVenta > 0) {
+  //     const esEfectivo = metodo === 'CONTADO';
+  //     await tx.movimientoFinanciero.create({
+  //       data: {
+  //         fecha: new Date(),
+  //         sucursalId,
+  //         registroCajaId: esEfectivo ? registroCajaId : null,
+  //         clasificacion: 'INGRESO',
+  //         motivo: 'VENTA',
+  //         metodoPago: metodo,
+  //         deltaCaja: esEfectivo ? venta.totalVenta : 0,
+  //         deltaBanco: !esEfectivo ? venta.totalVenta : 0,
+  //         descripcion: `Venta #${venta.id}`,
+  //         referencia: venta.referenciaPago ?? null,
+  //         usuarioId: usuarioId ?? venta.usuarioId,
+  //         // extras que te sirven para filtros:
+  //         esDepositoCierre: false,
+  //         esDepositoProveedor: false,
+  //         afectaInventario: false, // inventario lo llevas en HistorialStock
+  //       },
+  //     });
+  //   }
+
+  //   return { ventaId: venta.id, registroCajaId };
+  // }
+
+  // CajaService
   async attachAndRecordSaleTx(
     tx: Prisma.TransactionClient,
     ventaId: number,
     sucursalId: number,
-    usuarioId: number, // quien registró la venta
+    usuarioId: number,
     opts?: { exigirCajaSiEfectivo?: boolean },
   ) {
     const { exigirCajaSiEfectivo = true } = opts ?? {};
 
-    // 1) traigo venta con método de pago
     const venta = await tx.venta.findUnique({
       where: { id: ventaId },
       select: {
@@ -1589,83 +1412,73 @@ export class CajaService {
         sucursalId: true,
         referenciaPago: true,
         usuarioId: true,
-        metodoPago: { select: { metodoPago: true } }, // string enum: CONTADO | TRANSFERENCIA | TARJETA | CREDITO...
+        metodoPago: { select: { metodoPago: true } },
       },
     });
     if (!venta) throw new NotFoundException('Venta no encontrada');
 
     const metodo = venta.metodoPago?.metodoPago ?? 'CONTADO';
-    const requiereCaja = metodo === 'CONTADO' && venta.totalVenta > 0;
+    const esEfectivo = metodo === 'CONTADO';
+    const esCredito = metodo === 'CREDITO';
 
-    let registroCajaId: number | null = venta.registroCajaId ?? null;
+    // 1) Turno del USUARIO en esa sucursal
+    const turno = await tx.registroCaja.findFirst({
+      where: {
+        sucursalId,
+        usuarioInicioId: usuarioId, // ← filtro por usuario
+        estado: 'ABIERTO',
+        fechaCierre: null,
+      },
+      orderBy: { fechaApertura: 'desc' },
+      select: { id: true },
+    });
 
-    // 2) si es CONTADO, asegurar caja abierta y linkear
-    if (requiereCaja) {
-      // busca caja abierta
-      const cajaAbierta = await tx.registroCaja.findFirst({
-        where: { sucursalId, estado: 'ABIERTO', fechaCierre: null },
-        orderBy: { fechaApertura: 'desc' },
-        select: { id: true },
-      });
-
-      if (!cajaAbierta) {
-        if (exigirCajaSiEfectivo) {
-          throw new BadRequestException(
-            'No hay caja abierta para venta en efectivo.',
-          );
-        }
-      } else {
-        // lock & recheck
-        await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
-        await tx.$queryRaw`
-        SELECT id FROM "RegistroCaja"
-        WHERE id = ${cajaAbierta.id}
-        FOR UPDATE NOWAIT
-      `;
-        // linkear si aún no estaba linkeada
-        await tx.venta.updateMany({
-          where: { id: venta.id, registroCajaId: null },
-          data: { registroCajaId: cajaAbierta.id },
-        });
-        const linked = await tx.venta.findUnique({
-          where: { id: venta.id },
-          select: { registroCajaId: true },
-        });
-        registroCajaId = linked?.registroCajaId ?? null;
+    if (esEfectivo && !turno) {
+      if (exigirCajaSiEfectivo) {
+        throw new BadRequestException(
+          'No tienes una caja abierta en esta sucursal para registrar la venta en efectivo.',
+        );
       }
     }
 
-    // 3) Crear MovimientoFinanciero desde la venta (una sola verdad contable)
-    //    - CONTADO: deltaCaja +total
-    //    - TARJETA/TRANSFERENCIA: deltaBanco +total
-    //    - CREDITO: no crear movimiento (se creará al cobrar)
-    if (metodo !== 'CREDITO' && venta.totalVenta > 0) {
-      const esEfectivo = metodo === 'CONTADO';
+    // 2) (Meta) Linkear la venta al turno del usuario si existe (aunque no sea efectivo)
+    if (turno) {
+      await tx.venta.updateMany({
+        where: { id: venta.id, registroCajaId: null },
+        data: { registroCajaId: turno.id },
+      });
+    }
+
+    // 3) Movimiento financiero: una sola verdad contable
+    if (!esCredito && venta.totalVenta > 0) {
       await tx.movimientoFinanciero.create({
         data: {
           fecha: new Date(),
           sucursalId,
-          registroCajaId: esEfectivo ? registroCajaId : null,
+          registroCajaId: esEfectivo ? (turno?.id ?? null) : null,
           clasificacion: 'INGRESO',
           motivo: 'VENTA',
           metodoPago: metodo,
           deltaCaja: esEfectivo ? venta.totalVenta : 0,
-          deltaBanco: !esEfectivo ? venta.totalVenta : 0,
+          deltaBanco: esEfectivo ? 0 : venta.totalVenta,
           descripcion: `Venta #${venta.id}`,
           referencia: venta.referenciaPago ?? null,
           usuarioId: usuarioId ?? venta.usuarioId,
-          // extras que te sirven para filtros:
           esDepositoCierre: false,
           esDepositoProveedor: false,
-          afectaInventario: false, // inventario lo llevas en HistorialStock
+          afectaInventario: false,
         },
       });
     }
 
-    return { ventaId: venta.id, registroCajaId };
+    return { ventaId: venta.id, registroCajaId: turno?.id ?? null };
   }
 
-  //GET DE CAJAS ABIERTAS
+  /**
+   *
+   * @param sucursalId SUCURSAL
+   * @returns
+   */
   async getCajasAbiertasToCompra(sucursalId: number) {
     try {
       const cajasAptas = await this.prisma.registroCaja.findMany({
@@ -1708,102 +1521,6 @@ export class CajaService {
     }
   }
 
-  //SNAPSHOOTS Y HELPERS
-  /**
-   * Calcula y guarda el snapshot diario (Caja/Banco) de una sucursal para la fecha dada.
-   * Debe llamarse DENTRO de la misma $transaction del cierre de caja.
-   */
-  // async upsertSucursalSnapshot(
-  //   tx: PrismaService['$transaction']['arguments'][0],
-  //   sucursalId: number,
-  //   fechaRef?: Date, // si no se pasa, usa "ahora"
-  // ) {
-  //   const hoy = dayjs(fechaRef ?? new Date()).tz(TZGT);
-  //   const fechaCorte = hoy.startOf('day').toDate(); // normaliza a 00:00 GT
-  //   const dayStart = hoy.startOf('day').toDate();
-  //   const dayEnd = hoy.endOf('day').toDate();
-
-  //   // Sumatorias del día por deltaCaja/deltaBanco
-  //   const [aggCajaIn, aggCajaOut, aggBanIn, aggBanOut] = await Promise.all([
-  //     tx.movimientoFinanciero.aggregate({
-  //       _sum: { deltaCaja: true },
-  //       where: {
-  //         sucursalId,
-  //         fecha: { gte: dayStart, lte: dayEnd },
-  //         deltaCaja: { gt: 0 },
-  //         NOT: [{ motivo: 'VENTA', esAsientoVentas: false }], // <- clave
-  //       },
-  //     }),
-  //     tx.movimientoFinanciero.aggregate({
-  //       _sum: { deltaCaja: true },
-  //       where: {
-  //         sucursalId,
-  //         fecha: { gte: dayStart, lte: dayEnd },
-  //         deltaCaja: { lt: 0 },
-  //       },
-  //     }),
-  //     tx.movimientoFinanciero.aggregate({
-  //       _sum: { deltaBanco: true },
-  //       where: {
-  //         sucursalId,
-  //         fecha: { gte: dayStart, lte: dayEnd },
-  //         deltaBanco: { gt: 0 },
-  //       },
-  //     }),
-  //     tx.movimientoFinanciero.aggregate({
-  //       _sum: { deltaBanco: true },
-  //       where: {
-  //         sucursalId,
-  //         fecha: { gte: dayStart, lte: dayEnd },
-  //         deltaBanco: { lt: 0 },
-  //       },
-  //     }),
-  //   ]);
-
-  //   // Snapshot previo (día anterior) => saldos de inicio
-  //   const snapPrev = await tx.sucursalSaldoDiario.findFirst({
-  //     where: { sucursalId, fecha: { lt: fechaCorte } },
-  //     orderBy: { fecha: 'desc' },
-  //     select: { saldoFinalCaja: true, saldoFinalBanco: true },
-  //   });
-
-  //   const saldoInicioCaja = Number(snapPrev?.saldoFinalCaja ?? 0);
-  //   const ingresosCaja = Number(aggCajaIn._sum.deltaCaja ?? 0);
-  //   const egresosCajaAbs = Math.abs(Number(aggCajaOut._sum.deltaCaja ?? 0));
-  //   const saldoFinalCaja = saldoInicioCaja + ingresosCaja - egresosCajaAbs;
-
-  //   const saldoInicioBanco = Number(snapPrev?.saldoFinalBanco ?? 0);
-  //   const ingresosBanco = Number(aggBanIn._sum.deltaBanco ?? 0);
-  //   const egresosBancoAbs = Math.abs(Number(aggBanOut._sum.deltaBanco ?? 0));
-  //   const saldoFinalBanco = saldoInicioBanco + ingresosBanco - egresosBancoAbs;
-
-  //   // UPSERT del snapshot de HOY
-  //   await tx.sucursalSaldoDiario.upsert({
-  //     where: { sucursalId_fecha: { sucursalId, fecha: fechaCorte } },
-  //     create: {
-  //       sucursalId,
-  //       fecha: fechaCorte,
-  //       saldoInicioCaja,
-  //       ingresosCaja,
-  //       egresosCaja: egresosCajaAbs,
-  //       saldoFinalCaja,
-  //       saldoInicioBanco,
-  //       ingresosBanco,
-  //       egresosBanco: egresosBancoAbs,
-  //       saldoFinalBanco,
-  //     },
-  //     update: {
-  //       saldoInicioCaja,
-  //       ingresosCaja,
-  //       egresosCaja: egresosCajaAbs,
-  //       saldoFinalCaja,
-  //       saldoInicioBanco,
-  //       ingresosBanco,
-  //       egresosBanco: egresosBancoAbs,
-  //       saldoFinalBanco,
-  //     },
-  //   });
-  // }
   async upsertSucursalSnapshot(
     tx: PrismaService['$transaction']['arguments'][0],
     sucursalId: number,
@@ -1816,7 +1533,7 @@ export class CajaService {
     const dayEnd = hoy.endOf('day').toDate();
 
     // 1) Agregados del día (deltaCaja/deltaBanco por signo)
-    const [aggCajaIn, aggCajaOut, aggBanIn, aggBanOut, apertura] =
+    const [aggCajaIn, aggCajaOut, aggBanIn, aggBanOut, aperturasAgg] =
       await Promise.all([
         tx.movimientoFinanciero.aggregate({
           _sum: { deltaCaja: true },
@@ -1850,12 +1567,10 @@ export class CajaService {
             deltaBanco: { lt: 0 },
           },
         }),
-
-        // 👇 Apertura del PRIMER turno del día (si existe)
-        tx.registroCaja.findFirst({
+        // 👇 SUMA de TODAS las aperturas del día (no la primera)
+        tx.registroCaja.aggregate({
+          _sum: { saldoInicial: true },
           where: { sucursalId, fechaApertura: { gte: dayStart, lte: dayEnd } },
-          orderBy: { fechaApertura: 'asc' },
-          select: { saldoInicial: true },
         }),
       ]);
 
@@ -1866,11 +1581,19 @@ export class CajaService {
       select: { saldoFinalCaja: true, saldoFinalBanco: true },
     });
 
+    const sumaAperturas = Number(aperturasAgg._sum.saldoInicial ?? 0);
+    const saldoInicioCaja = snapPrev
+      ? Number(snapPrev.saldoFinalCaja ?? 0)
+      : sumaAperturas;
+    const saldoInicioBanco = snapPrev
+      ? Number(snapPrev.saldoFinalBanco ?? 0)
+      : 0;
+
     // 3) INICIOS correctos del día
-    const saldoInicioCaja = Number(
-      apertura?.saldoInicial ?? snapPrev?.saldoFinalCaja ?? 0,
-    );
-    const saldoInicioBanco = Number(snapPrev?.saldoFinalBanco ?? 0);
+    // const saldoInicioCaja = Number(
+    //   apertura?.saldoInicial ?? snapPrev?.saldoFinalCaja ?? 0,
+    // );
+    // const saldoInicioBanco = Number(snapPrev?.saldoFinalBanco ?? 0);
 
     // 4) Movimientos del día
     const ingresosCaja = Number(aggCajaIn._sum.deltaCaja ?? 0);
@@ -1954,5 +1677,76 @@ export class CajaService {
         egresosTotalBanco: Number(sum._sum.egresosBanco ?? 0),
       },
     });
+  }
+  //servicio utilitario
+  async generateMovimientoFinanciero(
+    tx: Prisma.TransactionClient,
+    metodoPago: MetodoPago,
+    usuarioId: number,
+    sucursalId: number,
+    monto: number,
+  ) {
+    try {
+      const isNecesaryCash =
+        metodoPago === 'CONTADO' || metodoPago === 'EFECTIVO';
+
+      if (isNecesaryCash) {
+        const turnoFound = await tx.registroCaja.findFirst({
+          where: {
+            sucursalId: sucursalId,
+            estado: 'ABIERTO',
+          },
+        });
+      }
+    } catch (error) {
+      this.logger.error(
+        'Error en generar movimiento financiero service de utilidad',
+      );
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException('Fatal error: Error inesperado');
+    }
+  }
+
+  /**
+   * Sugerencia de saldo para abrir la próxima caja del USUARIO:
+   * - Si el usuario YA tiene una caja abierta en la sucursal => 0 (no debe abrir otra).
+   * - Si no, toma el saldoFinal del ÚLTIMO turno CERRADO/ARQUEO/AJUSTADO de ese usuario.
+   * - Si no hay historial, 0.
+   */
+  async getUltimoSaldoUsuario(
+    sucursalId: number,
+    userId: number,
+  ): Promise<number> {
+    // ¿este usuario ya tiene una caja abierta?
+    const abiertaUser = await this.prisma.registroCaja.findFirst({
+      where: {
+        sucursalId,
+        usuarioInicioId: userId,
+        estado: EstadoTurnoCaja.ABIERTO,
+        fechaCierre: null,
+      },
+      select: { id: true },
+    });
+    if (abiertaUser) return 0;
+
+    // último turno del usuario (cerrado/arqueo/ajustado)
+    const ultimaUser = await this.prisma.registroCaja.findFirst({
+      where: {
+        sucursalId,
+        usuarioInicioId: userId,
+        estado: {
+          in: [
+            EstadoTurnoCaja.CERRADO,
+            EstadoTurnoCaja.ARQUEO,
+            EstadoTurnoCaja.AJUSTADO,
+          ],
+        },
+      },
+      orderBy: { fechaCierre: 'desc' },
+      select: { saldoFinal: true },
+    });
+
+    const sf = Number(ultimaUser?.saldoFinal ?? 0);
+    return Math.abs(sf) < 0.01 ? 0 : sf;
   }
 }

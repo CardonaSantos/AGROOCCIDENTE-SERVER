@@ -70,11 +70,6 @@ export class MetasController {
     return this.metasService.deleteAllMetasUsers();
   }
 
-  @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.metasService.findOne(+id);
-  }
-
   @Patch('/update-one-meta/:id')
   updateMetaTienda(
     @Param('id', ParseIntPipe) id: number,
@@ -93,11 +88,6 @@ export class MetasController {
     console.log('Entrando al service update cobro');
 
     return this.metasService.updateMetaCobros(id, updateMetaDto);
-  }
-
-  @Patch(':id')
-  update(@Param('id') id: string, @Body() updateMetaDto: UpdateMetaDto) {
-    return this.metasService.update(+id, updateMetaDto);
   }
 
   @Delete('/delete-one-payment/:metaId/:id')
@@ -124,10 +114,5 @@ export class MetasController {
     @Body('passwordAdmin') passwordAdmin: string, // Recibe la contraseña desde el cuerpo
   ) {
     return this.metasService.removeOneCobroMeta(id, adminId, passwordAdmin); // Llama al servicio con el ID y la contraseña
-  }
-
-  @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.metasService.remove(+id);
   }
 }

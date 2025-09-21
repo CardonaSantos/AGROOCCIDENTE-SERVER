@@ -5,9 +5,10 @@ import {
   IsEnum,
   IsDate,
   IsNotEmpty,
+  IsNumber,
 } from 'class-validator';
 import { Type } from 'class-transformer';
-import { EstadoPago } from '@prisma/client';
+import { EstadoPago, MetodoPago } from '@prisma/client';
 
 // Enum para el estado de la cuota
 
@@ -51,4 +52,11 @@ export class CuotaDto {
 
   @IsOptional()
   comentario?: string;
+
+  @IsEnum(MetodoPago)
+  metodoPago: MetodoPago;
+
+  @IsOptional()
+  @IsNumber()
+  cuentaBancariaId?: string;
 }

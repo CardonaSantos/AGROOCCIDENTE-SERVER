@@ -28,6 +28,7 @@ export interface ResumenDiarioAdminResponse {
     ticketPromedio: number;
     porMetodo: Record<MetodoPago, number>;
     efectivo: number;
+    efectivoCobrosCredito: number;
   };
 
   // Egresos operativos

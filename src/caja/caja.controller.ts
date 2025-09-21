@@ -48,11 +48,19 @@ export class CajaController {
     return this.cajaService.cerrarCajaV3(dto);
   }
 
-  @Get('/get-ultimo-saldo-sucursal/:sucursalID')
-  getUltimoSaldoSucursal(
+  // @Get('/get-ultimo-saldo-sucursal/:sucursalID')
+  // getUltimoSaldoSucursal(
+  //   @Param('sucursalID', ParseIntPipe) sucursalID: number,
+  // ) {
+  //   return this.cajaService.getUltimoSaldoSucursal(sucursalID);
+  // }
+
+  @Get('/get-ultimo-saldo-usuario/:sucursalID/:userID')
+  getUltimoSaldoUsuario(
     @Param('sucursalID', ParseIntPipe) sucursalID: number,
+    @Param('userID', ParseIntPipe) userID: number,
   ) {
-    return this.cajaService.getUltimoSaldoSucursal(sucursalID);
+    return this.cajaService.getUltimoSaldoUsuario(sucursalID, userID);
   }
 
   @Get('previa-cierre')
@@ -87,7 +95,7 @@ export class CajaController {
       sucursalID: sucursalID,
       userID: userID,
     };
-    return this.cajaService.conseguirCajaAbierta(dto.sucursalID);
+    return this.cajaService.conseguirCajaAbierta(dto.sucursalID, dto.userID);
   }
 
   @Get('/get-previo-cierre/:sucursalID/:userID')
