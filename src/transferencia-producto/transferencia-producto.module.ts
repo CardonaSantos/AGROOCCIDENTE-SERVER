@@ -3,7 +3,7 @@ import { TransferenciaProductoService } from './transferencia-producto.service';
 import { TransferenciaProductoController } from './transferencia-producto.controller';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { NotificationService } from 'src/notification/notification.service';
-import { WebsocketGateway } from 'src/web-sockets/websocket.gateway';
+import { LegacyGateway } from 'src/web-sockets/websocket.gateway';
 import { HistorialStockTrackerService } from 'src/historial-stock-tracker/historial-stock-tracker.service';
 
 @Module({
@@ -12,7 +12,7 @@ import { HistorialStockTrackerService } from 'src/historial-stock-tracker/histor
     TransferenciaProductoService,
     PrismaService,
     NotificationService,
-    WebsocketGateway,
+    LegacyGateway,
   ],
 })
 export class TransferenciaProductoModule {}

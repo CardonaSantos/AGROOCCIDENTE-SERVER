@@ -1,9 +1,8 @@
 import { Module, forwardRef } from '@nestjs/common';
-import { WebsocketGateway } from './websocket.gateway';
-// import { NotificationModule } from 'src/notification/notification.module';
+import { LegacyGateway } from './websocket.gateway';
 
 @Module({
-  providers: [WebsocketGateway],
-  exports: [WebsocketGateway],
+  providers: [LegacyGateway],
+  exports: [LegacyGateway],
 })
 export class GatewayModule {}

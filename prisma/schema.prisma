@@ -192,6 +192,8 @@ model Usuario {
   pedidos                  Pedido[]
   saldoGlobalSnapshots     SaldoGlobalDiario[]
   movimientosCaja          MovimientoFinanciero[]
+  //NUEVOS
+  comprasRecepcionadas     CompraRecepcion[]      @relation("UsuarioToCompraRecepciones")
 }
 
 // ============================================================================
@@ -242,18 +244,19 @@ model Producto {
   unidadBase               String                           @default("unidades") // "ml", "g", "unidades", etc.
   presentaciones           ProductoPresentacion[]
   stockPresentaciones      StockPresentacion[]              @relation("ProductoToStockPresentacion")
+  recepcionesCompraLineas  CompraRecepcionLinea[]
 }
 
 model ProductoPresentacion {
-  id               Int      @id @default(autoincrement())
-  productoId       Int
-  producto         Producto @relation(fields: [productoId], references: [id], onDelete: Cascade)
-  nombre           String
-  factorUnidadBase Decimal  @db.Decimal(18, 6)
-  sku              String?  @unique
-  codigoBarras     String?  @unique
-  esDefault        Boolean  @default(false)
-  activo           Boolean  @default(true)
+  id                  Int                 @id @default(autoincrement())
+  productoId          Int
+  producto            Producto            @relation(fields: [productoId], references: [id], onDelete: Cascade)
+  nombre              String
+  factorUnidadBase    Decimal             @db.Decimal(18, 6)
+  sku                 String?             @unique
+  codigoBarras        String?             @unique
+  esDefault           Boolean             @default(false)
+  activo              Boolean             @default(true)
   //precios por presentacion
   precios             PrecioProducto[]
   stockPresentaciones StockPresentacion[] @relation("PresentacionToStockPresentacion")
@@ -261,16 +264,18 @@ model ProductoPresentacion {
   //relaciones con ventas, requisiciones, pedidos
   ventaProductos    VentaProducto[]
   requisicionLineas RequisicionLinea[] @relation("RequisicionLineaToPresentacion")
-  compraDetalles CompraDetalle[] @relation("CompraDetalleToPresentacion")
-  pedidoLineas   PedidoLinea[]   @relation("PedidoLineaToPresentacion")
+  compraDetalles    CompraDetalle[]    @relation("CompraDetalleToPresentacion")
+  pedidoLineas      PedidoLinea[]      @relation("PedidoLineaToPresentacion")
 
-  tipoPresentacion TipoEmpaque @default(UNIDAD)
-  costoReferencialPresentacion Decimal? @db.Decimal(12,4)
+  tipoPresentacion             TipoEmpaque @default(UNIDAD)
+  costoReferencialPresentacion Decimal?    @db.Decimal(12, 4)
 
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
 
-  historialStock HistorialStock[]
+  historialStock          HistorialStock[]
+  //NUEVOS
+  recepcionesCompraLineas CompraRecepcionLinea[] @relation("PresentacionToCompraRecepcionLinea")
 
   @@unique([productoId, nombre])
   @@index([productoId])
@@ -290,19 +295,23 @@ model StockPresentacion {
   sucursalId Int
   sucursal   Sucursal @relation("SucursalToStockPresentacion", fields: [sucursalId], references: [id], onDelete: Cascade)
 
-
   requisicionRecepcionId Int?
   requisicionRecepcion   RequisicionRecepcion? @relation("StockPresentacionRecepcion", fields: [requisicionRecepcionId], references: [id], onDelete: SetNull)
 
   //historico para cantidad recibida
   cantidadRecibidaInicial Int
-  cantidadPresentacion      Int
+  cantidadPresentacion    Int
   // costoUnitarioBase         Decimal   @db.Decimal(12, 4)
   // costoUnitarioPresentacion Decimal?  @db.Decimal(12, 4)
-  fechaIngreso              DateTime
-  fechaVencimiento          DateTime?
-  creadoEn                  DateTime  @default(now())
-  actualizadoEn             DateTime  @updatedAt
+  fechaIngreso            DateTime
+  fechaVencimiento        DateTime?
+  creadoEn                DateTime              @default(now())
+  actualizadoEn           DateTime              @updatedAt
+  //NUEVO
+  compraRecepcionLinea    CompraRecepcionLinea? @relation("LineaToStockPresentacion")
+
+  compraRecepcionId Int?
+  compraRecepcion   CompraRecepcion? @relation("StockPresentacionToCompraRecepcion", fields: [compraRecepcionId], references: [id], onDelete: SetNull)
 
   @@index([productoId, sucursalId])
   @@index([presentacionId, sucursalId])
@@ -387,7 +396,7 @@ enum TipoEmpaque {
   BIDON
   TAMBOR
   BLISTER
-  UNIDAD 
+  UNIDAD
   BOTELLA
   CAJA
   PACK
@@ -507,8 +516,8 @@ model HistorialStock {
   garantiaId              Int?
   garantia                Garantia?              @relation(fields: [garantiaId], references: [id], onDelete: SetNull)
   //tracker de presentaciones
-    presentacionId Int?
-  presentacion   ProductoPresentacion? @relation(fields: [presentacionId], references: [id], onDelete: SetNull)
+  presentacionId          Int?
+  presentacion            ProductoPresentacion?  @relation(fields: [presentacionId], references: [id], onDelete: SetNull)
 }
 
 enum TipoMovimientoStock {
@@ -650,6 +659,7 @@ model Proveedor {
   //REFERENCIA AL registro final
   compras          Compra[]
   movimientosCaja  MovimientoFinanciero[]
+  cxpDocumentos    CxPDocumento[]         @relation("ProveedorToCxPDocumentos")
 }
 
 // ============================================================================
@@ -1018,9 +1028,8 @@ model RegistroCaja {
   actualizadoEn DateTime @updatedAt
 
   // @@index([sucursalId, estado])
-    @@index([sucursalId, estado, fechaCierre])
-    @@index([sucursalId, usuarioInicioId, estado, fechaCierre]) // ✅ nuevo
-
+  @@index([sucursalId, estado, fechaCierre])
+  @@index([sucursalId, usuarioInicioId, estado, fechaCierre]) // ✅ nuevo
 }
 
 enum EstadoTurnoCaja {
@@ -1088,7 +1097,8 @@ model MovimientoFinanciero {
   comprobanteNumero String?          @db.VarChar(64)
   comprobanteFecha  DateTime?
   comprobanteUrl    String? // foto/pdf del baucher
-  //nuevo
+  //NUEVO
+  pagoCxP           CxPPago?         @relation("CxPPagoToMovimiento")
 
   @@unique([registroCajaId, referencia], map: "uq_movfin_turno_referencia") // 👈 idempotencia por turno
   //CONCILIACION EN REPORTES DE CIERRES CON BOLETAS
@@ -1157,7 +1167,7 @@ enum MotivoMovimiento {
   AJUSTE_FALTANTE
   DEVOLUCION
   BANCO_A_CAJA //nuevo
-  COBRO_CREDITO//nuevo
+  COBRO_CREDITO //nuevo
 }
 
 // Subtipos útiles (se pueden volver tablas si el cliente quiere editar)
@@ -1327,28 +1337,27 @@ model RequisicionLinea {
   recepcionesLineas RequisicionRecepcionLinea[]
   compraDetalles    CompraDetalle[]             @relation("DetalleRequisicionCompra")
   // NUEVO: relación a presentación (todo en una sola línea)
-  presentacionId Int?
-  presentacion   ProductoPresentacion? @relation("RequisicionLineaToPresentacion", fields: [presentacionId], references: [id], onDelete: SetNull)
+  presentacionId    Int?
+  presentacion      ProductoPresentacion?       @relation("RequisicionLineaToPresentacion", fields: [presentacionId], references: [id], onDelete: SetNull)
+
   // Los @@ van al final del modelo
   @@index([requisicionId])
 }
 
 model RequisicionRecepcion {
-  id             Int                         @id @default(autoincrement())
-  requisicionId  Int
-  requisicion    Requisicion                 @relation(fields: [requisicionId], references: [id], onDelete: Cascade)
-  fechaRecepcion DateTime                    @default(now())
-  usuarioId      Int // usuario que confirma la recepción
-  usuario        Usuario                     @relation(fields: [usuarioId], references: [id])
-  observaciones  String? // notas o comentarios sobre la recepción
-  createdAt      DateTime                    @default(now())
-  updatedAt      DateTime                    @updatedAt
-  lineas         RequisicionRecepcionLinea[]
+  id                     Int                         @id @default(autoincrement())
+  requisicionId          Int
+  requisicion            Requisicion                 @relation(fields: [requisicionId], references: [id], onDelete: Cascade)
+  fechaRecepcion         DateTime                    @default(now())
+  usuarioId              Int // usuario que confirma la recepción
+  usuario                Usuario                     @relation(fields: [usuarioId], references: [id])
+  observaciones          String? // notas o comentarios sobre la recepción
+  createdAt              DateTime                    @default(now())
+  updatedAt              DateTime                    @updatedAt
+  lineas                 RequisicionRecepcionLinea[]
   //relacion con stock:
-  stockLotes     Stock[]                     @relation("StockRecepcion")
-    stockPresentacionLotes StockPresentacion[] @relation("StockPresentacionRecepcion")
-
-
+  stockLotes             Stock[]                     @relation("StockRecepcion")
+  stockPresentacionLotes StockPresentacion[]         @relation("StockPresentacionRecepcion")
 }
 
 model RequisicionRecepcionLinea {
@@ -1362,8 +1371,6 @@ model RequisicionRecepcionLinea {
   cantidadSolicitada     Int // cantidad solicitada en la requisición original (puedes replicar o calcular)
   cantidadRecibida       Int // cantidad realmente recibida y agregada a stock
   ingresadaAStock        Boolean              @default(true) // indica si se ingresó o no el stock
-
-
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1394,11 +1401,13 @@ model CompraDetalle {
   requisicionLineaId Int?
   requisicionLinea   RequisicionLinea? @relation("DetalleRequisicionCompra", fields: [requisicionLineaId], references: [id], onDelete: Cascade)
 
-  creadoEn       DateTime              @default(now())
-  actualizadoEn  DateTime              @updatedAt
+  creadoEn          DateTime               @default(now())
+  actualizadoEn     DateTime               @updatedAt
   // relación a presentación (NOMBRADA)
-  presentacionId Int?
-  presentacion   ProductoPresentacion? @relation("CompraDetalleToPresentacion", fields: [presentacionId], references: [id], onDelete: SetNull)
+  presentacionId    Int?
+  presentacion      ProductoPresentacion?  @relation("CompraDetalleToPresentacion", fields: [presentacionId], references: [id], onDelete: SetNull)
+  //NUEVOS
+  recepcionesLineas CompraRecepcionLinea[]
 }
 
 enum EstadoCompra {
@@ -1439,6 +1448,10 @@ model Compra {
   facturaFecha  DateTime? // si quieres guardar la fecha de emisión
   conFactura    Boolean      @default(false) // si solo te interesa saber si viene con factura
   origen        OrigenCompra @default(DIRECTA) // 👈 nuevo campo
+
+  //NUEVOS
+  recepciones   CompraRecepcion[] @relation("CompraToRecepciones")
+  cxpDocumentos CxPDocumento[]    @relation("CompraToCxPDocumentos")
 
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
@@ -1506,12 +1519,12 @@ model PedidoLinea {
   creadoEn       DateTime @default(now())
   actualizadoEn  DateTime @updatedAt
 
-  fechaExpiracion   DateTime?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  fechaExpiracion DateTime?
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
   // relación a presentación (NOMBRADA)
-  presentacionId Int?
-  presentacion   ProductoPresentacion? @relation("PedidoLineaToPresentacion", fields: [presentacionId], references: [id], onDelete: SetNull)
+  presentacionId  Int?
+  presentacion    ProductoPresentacion? @relation("PedidoLineaToPresentacion", fields: [presentacionId], references: [id], onDelete: SetNull)
 }
 
 // ============================================================================
@@ -1579,8 +1592,8 @@ model MetaUsuario {
   numeroVentas  Float // El numero de ventas hasta el momento
   tituloMeta    String?
   estado        EstadoMetaTienda
-  creadoEn DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  creadoEn      DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
 }
 
 enum EstadoMetaTienda {
@@ -1694,6 +1707,186 @@ model TicketSorteo {
   estado            EstadoTicket
 }
 
+// ============================================================================
+// [S16] RECEPCIONES DE COMPRAS
+// ============================================================================
+model CompraRecepcion {
+  id Int @id @default(autoincrement())
+
+  compraId Int
+  compra   Compra @relation("CompraToRecepciones", fields: [compraId], references: [id], onDelete: Cascade)
+
+  fecha     DateTime @default(now())
+  usuarioId Int
+  usuario   Usuario  @relation("UsuarioToCompraRecepciones", fields: [usuarioId], references: [id])
+
+  observaciones String?
+  lineas        CompraRecepcionLinea[]
+
+  createdAt              DateTime            @default(now())
+  updatedAt              DateTime            @updatedAt
+  //NUEVOS
+  stockPresentacionLotes StockPresentacion[] @relation("StockPresentacionToCompraRecepcion")
+
+  @@index([compraId, fecha])
+}
+
+model CompraRecepcionLinea {
+  id                Int             @id @default(autoincrement())
+  compraRecepcionId Int
+  compraRecepcion   CompraRecepcion @relation(fields: [compraRecepcionId], references: [id], onDelete: Cascade)
+
+  compraDetalleId Int
+  compraDetalle   CompraDetalle @relation(fields: [compraDetalleId], references: [id], onDelete: Cascade)
+
+  productoId Int
+  producto   Producto @relation(fields: [productoId], references: [id])
+
+  presentacionId Int?
+  presentacion   ProductoPresentacion? @relation("PresentacionToCompraRecepcionLinea", fields: [presentacionId], references: [id], onDelete: SetNull)
+
+  cantidadRecibida Int
+  fechaExpiracion  DateTime?
+
+  // === UNO-A-UNO con StockPresentacion ===
+  stockPresentacionId Int?               @unique
+  stockPresentacion   StockPresentacion? @relation("LineaToStockPresentacion", fields: [stockPresentacionId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([compraDetalleId])
+}
+
+// ============================================================================
+// [S17] COMPRAS A PAGAR
+// ============================================================================
+enum CxPEstado {
+  PENDIENTE
+  PARCIAL
+  PAGADO
+  ANULADO
+}
+
+enum CuotaEstado {
+  PENDIENTE
+  PARCIAL
+  PAGADA
+  VENCIDA
+}
+
+enum InteresTipo {
+  NONE
+  SIMPLE
+  COMPUESTO
+}
+
+enum PlanCuotaModo {
+  IGUALES
+  PRIMERA_MAYOR
+}
+
+model CondicionPago {
+  id              Int           @id @default(autoincrement())
+  nombre          String // "Contado", "15 días", "30/60/90", "4 quincenas", etc.
+  diasCredito     Int? // Net X
+  cantidadCuotas  Int?
+  diasEntreCuotas Int?
+  interes         Decimal?      @db.Decimal(5, 2) // % (define si es mensual/anual en tu lógica)
+  tipoInteres     InteresTipo   @default(NONE)
+  modoGeneracion  PlanCuotaModo @default(IGUALES)
+
+  cxpDocumentos CxPDocumento[] @relation("CondicionPagoToCxPDocumentos")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model CxPDocumento {
+  id Int @id @default(autoincrement())
+
+  proveedorId Int
+  proveedor   Proveedor @relation("ProveedorToCxPDocumentos", fields: [proveedorId], references: [id], onDelete: Cascade)
+
+  compraId Int? // Permite varios docs por compra (NO @unique)
+  compra   Compra? @relation("CompraToCxPDocumentos", fields: [compraId], references: [id], onDelete: SetNull)
+
+  folioProveedor   String?
+  fechaEmision     DateTime  @default(now())
+  fechaVencimiento DateTime?
+
+  montoOriginal  Decimal @db.Decimal(14, 2)
+  saldoPendiente Decimal @db.Decimal(14, 2)
+  interesTotal   Decimal @default(0) @db.Decimal(14, 2)
+
+  estado          CxPEstado      @default(PENDIENTE)
+  // Parametrización usada para generar las cuotas (auditable)
+  condicionPagoId Int?
+  condicionPago   CondicionPago? @relation("CondicionPagoToCxPDocumentos", fields: [condicionPagoId], references: [id], onDelete: SetNull)
+
+  cuotas CxPCuota[]
+  pagos  CxPPago[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([proveedorId, estado])
+  @@index([compraId])
+}
+
+model CxPCuota {
+  id               Int          @id @default(autoincrement())
+  documentoId      Int
+  documento        CxPDocumento @relation(fields: [documentoId], references: [id], onDelete: Cascade)
+  numero           Int
+  fechaVencimiento DateTime
+  monto            Decimal      @db.Decimal(14, 2)
+  saldo            Decimal      @db.Decimal(14, 2)
+  estado           CuotaEstado  @default(PENDIENTE)
+  pagadaEn         DateTime?
+
+  pagos CxPPagoCuota[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([documentoId, numero])
+  @@index([estado, fechaVencimiento])
+}
+
+model CxPPago {
+  id          Int          @id @default(autoincrement())
+  documentoId Int
+  documento   CxPDocumento @relation(fields: [documentoId], references: [id], onDelete: Cascade)
+
+  fechaPago              DateTime              @default(now())
+  monto                  Decimal               @db.Decimal(14, 2)
+  metodoPago             MetodoPago
+  referencia             String?
+  observaciones          String?
+  // Enlace a Caja/Banco (1–1)
+  movimientoFinancieroId Int?                  @unique
+  movimientoFinanciero   MovimientoFinanciero? @relation("CxPPagoToMovimiento", fields: [movimientoFinancieroId], references: [id], onDelete: SetNull)
+
+  cuotas CxPPagoCuota[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([documentoId, fechaPago])
+}
+
+model CxPPagoCuota {
+  pagoId  Int
+  pago    CxPPago  @relation(fields: [pagoId], references: [id], onDelete: Cascade)
+  cuotaId Int
+  cuota   CxPCuota @relation(fields: [cuotaId], references: [id], onDelete: Cascade)
+  monto   Decimal  @db.Decimal(14, 2)
+
+  @@id([pagoId, cuotaId])
+}
+
+//TICKET
 enum EstadoTicket {
   ACTIVO // El sorteo está en curso
   INACTIVO // El sorteo ha finalizado

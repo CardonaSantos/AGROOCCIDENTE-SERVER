@@ -14,10 +14,8 @@ import { nuevaSolicitud } from './Types/SolicitudType';
 import { solicitudTransferencia } from './Types/TransferenciaType';
 import EventEmitter from 'events';
 @Injectable()
-@WebSocketGateway()
-export class WebsocketGateway
-  implements OnGatewayConnection, OnGatewayDisconnect
-{
+@WebSocketGateway({ namespace: '/legacy', cors: { origin: '*' } })
+export class LegacyGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   server: Server;
 
@@ -37,34 +35,6 @@ export class WebsocketGateway
     return client.handshake.query.rol as string;
   }
 
-  // handleConnection(client: Socket) {
-  //   const userID = this.getUserIDFromClient(client);
-  //   const rol = this.getUserRoleFromClient(client);
-
-  //   // Validamos que el userID sea un número y que no esté duplicado
-  //   if (!isNaN(userID)) {
-  //     if (this.usuarios.has(userID)) {
-  //       console.log(`Conexión duplicada detectada para el usuario ${userID}.`);
-  //       client.disconnect(); // Desconecta el socket duplicado
-  //     } else {
-  //       this.usuarios.set(userID, client.id); // Guardamos en el mapa general
-
-  //       // Asignamos al mapa correspondiente según el rol
-  //       if (rol === 'ADMIN') {
-  //         this.admins.set(userID, client.id);
-  //       } else {
-  //         this.vendedores.set(userID, client.id);
-  //       }
-
-  //       console.log(
-  //         `Cliente conectado: UserID: ${userID}, SocketID: ${client.id}`,
-  //       );
-  //       this.logUsuarios(); // Log de los usuarios conectados
-  //     }
-  //   } else {
-  //     console.log(`ID de usuario inválido: ${userID}`);
-  //   }
-  // }
   handleConnection(client: Socket) {
     client.setMaxListeners(40); // Cambia 30 al valor que necesites
     const userID = this.getUserIDFromClient(client);

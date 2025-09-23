@@ -5,7 +5,7 @@ import {
 } from '@nestjs/common';
 import { UpdateNotificationDto } from './dto/update-notification.dto';
 import { PrismaService } from 'src/prisma/prisma.service';
-import { WebsocketGateway } from 'src/web-sockets/websocket.gateway';
+import { LegacyGateway } from 'src/web-sockets/websocket.gateway';
 import { Prisma, TipoNotificacion } from '@prisma/client';
 import { NotificationToEmit } from 'src/web-sockets/Types/NotificationTypeSocket';
 import { nuevaSolicitud } from 'src/web-sockets/Types/SolicitudType';
@@ -14,7 +14,7 @@ import { nuevaSolicitud } from 'src/web-sockets/Types/SolicitudType';
 export class NotificationService {
   constructor(
     private readonly prismaService: PrismaService,
-    private readonly webSocketService: WebsocketGateway,
+    private readonly webSocketService: LegacyGateway,
   ) {}
   //CREAR NOTIFICACION SIMPLE
 

@@ -31,10 +31,6 @@ export class AnalyticsController {
 
   @Get('/venta-dia/:idSucursal')
   async getVentasDiaII(@Param('idSucursal', ParseIntPipe) idSucursal: number) {
-    console.log(
-      'ENTRANDO AL CONTROLLER DE LAS VENTAS DEL DÍA==================>',
-    );
-
     const totalDeHoy = await this.analyticsService.getVentasDiaII(idSucursal);
     return {
       totalDeHoy,

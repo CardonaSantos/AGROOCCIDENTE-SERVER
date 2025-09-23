@@ -1,11 +1,13 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { CreateAuthDto } from './dto/create-auth.dto';
-import { UpdateAuthDto } from './dto/update-auth.dto';
 import { UserService } from 'src/user/user.service';
 import { JwtService } from '@nestjs/jwt';
-
 import * as bcrypt from 'bcryptjs';
-// import { Rol } from '@prisma/client';
 
 interface Usuario {
   nombre: string;
@@ -18,20 +20,18 @@ interface Usuario {
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
   constructor(
     private readonly userService: UserService,
-    private readonly jwtService: JwtService, ///DE LA DEPENDENCIA
+    private readonly jwtService: JwtService,
   ) {}
 
   async validarUsuario(correo: string, contrasena: string): Promise<any> {
     const usuario = await this.userService.findByGmail(correo);
-    console.log('Validando usuario con correo:', correo);
-    console.log('Usuario encontrado:', usuario);
 
     if (usuario && (await bcrypt.compare(contrasena, usuario.contrasena))) {
       return usuario;
     }
-
     throw new UnauthorizedException('Usuario no autorizado');
   }
 
@@ -47,27 +47,21 @@ export class AuthService {
         activo: usuario.activo,
         sucursalId: usuario.sucursalId,
       };
-      console.log('El payload es: ', payload);
-
       return {
-        access_token: this.jwtService.sign(payload), // Genera el token JWT
+        access_token: this.jwtService.sign(payload),
       };
     } catch (error) {
-      console.log('Error en login:', error);
+      this.logger.error('Error generado en login auth: ', error.stak);
       throw new UnauthorizedException('Credenciales incorrectas');
     }
   }
 
-  // Registrar un nuevo usuario con contraseñas hasheadas
   async register(createAuthDto: CreateAuthDto) {
     try {
-      // Hasheamos la contraseña
-      console.log('Los datos llegando son: ', createAuthDto);
-
       const salt = await bcrypt.genSalt(10);
       const hashedPassword = await bcrypt.hash(createAuthDto.contrasena, salt);
       const { nombre, rol, correo, sucursalId } = createAuthDto;
-      // Creamos el usuario
+
       const nuevoUsuario = await this.userService.create({
         nombre,
         contrasena: hashedPassword,
@@ -77,7 +71,6 @@ export class AuthService {
         sucursalId,
       });
 
-      //EL PAYLOAD SE PUEDE CREAR CUANDO YA TENEMOS EL USER
       const payload = {
         nombre: nuevoUsuario.nombre,
         correo: nuevoUsuario.correo,
@@ -88,34 +81,15 @@ export class AuthService {
       };
 
       const token = this.jwtService.sign(payload);
-
       return {
         usuario: nuevoUsuario,
         access_token: token,
       };
     } catch (error) {
-      console.log('EL ERROR ES: ', error);
+      this.logger.error('Error al registrar usuario: ', error.stack);
+      throw new BadRequestException(
+        'Error inesperado en registrar usuario modulo',
+      );
     }
-  }
-
-  //====================================>
-  create(createAuthDto: CreateAuthDto) {
-    return 'This action adds a new auth';
-  }
-
-  findAll() {
-    return `This action returns all auth`;
-  }
-
-  findOne(id: number) {
-    return `This action returns a #${id} auth`;
-  }
-
-  update(id: number, updateAuthDto: UpdateAuthDto) {
-    return `This action updates a #${id} auth`;
-  }
-
-  remove(id: number) {
-    return `This action removes a #${id} auth`;
   }
 }

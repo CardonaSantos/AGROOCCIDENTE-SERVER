@@ -319,10 +319,6 @@ export class AnalyticsService {
         0,
       );
 
-      console.log(
-        `Total de ventas hoy para sucursal ${idSucursal}:`,
-        totalDeHoy,
-      );
       return totalDeHoy;
     } catch (error) {
       console.error('Error al obtener el total de ventas de hoy:', error);

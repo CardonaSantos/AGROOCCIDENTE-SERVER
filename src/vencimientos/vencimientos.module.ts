@@ -3,7 +3,7 @@ import { VencimientosService } from './vencimientos.service';
 import { VencimientosController } from './vencimientos.controller';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { NotificationService } from 'src/notification/notification.service';
-import { WebsocketGateway } from 'src/web-sockets/websocket.gateway';
+import { LegacyGateway } from 'src/web-sockets/websocket.gateway';
 
 @Module({
   controllers: [VencimientosController],
@@ -11,7 +11,7 @@ import { WebsocketGateway } from 'src/web-sockets/websocket.gateway';
     VencimientosService,
     PrismaService,
     NotificationService,
-    WebsocketGateway,
+    LegacyGateway,
   ],
 })
 export class VencimientosModule {}

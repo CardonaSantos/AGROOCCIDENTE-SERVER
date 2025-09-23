@@ -185,8 +185,6 @@ export class CuentasBancariasService {
           activa: true,
         },
       });
-      console.log('');
-      this.logger.debug('Las cuetnas bancarias son:¨', cuentas);
 
       return cuentas.map((c) => ({
         id: c.id,

@@ -5,7 +5,7 @@ import { PrismaService } from 'src/prisma/prisma.service';
 import { ClientRemoveService } from 'src/client-remove/client-remove.service';
 import { ClientService } from 'src/client/client.service';
 import { NotificationService } from 'src/notification/notification.service';
-import { WebsocketGateway } from 'src/web-sockets/websocket.gateway';
+import { LegacyGateway } from 'src/web-sockets/websocket.gateway';
 import { HistorialStockTrackerService } from 'src/historial-stock-tracker/historial-stock-tracker.service';
 import { CajaService } from 'src/caja/caja.service';
 import { UtilidadesService } from 'src/caja/utilidades/utilidades.service';
@@ -19,7 +19,7 @@ import { PrismaModule } from 'src/prisma/prisma.module';
     VentaService,
     ClientService,
     NotificationService,
-    WebsocketGateway,
+    LegacyGateway,
     HistorialStockTrackerService,
     UtilidadesService, // si aún lo usas directo aquí
   ],

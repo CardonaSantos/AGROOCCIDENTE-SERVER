@@ -7,7 +7,7 @@ import { CreateSolicitudTransferenciaProductoDto } from './dto/create-solicitud-
 import { UpdateSolicitudTransferenciaProductoDto } from './dto/update-solicitud-transferencia-producto.dto';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { NotificationService } from 'src/notification/notification.service';
-import { WebsocketGateway } from 'src/web-sockets/websocket.gateway';
+import { LegacyGateway } from 'src/web-sockets/websocket.gateway';
 import { CreateTransferenciaProductoDto } from 'src/transferencia-producto/dto/create-transferencia-producto.dto';
 import { HistorialStockTrackerService } from 'src/historial-stock-tracker/historial-stock-tracker.service';
 import { Prisma } from '@prisma/client';
@@ -17,7 +17,7 @@ export class SolicitudTransferenciaProductoService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notificationService: NotificationService,
-    private readonly webSocketGateway: WebsocketGateway,
+    private readonly webSocketGateway: LegacyGateway,
     private readonly tracker: HistorialStockTrackerService,
   ) {}
 
