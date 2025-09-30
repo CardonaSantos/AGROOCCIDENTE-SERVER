@@ -19,6 +19,8 @@ import { createReadStream } from 'fs';
 import * as csvParser from 'csv-parser';
 import { PresentacionProductoService } from 'src/presentacion-producto/presentacion-producto.service';
 import { ProductoApi } from './dto/interfacesPromise';
+import { QueryParamsInventariado } from './query/query';
+import { presentacionSelect, productoSelect } from './SelectsAndWheres/Selects';
 
 const toDecimal = (value: string | number) => {
   return new Prisma.Decimal(value);
@@ -860,146 +862,124 @@ export class ProductsService {
     }
   }
 
-  // async loadCSVandImportProducts(
-  //   filePath: string,
-  //   dryRun = false,
-  // ): Promise<void> {
-  //   const rows: any[] = [];
-  //   // 1) Cargar todas las filas en memoria (puedes ir procesándolas fila a fila si el CSV es muy grande).
-  //   const stream = createReadStream(filePath).pipe(
-  //     csvParser({
-  //       separator: ',',
-  //       mapHeaders: ({ header }) => header.replace(/^\uFEFF/, '').trim(),
-  //     }),
-  //   );
-  //   for await (const row of stream) {
-  //     rows.push(row);
-  //   }
-  //   console.log(`Se leyeron ${rows.length} filas del CSV.`);
+  async getProductosPresentacionesForInventary(dto: QueryParamsInventariado) {
+    try {
+      const {
+        precio,
+        sucursalId,
+        tipoPresentacion,
+        categorias,
+        codigoProducto,
+        fechaVencimiento,
+        productoNombre,
+      } = dto;
 
-  //   // 2) Procesar cada fila
-  //   for (const [index, row] of rows.entries()) {
-  //     // ---------------------------------------------------
-  //     // 2.1) Leer los campos del CSV y hacer trim donde convenga:
-  //     // ---------------------------------------------------
-  //     const codigoProducto = row['codigoProducto']?.trim();
-  //     const nombre = row['nombre']?.trim();
-  //     const descripcion = row['descripcion']?.trim() || null;
-  //     const categoriasRaw = row['categorias']?.trim() || '';
-  //     const preciosVentaRaw = row['preciosVenta']?.trim() || '';
-  //     const precioCostoActual = parseFloat(row['precioCostoActual']) || null;
-  //     const codigoProveedor = row['codigoProveedor']?.trim() || null;
-  //     // El CSV trae “stockMinimo” (umbral), pero aquí no creamos StockThreshold: lo dejamos en stand-by.
-  //     const stockMinimoCsv = parseInt(row['stockMinimo'], 10) || null;
+      const where: Prisma.ProductoWhereInput = {};
+      const wherePresentaciones: Prisma.ProductoPresentacionWhereInput = {};
+      // WHERE DINAMICO DE PRODUCTO
+      if (productoNombre) {
+        where.nombre = { contains: productoNombre, mode: 'insensitive' };
+      }
 
-  //     // ---------------------------------------------------
-  //     // 2.2) Validar campos mínimos obligatorios:
-  //     // ---------------------------------------------------
-  //     if (!codigoProducto || !nombre) {
-  //       console.log(
-  //         `Fila ${index + 1} omitida: faltan “codigoProducto” o “nombre”.`,
-  //       );
-  //       continue;
-  //     }
+      if (codigoProducto) {
+        where.codigoProducto = { equals: codigoProducto, mode: 'insensitive' };
+      }
 
-  //     const categoryNames = categoriasRaw
-  //       .split(',')
-  //       .map((c: string) => c.trim())
-  //       .filter((c: string) => c.length > 0);
+      if (categorias && categorias.length > 0) {
+        where.categorias = {
+          some: {
+            id: { in: categorias },
+          },
+        };
+      }
 
-  //     const categoryIds: number[] = [];
-  //     for (const catName of categoryNames) {
-  //       try {
-  //         // Upsert: si ya existe, lo actualiza (pero no cambia nada), si no, lo crea.
-  //         const categoria = await this.prisma.categoria.upsert({
-  //           where: { nombre: catName },
-  //           create: { nombre: catName },
-  //           update: {},
-  //         });
-  //         categoryIds.push(categoria.id);
-  //       } catch (e) {
-  //         console.log(
-  //           `Error subiendo categoría “${catName}” en fila ${index + 1}: ${e.message}`,
-  //         );
-  //       }
-  //     }
+      if (fechaVencimiento) {
+        where.stock = {
+          some: {
+            fechaVencimiento: fechaVencimiento,
+          },
+        };
+      }
 
-  //     if (dryRun) {
-  //       console.log(
-  //         `[DryRun] Producto a crear: ${nombre} (${codigoProducto}), categorías: [${categoryNames.join(
-  //           ', ',
-  //         )}], precios: [${preciosVentaRaw}], costo: ${precioCostoActual}`,
-  //       );
-  //       continue;
-  //     }
+      if (precio) {
+        where.precios = {
+          some: {
+            precio: { equals: precio },
+          },
+        };
+      }
 
-  //     let productoCreado;
-  //     try {
-  //       productoCreado = await this.prisma.producto.create({
-  //         data: {
-  //           codigoProducto,
-  //           nombre,
-  //           descripcion,
-  //           precioCostoActual, // Puede ser null si no viene en el CSV
-  //           codigoProveedor, // Puede ser null si no viene en el CSV
-  //           // Conectar las categorías existentes/creadas:
-  //           categorias: {
-  //             connect: categoryIds.map((id) => ({ id })),
-  //           },
-  //           // NOTA: no creamos stockThreshold ni stock aquí porque el CSV no trae sucursal/fechas
-  //         },
-  //       });
-  //       console.log(`✅ Producto creado: ${nombre} (ID ${productoCreado.id})`);
-  //     } catch (e) {
-  //       console.log(
-  //         `❌ Error al crear Producto en fila ${index + 1}: ${e.message}`,
-  //       );
-  //       continue;
-  //     }
-  //     const preciosArray = preciosVentaRaw
-  //       .split(',')
-  //       .map((p: string) => parseFloat(p.trim()))
-  //       .filter((p: number) => !isNaN(p) && p > 0);
+      if (sucursalId) {
+        where.stock = {
+          some: {
+            sucursalId: sucursalId,
+          },
+        };
+      }
+      // WHERE DINAMICO DE PRESENTACIONES PRODUCTOS
+      if (codigoProducto) {
+        wherePresentaciones.codigoBarras = {
+          contains: productoNombre,
+          mode: 'insensitive',
+        };
+      }
 
-  //     for (const precio of preciosArray) {
-  //       try {
-  //         await this.prisma.precioProducto.create({
-  //           data: {
-  //             productoId: productoCreado.id,
-  //             precio,
-  //             estado: 'APROBADO', // o ‘APROBADO’ si quieres que quede disponible de una vez
-  //             usado: false,
-  //             tipo: 'ESTANDAR',
-  //             // creadoPorId: null,     // si quieres registrar qué usuario lo puso, puedes pasar un ID aquí
-  //           },
-  //         });
-  //       } catch (e) {
-  //         console.log(
-  //           `❌ Error al crear PrecioProducto para ${productoCreado.id} con precio ${precio}: ${e.message}`,
-  //         );
-  //       }
-  //     }
+      if (tipoPresentacion) {
+        wherePresentaciones.tipoPresentacion = {
+          in: tipoPresentacion,
+        };
+      }
 
-  //     // ---------------------------------------------------
-  //     // 2.8) (Opcional) Si tuvieras un stock inicial en CSV (ej: campo “cantidad” y “fechaIngreso”),
-  //     //      aquí harías algo como:
-  //     //
-  //     // await prisma.stock.create({
-  //     //   data: {
-  //     //     productoId: productoCreado.id,
-  //     //     cantidad: cantidadInicialCsv,
-  //     //     costoTotal: cantidadInicialCsv * (precioCostoActual || 0),
-  //     //     fechaIngreso: new Date(),         // o guardarlo desde el CSV si existe
-  //     //     precioCosto: precioCostoActual,   // o un campo separado de “costo por unidad” si vienes del CSV
-  //     //     sucursalId: tuSucursalPorDefecto,  // o un valor que venga en el CSV
-  //     //   },
-  //     // });
-  //     //
-  //     // Como no tenemos esos datos en tu CSV, lo omitimos. Si luego agregas “cantidad” y “sucursalId”,
-  //     // saca esta sección del comentario y adapta los campos.
-  //     // ---------------------------------------------------
-  //   }
+      if (precio) {
+        wherePresentaciones.precios = {
+          some: {
+            precio: { equals: precio },
+          },
+        };
+      }
 
-  //   console.log('📦 ¡Importación de productos finalizada!');
-  // }
+      if (fechaVencimiento) {
+        wherePresentaciones.stockPresentaciones = {
+          some: {
+            fechaVencimiento: {
+              equals: fechaVencimiento,
+            },
+          },
+        };
+      }
+
+      if (sucursalId) {
+        wherePresentaciones.stockPresentaciones = {
+          some: {
+            sucursalId: sucursalId,
+          },
+        };
+      }
+
+      this.logger.log(`DTO recibido:\n${JSON.stringify(dto, null, 2)}`);
+
+      const [productos, presentaciones] = await Promise.all([
+        this.prisma.producto.findMany({ where, select: productoSelect }),
+        this.prisma.productoPresentacion.findMany({
+          where: wherePresentaciones,
+          select: presentacionSelect,
+        }),
+      ]);
+      return {
+        productos,
+        presentaciones,
+      };
+    } catch (error) {
+      this.logger.error(
+        'El error generado en get de productos y presentaciones es: ',
+        error?.stack,
+      );
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException(
+        'Fatal error: Error inesperado en servicio de inventariado',
+      );
+    }
+  }
+
+  // HELPERS =======================>
 }

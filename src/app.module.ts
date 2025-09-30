@@ -64,6 +64,8 @@ import { PresentacionProductoModule } from './presentacion-producto/presentacion
 import { InventarioPresentacionModule } from './inventario-presentacion/inventario-presentacion.module';
 import { RealtimeModule } from './realtime/realtime.module';
 import { StockPresentacionModule } from './stock-presentacion/stock-presentacion.module';
+import { ComprasModule } from './compras/compras.module';
+import { RecepcionesModule } from './compras/recepciones/recepciones.module';
 
 @Module({
   imports: [
@@ -130,6 +132,8 @@ import { StockPresentacionModule } from './stock-presentacion/stock-presentacion
     InventarioPresentacionModule,
     RealtimeModule,
     StockPresentacionModule,
+    ComprasModule,
+    RecepcionesModule,
   ],
   controllers: [AppController],
   providers: [AppService, CloudinaryProvider, SaldosServiceService],

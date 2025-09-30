@@ -24,6 +24,7 @@ import { join } from 'path';
 import { RolPrecio, TipoEmpaque } from '@prisma/client';
 import { plainToInstance } from 'class-transformer';
 import { validateOrReject } from 'class-validator';
+import { QueryParamsInventariado } from './query/query';
 
 // ---- DTOS del payload que esperas en tu servicio ----
 interface PrecioProductoDto {
@@ -238,9 +239,16 @@ export class ProductsController {
   }
   // findAllProductsToSale
   //ENCONTRAR TODAS PARA INVENTARIADO
+  // @Get('/products/for-inventary')
+  // async findAll() {
+  //   return await this.productsService.findAll();
+  // }
+
   @Get('/products/for-inventary')
-  async findAll() {
-    return await this.productsService.findAll();
+  async getAll(@Query() dto: QueryParamsInventariado) {
+    return await this.productsService.getProductosPresentacionesForInventary(
+      dto,
+    );
   }
 
   @Get('/products/to-transfer/:id')

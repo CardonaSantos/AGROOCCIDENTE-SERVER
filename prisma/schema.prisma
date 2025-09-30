@@ -252,9 +252,11 @@ model ProductoPresentacion {
   productoId          Int
   producto            Producto            @relation(fields: [productoId], references: [id], onDelete: Cascade)
   nombre              String
+  descripcion         String?
   factorUnidadBase    Decimal             @db.Decimal(18, 6)
   sku                 String?             @unique
   codigoBarras        String?             @unique
+  
   esDefault           Boolean             @default(false)
   activo              Boolean             @default(true)
   //precios por presentacion
@@ -1707,7 +1709,7 @@ model TicketSorteo {
   estado            EstadoTicket
 }
 
-// ============================================================================
+// ==============================NUEVO==============================================
 // [S16] RECEPCIONES DE COMPRAS
 // ============================================================================
 model CompraRecepcion {
@@ -1739,8 +1741,8 @@ model CompraRecepcionLinea {
   compraDetalleId Int
   compraDetalle   CompraDetalle @relation(fields: [compraDetalleId], references: [id], onDelete: Cascade)
 
-  productoId Int
-  producto   Producto @relation(fields: [productoId], references: [id])
+  productoId Int?
+  producto   Producto? @relation(fields: [productoId], references: [id])
 
   presentacionId Int?
   presentacion   ProductoPresentacion? @relation("PresentacionToCompraRecepcionLinea", fields: [presentacionId], references: [id], onDelete: SetNull)
