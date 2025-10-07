@@ -36,6 +36,12 @@ export class PurchaseRequisitionsController {
     );
   }
 
+  /**
+   * RECEPCIONAR UNA COMPRA AUTO SIN PARCIALES
+   * @param id ID de la compra
+   * @param body  cuerpo de params de la compra
+   * @returns
+   */
   @Post(':id/recepcionar')
   recepcionarById(
     @Param('id', ParseIntPipe) id: number,

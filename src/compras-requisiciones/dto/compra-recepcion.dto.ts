@@ -35,4 +35,12 @@ export class RecepcionarCompraAutoDto {
 
   @IsInt()
   cuentaBancariaId: number;
+
+  lineas?: lineasOverrride[];
+}
+
+class lineasOverrride {
+  fechaVencimiento: string;
+  compraDetalleId: number;
+  loteCodigo: string;
 }

@@ -20,4 +20,7 @@ export class GenerateStockDto {
   precioCosto: number;
   @IsInt()
   sucursalId: number;
+  @IsInt()
+  @IsOptional()
+  requisicionRecepcionId?: number;
 }

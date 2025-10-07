@@ -1455,6 +1455,7 @@ export class PurchaseRequisitionsService {
                 requisicionLineaId: true,
                 presentacionId: true,
                 presentacion: { select: { id: true } },
+                fechaVencimiento: true,
               },
             },
             proveedor: { select: { id: true } },
@@ -1475,6 +1476,41 @@ export class PurchaseRequisitionsService {
             sucursal: { select: { id: true } },
           },
         });
+
+        // Mapa de fecha de expiración desde la RequisicionLinea (fallback)
+        let reqFechasMap = new Map<number, Date>();
+        if (compra.requisicionId) {
+          const rlIds = compra.detalles
+            .map((d) => d.requisicionLineaId)
+            .filter((x): x is number => Number.isFinite(x as any));
+          if (rlIds.length) {
+            const rl = await tx.requisicionLinea.findMany({
+              where: { id: { in: rlIds } },
+              select: { id: true, fechaExpiracion: true },
+            });
+            rl.forEach(
+              (r) =>
+                r.fechaExpiracion && reqFechasMap.set(r.id, r.fechaExpiracion),
+            );
+          }
+        }
+
+        // Overrides desde el body (editar antes de recepcionar)
+
+        const overrides = new Map<
+          number,
+          { fecha?: Date | null; lote?: string | null }
+        >();
+        for (const l of dto.lineas ?? []) {
+          overrides.set(l.compraDetalleId, {
+            fecha: l.fechaVencimiento
+              ? dayjs.tz(l.fechaVencimiento, TZGT).toDate()
+              : null,
+            lote: l.loteCodigo ?? null,
+          });
+        }
+
+        this.logger.log('El registro de compra a recepcionar es: ', compra);
 
         if (!compra) throw new NotFoundException('Compra no encontrada');
         const sucursalId = compra.sucursalId;
@@ -1600,6 +1636,15 @@ export class PurchaseRequisitionsService {
             costoUnitario: costoUnit,
           });
 
+          // 1) override del body > 2) compraDetalle.fechaVencimientoSolicitada > 3) requisicionLinea.fechaExpiracion > 4) null
+          const ov = overrides.get(det.id);
+          const requestedFromCompra = det.fechaVencimiento ?? null;
+          const fromReq = det.requisicionLineaId
+            ? (reqFechasMap.get(det.requisicionLineaId) ?? null)
+            : null;
+          const resolvedVto: Date | null =
+            ov?.fecha ?? requestedFromCompra ?? fromReq ?? null;
+
           this.logger.debug(
             `[RECEP] det#${det.id} p#${det.productoId} pres#${presId ?? '—'} ` +
               `cant:${cantidadLinea} costo:${costoUnit} ==> ` +
@@ -1643,7 +1688,7 @@ export class PurchaseRequisitionsService {
               cantidad: cantidadLinea,
               costoTotal: Number((costoUnit * cantidadLinea).toFixed(4)),
               fechaIngreso: nowISO,
-              fechaExpiracion: null,
+              fechaExpiracion: resolvedVto,
               precioCosto: costoUnit,
               sucursalId,
               requisicionRecepcionId: requisicionRecepcionId ?? undefined,
@@ -1658,7 +1703,7 @@ export class PurchaseRequisitionsService {
               sucursalId,
               cantidadPresentacion: cantidadLinea,
               fechaIngreso: dayjs().tz(TZGT).toDate(),
-              fechaVencimiento: null,
+              fechaVencimiento: resolvedVto,
               requisicionRecepcionId,
             });
           }
@@ -2062,6 +2107,11 @@ export class PurchaseRequisitionsService {
           },
         });
 
+        this.logger.log(
+          'El registro de requisicion que va a compras es: ',
+          req,
+        );
+
         if (!req.lineas.length) {
           throw new BadRequestException('La requisición no tiene líneas');
         }
@@ -2089,6 +2139,7 @@ export class PurchaseRequisitionsService {
             productoId: ln.producto.id,
             presentacionId: ln.presentacion?.id ?? null,
             requisicionLineaId: ln.id,
+            fechaVencimiento: ln.fechaExpiracion,
           };
         });
 
@@ -2115,6 +2166,7 @@ export class PurchaseRequisitionsService {
                 : {}),
               compra: { connect: { id: compra.id } },
               requisicionLinea: { connect: { id: d.requisicionLineaId } },
+              fechaVencimiento: d.fechaVencimiento ?? null,
             },
           });
         }
@@ -2145,6 +2197,22 @@ export class PurchaseRequisitionsService {
           where: { id: req.id },
           data: { estado: 'ENVIADA_COMPRAS' },
         });
+
+        const compraCreated = await tx.compra.findUnique({
+          where: { id: compra.id },
+          include: {
+            detalles: {
+              include: {
+                producto: true,
+                presentacion: true,
+                requisicionLinea: true,
+              },
+            },
+            proveedor: true,
+            sucursal: true,
+          },
+        });
+        this.logger.log('El registro de compra creado es: ', compraCreated);
 
         // 9) Respuesta enriquecida
         return tx.compra.findUnique({

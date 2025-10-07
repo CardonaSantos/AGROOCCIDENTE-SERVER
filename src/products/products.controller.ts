@@ -14,6 +14,7 @@ import {
   HttpException,
   InternalServerErrorException,
   Query,
+  ValidationPipe,
 } from '@nestjs/common';
 import { ProductsService } from './products.service';
 import { CreateProductDto } from './dto/create-product.dto';
@@ -245,7 +246,15 @@ export class ProductsController {
   // }
 
   @Get('/products/for-inventary')
-  async getAll(@Query() dto: QueryParamsInventariado) {
+  async getAll(
+    @Query(
+      new ValidationPipe({
+        transform: true,
+        transformOptions: { enableImplicitConversion: true },
+      }),
+    )
+    dto: QueryParamsInventariado,
+  ) {
     return await this.productsService.getProductosPresentacionesForInventary(
       dto,
     );

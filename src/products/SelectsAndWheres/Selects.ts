@@ -1,10 +1,11 @@
 import { Prisma } from '@prisma/client';
 
-export const productoSelect: Prisma.ProductoSelect = {
+export const productoSelect = {
   id: true,
   nombre: true,
   codigoProducto: true,
   descripcion: true,
+  precioCostoActual: true,
   precios: {
     select: {
       id: true,
@@ -21,29 +22,19 @@ export const productoSelect: Prisma.ProductoSelect = {
       cantidad: true,
       fechaVencimiento: true,
       fechaIngreso: true,
-      sucursal: {
-        select: {
-          id: true,
-          nombre: true,
-        },
-      },
+      sucursal: { select: { id: true, nombre: true } },
     },
   },
-  stockThreshold: {
+  stockThreshold: { select: { id: true, stockMinimo: true } },
+  categorias: { select: { id: true, nombre: true } },
+  imagenesProducto: {
     select: {
-      id: true,
-      stockMinimo: true,
+      url: true,
     },
   },
-  categorias: {
-    select: {
-      id: true,
-      nombre: true,
-    },
-  },
-};
+} satisfies Prisma.ProductoSelect;
 
-export const presentacionSelect: Prisma.ProductoPresentacionSelect = {
+export const presentacionSelect = {
   id: true,
   nombre: true,
   codigoBarras: true,
@@ -51,6 +42,7 @@ export const presentacionSelect: Prisma.ProductoPresentacionSelect = {
   creadoEn: true,
   actualizadoEn: true,
   esDefault: true,
+  costoReferencialPresentacion: true,
   precios: {
     select: {
       id: true,
@@ -76,10 +68,22 @@ export const presentacionSelect: Prisma.ProductoPresentacionSelect = {
       },
     },
   },
-  //   stockThreshold: {
-  //     select: {
-  //       id: true,
-  //       stockMinimo: true,
-  //     },
-  //   },
-};
+  producto: {
+    select: {
+      imagenesProducto: {
+        select: {
+          url: true,
+        },
+      },
+    },
+  },
+} satisfies Prisma.ProductoPresentacionSelect; //AJUSTAR LA FLAG: los selects internos se tipean
+
+// TYPES BASADOS EN SELECTS
+export type ProductoWithSelect = Prisma.ProductoGetPayload<{
+  select: typeof productoSelect;
+}>;
+
+export type PresentacionWithSelect = Prisma.ProductoPresentacionGetPayload<{
+  select: typeof presentacionSelect;
+}>;

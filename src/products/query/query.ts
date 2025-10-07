@@ -12,7 +12,8 @@ import { TipoEmpaque } from '@prisma/client';
 export class QueryParamsInventariado {
   @Type(() => Number) // asegura casteo
   @IsNumber()
-  sucursalId: number;
+  @IsOptional()
+  sucursalId: number = 1;
 
   @IsOptional()
   @IsString()
@@ -27,15 +28,26 @@ export class QueryParamsInventariado {
   fechaVencimiento?: string;
 
   @IsArray()
+  @IsOptional()
   @IsEnum(TipoEmpaque, { each: true })
   tipoPresentacion: TipoEmpaque[];
 
   @IsNumber()
-  precio: number; //precio venta
+  @IsOptional()
+  precio?: number; //precio venta
 
   @IsOptional()
   @IsArray()
   @IsInt({ each: true }) // cada item debe ser un entero
   @Type(() => Number) // transforma query strings a number
   categorias?: number[];
+
+  //   PAGINACION ============>
+  @IsInt()
+  @Type(() => Number)
+  page: number = 1;
+
+  @IsInt()
+  @Type(() => Number)
+  limit: number = 10;
 }

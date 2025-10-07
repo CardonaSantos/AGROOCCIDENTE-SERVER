@@ -107,8 +107,7 @@ export class PedidosService {
         tipo,
       } = dto;
 
-      this.logger.log('El dto entrando JSON es: ', JSON.stringify(dto));
-      this.logger.log('El dto entrando JSON es: ', JSON.stringify(lineas));
+      this.logger.log(`DTO recibido:\n${JSON.stringify(dto, null, 2)}`);
 
       if (!lineas?.length) {
         throw new BadRequestException('Debe incluir al menos una línea.');
@@ -335,167 +334,6 @@ export class PedidosService {
     }
   }
 
-  // async sendPedidoToCompras(dto: ReceivePedidoComprasDto) {
-  //   try {
-  //     return await this.prisma.$transaction(async (tx) => {
-  //       const { pedidoId, proveedorId, userID, sucursalId } = dto;
-  //       console.log(
-  //         'La data llegnado es: ',
-  //         pedidoId,
-  //         proveedorId,
-  //         userID,
-  //         sucursalId,
-  //       );
-
-  //       const existing = await tx.compra.findFirst({
-  //         where: {
-  //           pedido: {
-  //             id: pedidoId,
-  //           },
-  //         },
-  //         include: { detalles: true },
-  //       });
-  //       if (existing) {
-  //         throw new BadRequestException(
-  //           'El pedido ya tiene una compra asignada',
-  //         );
-  //       }
-
-  //       const pedido = await tx.pedido.findUnique({
-  //         where: {
-  //           id: pedidoId,
-  //         },
-  //         select: {
-  //           id: true,
-  //           sucursalId: true,
-  //           lineas: {
-  //             select: {
-  //               id: true,
-  //               cantidad: true,
-  //               precioUnitario: true,
-  //               productoId: true,
-  //               producto: true,
-  //             },
-  //           },
-  //         },
-  //       });
-
-  //       if (!pedido) throw new NotFoundException('Pedido no encontrado');
-
-  //       if (pedido.lineas.length <= 0)
-  //         throw new InternalServerErrorException(
-  //           'El pedido tiene lineas vacías',
-  //         );
-
-  //       const detallesToCompra = pedido.lineas.map((ln) => ({
-  //         id: ln.id,
-  //         cantidad: ln.cantidad,
-  //         costoUnitario: ln.precioUnitario,
-  //         productoId: ln.productoId,
-  //       }));
-
-  //       const compra = await tx.compra.create({
-  //         data: {
-  //           fecha: dayjs().tz(TZGT).toDate(),
-  //           total: 0,
-  //           usuario: {
-  //             connect: {
-  //               id: userID,
-  //             },
-  //           },
-  //           sucursal: sucursalId
-  //             ? {
-  //                 connect: {
-  //                   id: sucursalId,
-  //                 },
-  //               }
-  //             : {
-  //                 connect: {
-  //                   id: pedido.sucursalId,
-  //                 },
-  //               },
-
-  //           pedido: {
-  //             connect: {
-  //               id: pedido.id,
-  //             },
-  //           },
-  //           proveedor: { connect: { id: proveedorId } },
-  //         },
-  //       });
-
-  //       for (const linea of detallesToCompra) {
-  //         await tx.compraDetalle.create({
-  //           data: {
-  //             cantidad: linea.cantidad,
-  //             costoUnitario: linea.costoUnitario,
-  //             producto: {
-  //               connect: {
-  //                 id: linea.productoId,
-  //               },
-  //             },
-  //             compra: {
-  //               connect: {
-  //                 id: compra.id,
-  //               },
-  //             },
-  //           },
-  //         });
-  //       }
-
-  //       const detallesCompra = await tx.compraDetalle.findMany({
-  //         where: {
-  //           compraId: compra.id,
-  //         },
-  //         select: {
-  //           costoUnitario: true,
-  //           cantidad: true,
-  //         },
-  //       });
-
-  //       const totalCompra = detallesCompra.reduce(
-  //         (acc, prod) => acc + prod.cantidad * prod.costoUnitario,
-  //         0,
-  //       );
-
-  //       //actualizar registro de compra
-  //       await tx.compra.update({
-  //         where: {
-  //           id: compra.id,
-  //         },
-  //         data: {
-  //           total: totalCompra,
-  //           origen: 'PEDIDO',
-  //         },
-  //       });
-
-  //       await tx.pedido.update({
-  //         where: {
-  //           id: pedido.id,
-  //         },
-  //         data: {
-  //           estado: 'ENVIADO_COMPRAS',
-  //         },
-  //       });
-
-  //       return tx.compra.findUnique({
-  //         where: { id: compra.id },
-  //         include: {
-  //           detalles: { include: { producto: true, requisicionLinea: true } },
-  //           proveedor: true,
-  //           sucursal: true,
-  //         },
-  //       });
-  //     });
-  //   } catch (error) {
-  //     this.logger.debug('El error generado es: ', error);
-  //     if (error instanceof HttpException) throw error;
-  //     throw new InternalServerErrorException(
-  //       'Fatal error: Error inesperado en enviar pedidos a compras',
-  //     );
-  //   }
-  // }
-
   async sendPedidoToCompras(dto: ReceivePedidoComprasDto) {
     try {
       return await this.prisma.$transaction(async (tx) => {
@@ -523,7 +361,9 @@ export class PedidosService {
                 cantidad: true,
                 precioUnitario: true,
                 productoId: true,
-                presentacionId: true, // 👈 necesario
+                presentacionId: true,
+                fechaExpiracion: true,
+
                 presentacion: { select: { id: true, productoId: true } }, // sanity check
               },
             },
@@ -552,7 +392,8 @@ export class PedidosService {
             cantidad: ln.cantidad,
             costoUnitario: ln.precioUnitario,
             productoId: ln.productoId,
-            presentacionId: ln.presentacionId ?? null, // 👈 COPIAMOS
+            presentacionId: ln.presentacionId ?? null,
+            fechaVencimiento: ln.fechaExpiracion,
           };
         });
 
@@ -590,6 +431,7 @@ export class PedidosService {
                 ? { presentacion: { connect: { id: linea.presentacionId } } }
                 : {}),
               compra: { connect: { id: compra.id } },
+              fechaVencimiento: linea.fechaVencimiento,
             },
           });
         }

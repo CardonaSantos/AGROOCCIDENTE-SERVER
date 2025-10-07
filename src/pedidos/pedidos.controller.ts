@@ -22,11 +22,21 @@ import { ReceivePedidoComprasDto } from './dto/sendPedidoToCompras';
 export class PedidosController {
   constructor(private readonly pedidosService: PedidosService) {}
 
+  /**
+   *
+   * @param dto DTO con datos del pedido y lineas para generar el registro de pedido
+   * @returns
+   */
   @Post('create-pedido')
   create(@Body() dto: CreatePedidoDto) {
     return this.pedidosService.createPedidoMain(dto);
   }
 
+  /**
+   *
+   * @param dto DTO con params para enviar el registro de pedido a compras
+   * @returns
+   */
   @Post('send-pedido-to-compras')
   sendPedidoToCompras(@Body() dto: ReceivePedidoComprasDto) {
     return this.pedidosService.sendPedidoToCompras(dto);

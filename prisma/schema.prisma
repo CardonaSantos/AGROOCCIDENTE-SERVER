@@ -1403,6 +1403,9 @@ model CompraDetalle {
   requisicionLineaId Int?
   requisicionLinea   RequisicionLinea? @relation("DetalleRequisicionCompra", fields: [requisicionLineaId], references: [id], onDelete: Cascade)
 
+  fechaVencimiento DateTime?   // viene de RequisicionLinea o Pedido
+
+
   creadoEn          DateTime               @default(now())
   actualizadoEn     DateTime               @updatedAt
   // relación a presentación (NOMBRADA)

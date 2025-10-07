@@ -41,7 +41,7 @@ type StockLineaPresentacionPayload = {
   productoId: number;
   presentacionId: number;
   cantidad: number;
-  fechaVencimiento: string | null;
+  fechaVencimiento: string;
 };
 
 type StockLineaProductoPayload = {
@@ -265,6 +265,7 @@ export class ComprasService {
 
     return created;
   }
+
   async createStockProductos(
     tx: Prisma.TransactionClient,
     items: StockLineaProductoPayload[],

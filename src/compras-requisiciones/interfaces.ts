@@ -17,5 +17,5 @@ export type StockPresentacionDto = {
   cantidadPresentacion: number; // = CompraDetalle.cantidad
   fechaIngreso: Date;
   fechaVencimiento?: Date | null;
-  requisicionRecepcionId: number | null;
+  requisicionRecepcionId?: number;
 };

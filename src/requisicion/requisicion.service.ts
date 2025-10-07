@@ -209,6 +209,14 @@ export class RequisicionService {
           unidadBase: true,
           precioCostoActual: true,
           stockThreshold: { select: { stockMinimo: true } },
+          stock: {
+            select: {
+              id: true,
+              cantidad: true,
+              fechaIngreso: true,
+              fechaVencimiento: true,
+            },
+          },
           presentaciones: {
             select: {
               id: true,
@@ -220,6 +228,14 @@ export class RequisicionService {
               activo: true,
               tipoPresentacion: true,
               costoReferencialPresentacion: true,
+              stockPresentaciones: {
+                select: {
+                  id: true,
+                  cantidadPresentacion: true,
+                  fechaIngreso: true,
+                  fechaVencimiento: true,
+                },
+              },
             },
           },
         },
@@ -333,6 +349,7 @@ export class RequisicionService {
           stockCantidadPresentacion: cantPres,
           stockEquivalenteBase: eq.toString(),
           pendientesFolios: pendPresMap.get(pp.id) ?? [],
+          stocks: p.stock,
         };
       });
 
@@ -722,6 +739,7 @@ export class RequisicionService {
           createdAt: true,
           updatedAt: true,
           ingresadaAStock: true,
+
           usuario: {
             select: {
               id: true,

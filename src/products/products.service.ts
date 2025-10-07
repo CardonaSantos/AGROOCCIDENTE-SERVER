@@ -13,14 +13,35 @@ import { PrismaService } from 'src/prisma/prisma.service';
 import { CreateNewProductDto } from './dto/create-productNew.dto';
 import { MinimunStockAlertService } from 'src/minimun-stock-alert/minimun-stock-alert.service';
 import { CloudinaryService } from 'src/cloudinary/cloudinary.service';
-import { ImagenProducto, Prisma, RolPrecio } from '@prisma/client';
+import { Prisma, RolPrecio } from '@prisma/client';
 
-import { createReadStream } from 'fs';
-import * as csvParser from 'csv-parser';
 import { PresentacionProductoService } from 'src/presentacion-producto/presentacion-producto.service';
 import { ProductoApi } from './dto/interfacesPromise';
 import { QueryParamsInventariado } from './query/query';
-import { presentacionSelect, productoSelect } from './SelectsAndWheres/Selects';
+import {
+  presentacionSelect,
+  PresentacionWithSelect,
+  productoSelect,
+  ProductoWithSelect,
+} from './SelectsAndWheres/Selects';
+import {
+  PrecioProductoNormalized,
+  ProductoInventarioResponse,
+  StockPorSucursal,
+  StocksBySucursal,
+  StocksProducto,
+} from './ResponseInterface';
+import * as dayjs from 'dayjs';
+import 'dayjs/locale/es';
+import * as utc from 'dayjs/plugin/utc';
+import * as timezone from 'dayjs/plugin/timezone';
+import * as isSameOrAfter from 'dayjs/plugin/isSameOrAfter';
+import * as isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
+dayjs.extend(utc);
+dayjs.extend(timezone);
+dayjs.extend(isSameOrBefore);
+dayjs.extend(isSameOrAfter);
+dayjs.locale('es');
 
 const toDecimal = (value: string | number) => {
   return new Prisma.Decimal(value);
@@ -872,7 +893,12 @@ export class ProductsService {
         codigoProducto,
         fechaVencimiento,
         productoNombre,
+        limit,
+        page,
       } = dto;
+      this.logger.log('nuevo para inventariado');
+
+      const skip = (page - 1) * limit;
 
       const where: Prisma.ProductoWhereInput = {};
       const wherePresentaciones: Prisma.ProductoPresentacionWhereInput = {};
@@ -917,9 +943,16 @@ export class ProductsService {
         };
       }
       // WHERE DINAMICO DE PRESENTACIONES PRODUCTOS
+      if (productoNombre) {
+        wherePresentaciones.nombre = {
+          contains: productoNombre,
+          mode: 'insensitive',
+        };
+      }
+
       if (codigoProducto) {
         wherePresentaciones.codigoBarras = {
-          contains: productoNombre,
+          contains: codigoProducto,
           mode: 'insensitive',
         };
       }
@@ -958,16 +991,49 @@ export class ProductsService {
 
       this.logger.log(`DTO recibido:\n${JSON.stringify(dto, null, 2)}`);
 
-      const [productos, presentaciones] = await Promise.all([
-        this.prisma.producto.findMany({ where, select: productoSelect }),
+      const [productos, presentaciones, totalProductos, totalPresentaciones]: [
+        ProductoWithSelect[],
+        PresentacionWithSelect[],
+        number,
+        number,
+      ] = await Promise.all([
+        this.prisma.producto.findMany({
+          where: where,
+          select: productoSelect,
+          skip: skip,
+          take: limit,
+        }),
         this.prisma.productoPresentacion.findMany({
           where: wherePresentaciones,
           select: presentacionSelect,
+          skip: skip,
+          take: limit,
         }),
+        //TOTALES PARA META DEL TABLE
+        this.prisma.producto.count({ where }),
+        this.prisma.productoPresentacion.count({ where: wherePresentaciones }),
       ]);
+
+      const productosArray = Array.isArray(productos)
+        ? this.normalizerProductsInventario(productos)
+        : [];
+
+      const presentacionesArray = Array.isArray(presentaciones)
+        ? this.normalizerProductPresentacionInventario(presentaciones)
+        : [];
+
+      // DATOS META PARA LA TABLE====>
+      const mixed = [...productosArray, ...presentacionesArray];
+      const totalCount = totalProductos + totalPresentaciones;
+      const totalPages = Math.ceil(totalCount / limit);
       return {
-        productos,
-        presentaciones,
+        data: mixed,
+        meta: {
+          totalCount,
+          totalPages,
+          page,
+          limit,
+        },
       };
     } catch (error) {
       this.logger.error(
@@ -982,4 +1048,134 @@ export class ProductsService {
   }
 
   // HELPERS =======================>
+
+  normalizerProductsInventario(
+    arrayProductos: ProductoWithSelect[],
+  ): ProductoInventarioResponse[] {
+    return arrayProductos.map((p) => {
+      // precios
+      const precios: PrecioProductoNormalized[] = (p.precios ?? []).map(
+        (pr) => ({
+          id: pr.id,
+          orden: pr.orden,
+          precio: pr.precio.toString(),
+          rol: pr.rol,
+          tipo: pr.tipo,
+        }),
+      );
+
+      // stocks crudos
+      const stocks: StocksProducto[] = (p.stock ?? []).map((s) => ({
+        id: s.id,
+        cantidad: Number(s.cantidad ?? 0),
+        fechaIngreso: s.fechaIngreso
+          ? dayjs(s.fechaIngreso).format('DD-MM-YYYY')
+          : '',
+        fechaVencimiento: s.fechaVencimiento
+          ? dayjs(s.fechaVencimiento).format('DD-MM-YYYY')
+          : '',
+      }));
+
+      //retorno un objeto con RECORD personalizado
+      const dict = (p.stock ?? []).reduce<Record<string, StockPorSucursal>>(
+        (acc, s) => {
+          const sucursalId = s.sucursal.id ?? 0;
+          const key = String(sucursalId);
+          const nombre = s.sucursal?.nombre ?? key;
+          //existe? sino nuevo
+          const item = acc[key] ?? {
+            sucursalId: sucursalId,
+            nombre: nombre,
+            cantidad: 0,
+          };
+          item.cantidad += Number(s.cantidad ?? 0);
+          acc[key] = item;
+          return acc;
+        },
+        {},
+      );
+      const stocksBySucursal: StocksBySucursal = Object.values(dict);
+
+      return {
+        id: p.id,
+        nombre: p.nombre,
+        codigoProducto: p.codigoProducto ?? '',
+        descripcion: p.descripcion ?? '',
+        precioCosto:
+          p.precioCostoActual != null ? p.precioCostoActual.toString() : '0', // <- string
+        precios,
+        stocks,
+        stocksBySucursal: stocksBySucursal,
+        image: p.imagenesProducto[0].url,
+        images: p.imagenesProducto,
+      };
+    });
+  }
+
+  normalizerProductPresentacionInventario(
+    arrayProductos: PresentacionWithSelect[],
+  ): ProductoInventarioResponse[] {
+    return arrayProductos.map((p) => {
+      // precios
+      const precios: PrecioProductoNormalized[] = (p.precios ?? []).map(
+        (pr) => ({
+          id: pr.id,
+          orden: pr.orden,
+          precio: pr.precio.toString(),
+          rol: pr.rol,
+          tipo: pr.tipo,
+        }),
+      );
+
+      // stocks crudos
+      const stocks: StocksProducto[] = (p.stockPresentaciones ?? []).map(
+        (s) => ({
+          id: s.id,
+          cantidad: Number(s.cantidadPresentacion ?? 0),
+          fechaIngreso: s.fechaIngreso
+            ? dayjs(s.fechaIngreso).format('DD-MM-YYYY')
+            : '',
+          fechaVencimiento: s.fechaVencimiento
+            ? dayjs(s.fechaVencimiento).format('DD-MM-YYYY')
+            : '',
+        }),
+      );
+
+      //retorno un objeto con RECORD personalizado
+      const dict = (p.stockPresentaciones ?? []).reduce<
+        Record<string, StockPorSucursal>
+      >((acc, s) => {
+        const sucursalId = s.sucursal.id ?? 0;
+        const key = String(sucursalId);
+        const nombre = s.sucursal?.nombre ?? key;
+        //existe? sino nuevo
+        const item = acc[key] ?? {
+          sucursalId: sucursalId,
+          nombre: nombre,
+          cantidad: 0,
+        };
+        item.cantidad += Number(s.cantidadPresentacion ?? 0);
+        acc[key] = item;
+        return acc;
+      }, {});
+      const stocksBySucursal: StocksBySucursal = Object.values(dict);
+
+      return {
+        id: p.id,
+        nombre: p.nombre,
+        codigoProducto: p.codigoBarras ?? '',
+        descripcion: 'PRESENTACION',
+        precioCosto:
+          p.costoReferencialPresentacion != null
+            ? p.costoReferencialPresentacion.toString()
+            : '0',
+        tipoPresentacion: p.tipoPresentacion,
+        precios,
+        stocks,
+        stocksBySucursal: stocksBySucursal,
+        image: p.producto.imagenesProducto[0].url,
+        images: p.producto.imagenesProducto,
+      };
+    });
+  }
 }

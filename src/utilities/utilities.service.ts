@@ -25,7 +25,7 @@ export class UtilitiesService {
     dtos: GenerateStockDto[],
     entregaStockData?: EntregaStockData,
   ) {
-    this.logger.log('El dto entranod a generar el stock es: ', dtos);
+    this.logger.log('El dto entrando a generar el stock es: ', dtos);
 
     let entregaStock;
 
@@ -68,6 +68,9 @@ export class UtilitiesService {
             entregaStock: entregaStock
               ? { connect: { id: entregaStock.id } }
               : undefined,
+            requisicionRecepcion: prod.requisicionRecepcionId
+              ? { connect: { id: prod.requisicionRecepcionId } }
+              : undefined,
           },
         }),
       ),
@@ -93,7 +96,7 @@ export class UtilitiesService {
       cantidadPresentacion: number;
       fechaIngreso: Date;
       fechaVencimiento?: Date | null;
-      requisicionRecepcionId: number | null;
+      requisicionRecepcionId?: number;
     }>,
   ) {
     this.logger.log('DTOS StockPresentacion -> ', dtos);
