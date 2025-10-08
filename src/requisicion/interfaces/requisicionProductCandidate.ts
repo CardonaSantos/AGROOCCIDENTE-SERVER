@@ -24,9 +24,9 @@ export type RequisitionProductCandidate = {
     id: number;
     nombre: string;
     tipoPresentacion: TipoEmpaque;
-    factorUnidadBase: string; // Decimal string
+    // factorUnidadBase: string; // Decimal string
     costoReferencialPresentacion: string | null; // Decimal string
-    sku: string | null;
+    // sku: string | null;
     codigoBarras: string | null;
     esDefault: boolean;
     activo: boolean;

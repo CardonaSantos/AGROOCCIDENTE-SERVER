@@ -8,7 +8,7 @@ export type PrecioApi = { id: number; precio: string; rol: string };
 export type PresentacionApi = {
   id: number;
   nombre: string;
-  sku?: string | null;
+  // sku?: string | null;
   codigoBarras?: string | null;
   tipoPresentacion: string;
   precios: PrecioApi[];

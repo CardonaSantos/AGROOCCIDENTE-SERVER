@@ -155,13 +155,8 @@ export class ProductsService {
           if (typeof p.codigoBarras !== 'string' || p.codigoBarras === '')
             return false;
           if (typeof p.esDefault !== 'boolean') return false;
-          if (
-            typeof p.factorUnidadBase !== 'string' ||
-            parseInt(p.factorUnidadBase) <= 0
-          )
-            return false;
+
           if (typeof p.nombre !== 'string' || p.nombre === '') return false;
-          if (typeof p.sku !== 'string' || p.sku === '') return false;
 
           const preciosValidos = p.preciosPresentacion.every((precio) => {
             if (precio.orden <= 0) return false;
@@ -296,7 +291,7 @@ export class ProductsService {
         presentaciones: prod.presentaciones.map((pres) => ({
           id: pres.id,
           nombre: pres.nombre,
-          sku: pres.sku,
+          // sku: pres.sku,
           codigoBarras: pres.codigoBarras,
           tipoPresentacion: pres.tipoPresentacion,
           precios: pres.precios.map((pp) => ({
@@ -819,7 +814,7 @@ export class ProductsService {
               nombre: true,
               codigoBarras: true,
               tipoPresentacion: true,
-              sku: true,
+              // sku: true,
               stockPresentaciones: {
                 where: {
                   sucursalId: parseInt(sucursalId),
@@ -858,7 +853,7 @@ export class ProductsService {
         presentaciones: p.presentaciones.map((pres) => ({
           id: pres.id,
           nombre: pres.nombre,
-          sku: pres.sku,
+          // sku: pres.sku,
           codigoBarras: pres.codigoBarras,
           tipoPresentacion: pres.tipoPresentacion,
           precios: pres.precios.map((pr) => ({

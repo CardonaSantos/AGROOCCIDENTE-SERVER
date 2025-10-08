@@ -53,12 +53,6 @@ export class PresentacionCreateDto {
   @Length(1, 80)
   nombre: string;
 
-  @IsString()
-  @Matches(DECIMAL_RE, {
-    message: 'factorUnidadBase debe ser decimal positivo',
-  })
-  factorUnidadBase: string; // "1000", "0.5", etc.
-
   @IsOptional()
   @IsString()
   @MaxLength(64)

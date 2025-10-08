@@ -152,16 +152,10 @@ export class RequisicionService {
   }
 
   /**
-   * Candidatos para requisición (v2):
-   * - Trae TODOS los productos (tengan o no StockThreshold)
-   * - Incluye presentaciones, costos referenciales y tipo de empaque
-   * - Calcula stock total EQUIVALENTE en unidades base (producto + presentaciones)
-   * - Marca pendientes (producto/presentación)
-   * - Ordena para priorizar críticos (bajo umbral y mayor faltante)
-   */
-
-  /**
-   * v2 con paginación, búsqueda y orden
+   * v2 con paginación, búsqueda y orden (sin factorUnidadBase).
+   * - stockPresentacionesEq: suma de cantidades de presentaciones (sin equivalencia).
+   * - stockTotalEq: stock base del producto (no suma presentaciones).
+   * - belowThreshold / faltanteSugerido: se calculan SOLO con stock base vs threshold de producto.
    */
   async getRequisitionProductsV2(
     args: GetV2Args,
@@ -186,7 +180,6 @@ export class RequisicionService {
                 some: {
                   OR: [
                     { nombre: { contains: q, mode: 'insensitive' } },
-                    { sku: { contains: q, mode: 'insensitive' } },
                     { codigoBarras: { contains: q, mode: 'insensitive' } },
                   ],
                 },
@@ -208,7 +201,7 @@ export class RequisicionService {
           codigoProducto: true,
           unidadBase: true,
           precioCostoActual: true,
-          stockThreshold: { select: { stockMinimo: true } },
+          stockThreshold: { select: { stockMinimo: true } }, // umbral (producto)
           stock: {
             select: {
               id: true,
@@ -221,8 +214,8 @@ export class RequisicionService {
             select: {
               id: true,
               nombre: true,
-              factorUnidadBase: true,
-              sku: true,
+              // factorUnidadBase: eliminado
+              // sku: true, // si más adelante lo quieres mostrar, re-actívalo
               codigoBarras: true,
               esDefault: true,
               activo: true,
@@ -252,7 +245,7 @@ export class RequisicionService {
       p.presentaciones.map((pp) => pp.id),
     );
 
-    // ===== 3) Agregados por sucursal (callback) =====
+    // ===== 3) Agregados por sucursal =====
     const { stockBaseGroup, stockPresGroup, pendientes } =
       await this.prisma.$transaction(async (tx) => {
         const stockBaseGroup = await tx.stock.groupBy({
@@ -318,44 +311,49 @@ export class RequisicionService {
       }
     }
 
-    // ===== Helper Decimal =====
+    // Helper Decimal corto
     const D = (v: Prisma.Decimal.Value) => new Prisma.Decimal(v);
 
-    // ===== 4) Construir DTO completo (para poder ordenar por priority/faltante etc.) =====
+    // ===== 4) Construir DTO completo =====
     const full: RequisitionProductCandidate[] = productos.map((p) => {
       const stockBase = stockBaseMap.get(p.id) ?? 0;
 
-      let stockPresEq = D(0);
+      // Sumatoria de presentaciones SIN equivalencia (ya no existe factorUnidadBase)
+      let stockPresSum = D(0);
+
       const presentaciones = p.presentaciones.map((pp) => {
         const cantPres = stockPresMap.get(pp.id) ?? 0;
-        const factor = D(pp.factorUnidadBase ?? 0);
-        const eq = D(cantPres).mul(factor);
+        const eq = D(cantPres); // ahora 'eq' == cantidad de presentaciones (sin convertir)
 
-        stockPresEq = stockPresEq.add(eq);
+        stockPresSum = stockPresSum.add(eq);
 
         return {
           id: pp.id,
           nombre: pp.nombre,
           tipoPresentacion: pp.tipoPresentacion as TipoEmpaque,
-          factorUnidadBase: D(pp.factorUnidadBase ?? 0).toString(),
           costoReferencialPresentacion:
             pp.costoReferencialPresentacion != null
               ? D(pp.costoReferencialPresentacion).toString()
               : null,
-          sku: pp.sku,
           codigoBarras: pp.codigoBarras,
           esDefault: pp.esDefault,
           activo: pp.activo,
           stockCantidadPresentacion: cantPres,
-          stockEquivalenteBase: eq.toString(),
+          stockEquivalenteBase: eq.toString(), // mantenemos el campo para compatibilidad
           pendientesFolios: pendPresMap.get(pp.id) ?? [],
-          stocks: p.stock,
+          stocks: p.stock, // (igual que antes; si quieres filtrarlo por sucursal, se puede ajustar)
         };
       });
 
-      const stockTotalEq = D(stockBase).add(stockPresEq);
+      // Ahora definimos:
+      // - stockTotalEq = stock base (coherente con thresholds y faltante)
+      // - stockPresentacionesEq = sum(cantidades presentaciones)
+      const stockTotalEq = D(stockBase);
+      const stockPresentacionesEq = stockPresSum;
+
       const stockMinimo = p.stockThreshold?.stockMinimo ?? 0;
 
+      // Threshold/faltante SOLO con stock base
       const belowThreshold = stockTotalEq.lessThan(D(stockMinimo));
       let faltanteSugerido = 0;
       if (belowThreshold) {
@@ -371,8 +369,8 @@ export class RequisicionService {
         precioCostoProducto: p.precioCostoActual ?? null,
 
         stockBase,
-        stockPresentacionesEq: stockPresEq.toString(),
-        stockTotalEq: stockTotalEq.toString(),
+        stockPresentacionesEq: stockPresentacionesEq.toString(),
+        stockTotalEq: stockTotalEq.toString(), // ahora = stock base
         stockMinimo,
         belowThreshold,
         faltanteSugerido,
@@ -395,22 +393,23 @@ export class RequisicionService {
       if (sortBy === 'stockMinimo')
         return byNumber(a.stockMinimo, b.stockMinimo);
       if (sortBy === 'stockTotalEq')
-        return byNumber(Number(a.stockTotalEq), Number(b.stockTotalEq));
+        return byNumber(Number(a.stockTotalEq), Number(b.stockTotalEq)); // compara stock base
       if (sortBy === 'faltanteSugerido')
         return byNumber(a.faltanteSugerido, b.faltanteSugerido);
 
-      // priority (default): críticos primero, luego mayor faltante, luego menor cobertura, luego nombre
-      // críticos
-      if (a.belowThreshold !== b.belowThreshold) {
+      // priority (default):
+      // 1) críticos primero
+      if (a.belowThreshold !== b.belowThreshold)
         return a.belowThreshold ? -1 : 1;
-      }
-      // mayor faltante
+
+      // 2) mayor faltante
       if (a.faltanteSugerido !== b.faltanteSugerido) {
         return (
           (b.faltanteSugerido - a.faltanteSugerido) * (dir === -1 ? -1 : 1)
         );
       }
-      // menor cobertura = stockTotalEq / stockMinimo (si min=0 => +inf)
+
+      // 3) menor cobertura = stockTotalEq / stockMinimo
       const covA =
         a.stockMinimo > 0
           ? new Prisma.Decimal(a.stockTotalEq).div(a.stockMinimo).toNumber()
@@ -424,7 +423,7 @@ export class RequisicionService {
       return byString(a.nombre, b.nombre);
     });
 
-    // ===== 6) Paginar en memoria (más simple). Si el volumen crece, optimizar. =====
+    // ===== 6) Paginar en memoria =====
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
     const start = (page - 1) * pageSize;
     const end = start + pageSize;
@@ -494,8 +493,12 @@ export class RequisicionService {
     return items;
   }
 
-  /* ---------- Paso C ---------- */
-  /* ---------- Paso C (revisado para producto + presentaciones) ---------- */
+  /**
+   * Crea Requisición con líneas (producto y/o presentación)
+   * - Sin uso de factorUnidadBase.
+   * - Precio unitario de presentación: usa costoReferencialPresentacion, si no, precioCostoActual del producto.
+   * - stockMinimo para presentaciones: 0 (placeholder). Si ya tienes thresholds por presentación, aquí es el lugar para leerlos.
+   */
   async createWithLines(dto: RequisicionLineasDTO) {
     try {
       const { lineas, sucursalId, usuarioId, observaciones } = dto;
@@ -564,7 +567,7 @@ export class RequisicionService {
             async ({ productoId, cantidadSugerida, fechaExpiracion }) => {
               const producto = await tx.producto.findUnique({
                 where: { id: productoId! },
-                include: { stockThreshold: true },
+                include: { stockThreshold: true }, // threshold a nivel producto (si existe)
               });
               if (!producto) {
                 throw new HttpException(
@@ -573,14 +576,17 @@ export class RequisicionService {
                 );
               }
 
-              const stockBase = await tx.stock.aggregate({
+              const stockBaseAgg = await tx.stock.aggregate({
                 where: { productoId: productoId!, sucursalId },
                 _sum: { cantidad: true },
               });
 
-              const cantidadActualBase = Number(stockBase._sum.cantidad ?? 0);
+              const cantidadActualBase = Number(
+                stockBaseAgg._sum.cantidad ?? 0,
+              );
               const stockMinimoProd = producto.stockThreshold?.stockMinimo ?? 0;
-              const precioUnitario = Number(producto.precioCostoActual ?? 0); //USAR PRECIO DESDE LA BASE DE DATOS
+              // Precio unitario desde BD (producto)
+              const precioUnitario = Number(producto.precioCostoActual ?? 0);
 
               return {
                 productoId: productoId!,
@@ -595,13 +601,16 @@ export class RequisicionService {
           ),
         );
 
-        // 3) Construir líneas de PRESENTACIÓN
+        // 3) Construir líneas de PRESENTACIÓN (sin factor)
         const lineasPresentacionesCreate = await Promise.all(
           presentacionesRequisicion.map(
             async ({ presentacionId, cantidadSugerida, fechaExpiracion }) => {
               const presentacion = await tx.productoPresentacion.findUnique({
                 where: { id: presentacionId! },
-                include: { producto: { include: { stockThreshold: true } } },
+                // Traemos el producto para usar su precioCostoActual como respaldo
+                include: {
+                  producto: { select: { id: true, precioCostoActual: true } },
+                },
               });
               if (!presentacion) {
                 throw new HttpException(
@@ -610,7 +619,7 @@ export class RequisicionService {
                 );
               }
 
-              const { producto } = presentacion;
+              // Stock en tabla de presentaciones (cantidad en su propia unidad)
               const stockPresAgg = await tx.stockPresentacion.aggregate({
                 where: { presentacionId: presentacionId!, sucursalId },
                 _sum: { cantidadPresentacion: true },
@@ -619,21 +628,21 @@ export class RequisicionService {
                 stockPresAgg._sum.cantidadPresentacion ?? 0,
               );
 
-              const factor = Number(presentacion.factorUnidadBase || 0);
-              const stockMinimoBase = producto.stockThreshold?.stockMinimo ?? 0;
-              const stockMinimoPresentacion =
-                factor > 0 ? Math.ceil(stockMinimoBase / factor) : 0;
+              // ⚠️ Threshold por presentación:
+              // Si ya tienes una tabla/relación de umbrales por presentación, reemplaza el "0" por ese valor.
+              // Ejemplo (cuando exista): const stockMinimoPresentacion = presentacion.stockThresholdPresentacion?.stockMinimo ?? 0;
+              const stockMinimoPresentacion = 0;
 
-              const costoRef =
+              // Precio unitario de la presentación:
+              // 1) Usa costo referencial si existe
+              // 2) De lo contrario, usa precioCostoActual del producto
+              const precioUnitario =
                 presentacion.costoReferencialPresentacion != null
                   ? Number(presentacion.costoReferencialPresentacion)
-                  : null;
-              const precioUnitario =
-                costoRef ??
-                Number(producto.precioCostoActual ?? 0) * (factor || 1);
+                  : Number(presentacion.producto.precioCostoActual ?? 0);
 
               return {
-                productoId: producto.id,
+                productoId: presentacion.producto.id,
                 presentacionId: presentacion.id,
                 cantidadActual: Math.max(0, cantidadActualPres),
                 stockMinimo: stockMinimoPresentacion,
@@ -735,23 +744,16 @@ export class RequisicionService {
           estado: true,
           observaciones: true,
           totalLineas: true,
-          totalRequisicion: true, // podría ser null si aún no lo calculaste
+          totalRequisicion: true,
           createdAt: true,
           updatedAt: true,
           ingresadaAStock: true,
 
           usuario: {
-            select: {
-              id: true,
-              nombre: true,
-              rol: true,
-            },
+            select: { id: true, nombre: true, rol: true },
           },
           sucursal: {
-            select: {
-              id: true,
-              nombre: true,
-            },
+            select: { id: true, nombre: true },
           },
           lineas: {
             select: {
@@ -761,7 +763,7 @@ export class RequisicionService {
               cantidadActual: true,
               stockMinimo: true,
               cantidadSugerida: true,
-              precioUnitario: true, // Float? en tu schema actual
+              precioUnitario: true, // Float? (puede venir null)
               fechaExpiracion: true,
               createdAt: true,
               updatedAt: true,
@@ -777,11 +779,10 @@ export class RequisicionService {
                 select: {
                   id: true,
                   nombre: true,
-                  factorUnidadBase: true, // Decimal(18,6)
-                  sku: true,
+                  // sku: true, // si lo tienes, puedes exponerlo
                   codigoBarras: true,
                   tipoPresentacion: true,
-                  costoReferencialPresentacion: true, // Decimal(12,4)?
+                  costoReferencialPresentacion: true, // Decimal(12,4)? -> convertir a Number
                 },
               },
             },
@@ -789,39 +790,38 @@ export class RequisicionService {
         },
       });
 
-      // Adaptar la forma para UI (strings de fecha, totales, etc.)
       const dto = requisiciones.map((r) => {
-        // map de líneas
         const lineas = r.lineas.map((l) => {
-          // precio "usable" para subtotal (fallback a costo referencial de presentación o costo base * factor)
-          const precioDeLinea =
-            typeof l.precioUnitario === 'number'
-              ? l.precioUnitario
-              : (() => {
-                  if (l.presentacion) {
-                    const costoRef = l.presentacion.costoReferencialPresentacion
-                      ? Number(l.presentacion.costoReferencialPresentacion)
-                      : null;
-                    if (costoRef != null) return costoRef;
-                    const factor = Number(l.presentacion.factorUnidadBase ?? 1);
-                    return (
-                      (r?.lineas?.[0]?.producto?.precioCostoActual ?? 0) *
-                      factor
-                    );
-                  }
-                  return l.producto?.precioCostoActual ?? 0;
-                })();
+          // Precio de línea (prioridad):
+          // 1) Si la línea ya trae precioUnitario -> úsalo
+          // 2) Si es presentación y trae costo referencial -> úsalo
+          // 3) Fallback al precioCostoActual del producto
+          const precioDeLinea: number = (() => {
+            if (
+              typeof l.precioUnitario === 'number' &&
+              !Number.isNaN(l.precioUnitario)
+            ) {
+              return l.precioUnitario;
+            }
+            if (l.presentacion?.costoReferencialPresentacion != null) {
+              return Number(l.presentacion.costoReferencialPresentacion) || 0;
+            }
+            return Number(l.producto?.precioCostoActual ?? 0);
+          })();
 
-          const subtotal = precioDeLinea * (l.cantidadSugerida ?? 0);
+          const cantidadSug = Number(l.cantidadSugerida ?? 0);
+          const subtotal = precioDeLinea * cantidadSug;
 
           return {
             id: l.id,
             productoId: l.productoId,
             presentacionId: l.presentacionId ?? null,
             esPresentacion: l.presentacionId != null,
+
             cantidadActual: l.cantidadActual,
             stockMinimo: l.stockMinimo,
-            cantidadSugerida: l.cantidadSugerida,
+            cantidadSugerida: cantidadSug,
+
             precioUnitario: precioDeLinea,
             subtotal,
 
@@ -835,15 +835,14 @@ export class RequisicionService {
               id: l.producto.id,
               codigoProducto: l.producto.codigoProducto,
               nombre: l.producto.nombre,
-              precioCostoActual: l.producto.precioCostoActual ?? 0,
+              precioCostoActual: Number(l.producto.precioCostoActual ?? 0),
             },
 
             presentacion: l.presentacion
               ? {
                   id: l.presentacion.id,
                   nombre: l.presentacion.nombre,
-                  factorUnidadBase: Number(l.presentacion.factorUnidadBase),
-                  sku: l.presentacion.sku,
+                  // sku: l.presentacion.sku,
                   codigoBarras: l.presentacion.codigoBarras,
                   tipoPresentacion: l.presentacion.tipoPresentacion,
                   costoReferencialPresentacion:
@@ -855,7 +854,7 @@ export class RequisicionService {
           };
         });
 
-        // totalRequisicion calculado si viene null
+        // Si totalRequisicion es null, lo calculamos con la suma de subtotales
         const totalCalc =
           r.totalRequisicion != null
             ? Number(r.totalRequisicion)
@@ -875,7 +874,6 @@ export class RequisicionService {
 
           createdAt: r.createdAt.toISOString(),
           updatedAt: r.updatedAt.toISOString(),
-
           ingresadaAStock: r.ingresadaAStock,
 
           usuario: r.usuario,

@@ -96,11 +96,11 @@ export class PurchaseRequisitionsService {
                   nombre: { contains: search, mode: 'insensitive' },
                 },
               },
-              {
-                presentacion: {
-                  sku: { contains: search, mode: 'insensitive' },
-                },
-              },
+              // {
+              //   presentacion: {
+              //     sku: { contains: search, mode: 'insensitive' },
+              //   },
+              // },
               {
                 presentacion: {
                   codigoBarras: { contains: search, mode: 'insensitive' },
@@ -230,10 +230,10 @@ export class PurchaseRequisitionsService {
               select: {
                 id: true,
                 nombre: true,
-                sku: true,
+                // sku: true,
                 codigoBarras: true,
                 tipoPresentacion: true,
-                factorUnidadBase: true, // Decimal
+                // factorUnidadBase: true, // Decimal
                 costoReferencialPresentacion: true, // Decimal?
               },
             },
@@ -291,10 +291,10 @@ export class PurchaseRequisitionsService {
           presentacion?: {
             id: number;
             nombre: string | null;
-            sku: string | null;
+            // sku: string | null;
             codigoBarras: string | null;
             tipoPresentacion: string | null;
-            factorUnidadBase: any; // Decimal
+            // factorUnidadBase: any; // Decimal
             costoReferencialPresentacion: any; // Decimal
           } | null;
         }>;
@@ -311,10 +311,10 @@ export class PurchaseRequisitionsService {
             ? {
                 id: d.presentacion.id,
                 nombre: d.presentacion.nombre ?? '',
-                sku: d.presentacion.sku ?? null,
+                // sku: d.presentacion.sku ?? null,
                 codigoBarras: d.presentacion.codigoBarras ?? null,
                 tipoPresentacion: d.presentacion.tipoPresentacion ?? null,
-                factorUnidadBase: toNum(d.presentacion.factorUnidadBase, 1),
+                // factorUnidadBase: toNum(d.presentacion.factorUnidadBase, 1),
                 costoReferencialPresentacion: toNum(
                   d.presentacion.costoReferencialPresentacion,
                   0,
@@ -510,6 +510,7 @@ export class PurchaseRequisitionsService {
               actualizadoEn: true,
               cantidad: true,
               costoUnitario: true,
+              fechaVencimiento: true,
               producto: {
                 select: {
                   id: true,
@@ -522,10 +523,10 @@ export class PurchaseRequisitionsService {
                 select: {
                   id: true,
                   nombre: true,
-                  sku: true,
+                  // sku: true,
                   codigoBarras: true,
                   tipoPresentacion: true,
-                  factorUnidadBase: true, // Decimal
+                  // factorUnidadBase: true, // Decimal
                   costoReferencialPresentacion: true, // Decimal?
                 },
               },
@@ -556,10 +557,10 @@ export class PurchaseRequisitionsService {
           ? {
               id: d.presentacion.id,
               nombre: d.presentacion.nombre ?? '',
-              sku: d.presentacion.sku ?? null,
+              // sku: d.presentacion.sku ?? null,
               codigoBarras: d.presentacion.codigoBarras ?? null,
               tipoPresentacion: d.presentacion.tipoPresentacion ?? null,
-              factorUnidadBase: toNum(d.presentacion.factorUnidadBase, 1),
+              // factorUnidadBase: toNum(d.presentacion.factorUnidadBase, 1),
               costoReferencialPresentacion: toNum(
                 d.presentacion.costoReferencialPresentacion,
                 0,
@@ -574,6 +575,7 @@ export class PurchaseRequisitionsService {
           subtotal: cantidad * costoUnitario,
           creadoEn: (d.creadoEn as any)?.toISOString?.() ?? null,
           actualizadoEn: (d.actualizadoEn as any)?.toISOString?.() ?? null,
+          fechaVencimiento: d.fechaVencimiento,
           producto: {
             id: d.producto?.id ?? null,
             nombre: d.producto?.nombre ?? '',
@@ -2040,7 +2042,7 @@ export class PurchaseRequisitionsService {
                   id: true,
                   nombre: true,
                   codigoBarras: true,
-                  sku: true,
+                  // sku: true,
                 },
               },
             },

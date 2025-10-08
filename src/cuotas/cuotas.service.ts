@@ -469,7 +469,7 @@ export class CuotasService {
                       id: true,
                       nombre: true,
                       codigoBarras: true,
-                      sku: true,
+                      // sku: true,
                     },
                   },
                 },
@@ -502,7 +502,7 @@ export class CuotasService {
                   id: vp.presentacion.id,
                   nombre: vp.presentacion.nombre,
                   codigoBarras: vp.presentacion.codigoBarras ?? undefined,
-                  sku: vp.presentacion.sku ?? undefined,
+                  // sku: vp.presentacion.sku ?? undefined,
                 }
               : null,
           })) ?? [];

@@ -74,6 +74,7 @@ export class ComprasService {
                 productoId: true,
                 presentacionId: true,
                 cantidad: true,
+                fechaVencimiento: true,
               },
             },
           },
@@ -170,7 +171,6 @@ export class ComprasService {
                   compraRecepcionId: cab.id,
                   compraDetalleId: l.compraDetalleId,
                   productoId,
-                  // OJO: NO enviamos presentacionId; debe ser nullable en el modelo
                   cantidadRecibida: l.cantidadRecibida,
                   fechaExpiracion: l.fechaExpiracion
                     ? dayjs(l.fechaExpiracion).tz(TZGT).startOf('day').toDate()
@@ -235,6 +235,10 @@ export class ComprasService {
     sucursalId: number,
     recepcionId: number,
   ) {
+    this.logger.log(
+      'El payload cargado a create presentaciones stock es: ',
+      items,
+    );
     const created = await Promise.all(
       items.map(async (it) => {
         const stock = await tx.stockPresentacion.create({
@@ -271,6 +275,8 @@ export class ComprasService {
     items: StockLineaProductoPayload[],
     sucursalId: number,
   ) {
+    this.logger.log('El payload cargado a create productos stock es: ', items);
+
     if (!items.length) return [];
 
     const created = await Promise.all(
@@ -313,12 +319,13 @@ export class ComprasService {
             id: true,
             cantidad: true,
             costoUnitario: true,
+            fechaVencimiento: true,
             presentacion: {
               select: {
                 id: true,
                 nombre: true,
                 codigoBarras: true,
-                sku: true,
+                // sku: true,
                 costoReferencialPresentacion: true,
               },
             },
@@ -365,7 +372,7 @@ export class ComprasService {
         ? {
             id: d.presentacion.id,
             nombre: d.presentacion.nombre,
-            codigo: d.presentacion.codigoBarras ?? d.presentacion.sku ?? null,
+            codigo: d.presentacion.codigoBarras ?? null,
             precioCosto: Number(d.costoUnitario), // costo para esa línea/presentación
             tipo: 'PRESENTACION',
           }
@@ -438,7 +445,7 @@ export class ComprasService {
                 id: true,
                 nombre: true,
                 codigoBarras: true,
-                sku: true,
+                // sku: true,
                 costoReferencialPresentacion: true,
               },
             },
@@ -485,7 +492,7 @@ export class ComprasService {
         ? {
             id: d.presentacion.id,
             nombre: d.presentacion.nombre,
-            codigo: d.presentacion.codigoBarras ?? d.presentacion.sku ?? null,
+            codigo: d.presentacion.codigoBarras ?? null,
             precioCosto: Number(d.costoUnitario), // costo para esa línea/presentación
             tipo: 'PRESENTACION',
           }

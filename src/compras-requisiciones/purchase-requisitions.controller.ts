@@ -59,6 +59,11 @@ export class PurchaseRequisitionsController {
     return this.purchaseRequisitionsService.getRegistrosCompras(q);
   }
 
+  /**
+   * Servicio que retorna el registro de compra para su recepcion
+   * @param id ID del registro de compra
+   * @returns El registro de compra para su recepción
+   */
   @Get('get-registro/:id')
   getRegistroCompra(@Param('id', ParseIntPipe) id: number) {
     return this.purchaseRequisitionsService.getRegistroCompra(id);

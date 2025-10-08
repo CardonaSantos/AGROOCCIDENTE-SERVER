@@ -28,10 +28,7 @@ export class PresentacionProductoService {
 
     const presentacionesWithPrices = await Promise.all(
       presentaciones.map(async (presentacion) => {
-        const factor = new Prisma.Decimal(presentacion.factorUnidadBase);
-        if (factor.lte(0)) {
-          throw new BadRequestException('El factor debe ser mayor a cero');
-        }
+        // const factor = new Prisma.Decimal(presentacion.factorUnidadBase);
 
         const duplicado = await tx.productoPresentacion.findFirst({
           where: {
@@ -60,9 +57,10 @@ export class PresentacionProductoService {
         const newPresentacion = await tx.productoPresentacion.create({
           data: {
             nombre: presentacion.nombre,
-            factorUnidadBase: presentacion.factorUnidadBase,
+            // factorUnidadBase: presentacion.factorUnidadBase,
+
             codigoBarras: presentacion.codigoBarras,
-            sku: presentacion.sku,
+            // sku: presentacion.sku,
             esDefault: presentacion.esDefault,
             tipoPresentacion: presentacion.tipoPresentacion,
             costoReferencialPresentacion:
@@ -183,7 +181,7 @@ export class PresentacionProductoService {
       where: {
         OR: [
           { nombre: { contains: q, mode: 'insensitive' } },
-          { sku: { contains: q, mode: 'insensitive' } },
+          // { sku: { contains: q, mode: 'insensitive' } },
           { codigoBarras: { contains: q, mode: 'insensitive' } },
         ],
         activo: true,

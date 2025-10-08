@@ -66,6 +66,8 @@ import { RealtimeModule } from './realtime/realtime.module';
 import { StockPresentacionModule } from './stock-presentacion/stock-presentacion.module';
 import { ComprasModule } from './compras/compras.module';
 import { RecepcionesModule } from './compras/recepciones/recepciones.module';
+import { StockThresholdPresentacionModule } from './stock-threshold-presentacion/stock-threshold-presentacion.module';
+import { ImagenesPresentacionesModule } from './imagenes-presentaciones/imagenes-presentaciones.module';
 
 @Module({
   imports: [
@@ -134,6 +136,8 @@ import { RecepcionesModule } from './compras/recepciones/recepciones.module';
     StockPresentacionModule,
     ComprasModule,
     RecepcionesModule,
+    StockThresholdPresentacionModule,
+    ImagenesPresentacionesModule,
   ],
   controllers: [AppController],
   providers: [AppService, CloudinaryProvider, SaldosServiceService],

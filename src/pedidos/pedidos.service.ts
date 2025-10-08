@@ -783,7 +783,7 @@ export class PedidosService {
       codigoProducto,
       search,
       codigoProveedor,
-      sucursalId, // opcional, puedes usarlo para filtrar agregados si más adelante lo deseas
+      sucursalId, // opcional: si viene, filtramos stock por esa sucursal
     } = query;
 
     const where: Prisma.ProductoWhereInput = search
@@ -831,27 +831,30 @@ export class PedidosService {
           codigoProveedor: true,
           descripcion: true,
           precioCostoActual: true,
-          unidadBase: true, // 👈 NUEVO (útil en UI)
-          // Stock base (unidades base) por sucursal
+          unidadBase: true, // se mantiene para UI
+
+          // Stock base (unidades base). Si viene sucursalId, filtramos.
           stock: {
+            where: sucursalId ? { sucursalId } : undefined,
             select: {
               cantidad: true,
               sucursal: { select: { id: true, nombre: true } },
             },
           },
-          // 👇 NUEVO: presentaciones + su stock por sucursal (cantidad de PRESENTACIONES)
+
+          // Presentaciones SIN factorUnidadBase
           presentaciones: {
             select: {
               id: true,
               nombre: true,
-              factorUnidadBase: true,
               esDefault: true,
               activo: true,
-              sku: true,
+              // sku: true,
               codigoBarras: true,
               tipoPresentacion: true,
               costoReferencialPresentacion: true,
               stockPresentaciones: {
+                where: sucursalId ? { sucursalId } : undefined,
                 select: {
                   cantidadPresentacion: true,
                   sucursal: { select: { id: true, nombre: true } },
@@ -882,7 +885,7 @@ export class PedidosService {
         {},
       );
 
-      // --- Presentaciones + stock por sucursal (en cantidad de PRESENTACIONES) ---
+      // --- Presentaciones + stock por sucursal (en PRESENTACIONES) ---
       const presentaciones = p.presentaciones.map((pr) => {
         const agg = pr.stockPresentaciones.reduce<
           Record<number, StockPorSucursal>
@@ -902,18 +905,16 @@ export class PedidosService {
         return {
           id: pr.id,
           nombre: pr.nombre,
-          factorUnidadBase: Number(pr.factorUnidadBase), // Decimal -> number
           esDefault: pr.esDefault,
           activo: pr.activo,
-          sku: pr.sku ?? null,
+          // sku: pr.sku ?? null,
           codigoBarras: pr.codigoBarras ?? null,
           tipoPresentacion: pr.tipoPresentacion,
           costoReferencialPresentacion:
             pr.costoReferencialPresentacion != null
               ? Number(pr.costoReferencialPresentacion)
               : null,
-          // stock por sucursal en PRESENTACIONES
-          stockPorSucursal: Object.values(agg),
+          stockPorSucursal: Object.values(agg), // cantidades de PRESENTACIONES por sucursal
         };
       });
 
@@ -923,11 +924,13 @@ export class PedidosService {
         codigoProducto: p.codigoProducto,
         codigoProveedor: p.codigoProveedor,
         descripcion: p.descripcion,
-        unidadBase: p.unidadBase ?? 'unidades', // 👈 útil para UI
+        unidadBase: p.unidadBase ?? 'unidades',
         precioCostoActual: p.precioCostoActual ?? 0,
+
         // stock base (unidades base) por sucursal
         stockPorSucursal: Object.values(stockPorSucursal),
-        // 👇 NUEVO
+
+        // presentaciones (sin factorUnidadBase)
         presentaciones,
       };
     });
@@ -1166,7 +1169,7 @@ export class PedidosService {
                   id: true,
                   nombre: true,
                   codigoBarras: true,
-                  sku: true,
+                  // sku: true,
                   tipoPresentacion: true,
                 },
               },
