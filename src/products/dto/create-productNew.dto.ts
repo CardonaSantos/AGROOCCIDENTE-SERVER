@@ -48,15 +48,9 @@ export class PrecioPresentacionDto {
 }
 
 export class PresentacionCreateDto {
-  // 👇 OJO: al crear producto, no existe aún productoId → no lo incluyas aquí
   @IsString()
   @Length(1, 80)
   nombre: string;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(64)
-  sku?: string;
 
   @IsOptional()
   @IsString()

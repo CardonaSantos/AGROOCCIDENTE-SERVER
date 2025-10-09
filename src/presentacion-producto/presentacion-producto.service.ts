@@ -28,8 +28,6 @@ export class PresentacionProductoService {
 
     const presentacionesWithPrices = await Promise.all(
       presentaciones.map(async (presentacion) => {
-        // const factor = new Prisma.Decimal(presentacion.factorUnidadBase);
-
         const duplicado = await tx.productoPresentacion.findFirst({
           where: {
             productoId: productoId,
@@ -57,10 +55,7 @@ export class PresentacionProductoService {
         const newPresentacion = await tx.productoPresentacion.create({
           data: {
             nombre: presentacion.nombre,
-            // factorUnidadBase: presentacion.factorUnidadBase,
-
             codigoBarras: presentacion.codigoBarras,
-            // sku: presentacion.sku,
             esDefault: presentacion.esDefault,
             tipoPresentacion: presentacion.tipoPresentacion,
             costoReferencialPresentacion:
@@ -103,54 +98,6 @@ export class PresentacionProductoService {
     return presentacionesWithPrices;
   }
 
-  // async update(id: number, dto: UpdatePresentacionProductoDto) {
-  //   return this.prisma.$transaction(async (tx) => {
-  //     const current = await tx.productoPresentacion.findUnique({
-  //       where: { id },
-  //     });
-  //     if (!current) throw new NotFoundException('Presentación no encontrada');
-
-  //     // si cambia nombre, validar duplicado por producto
-  //     if (dto.nombre && dto.nombre !== current.nombre) {
-  //       const dup = await tx.productoPresentacion.findFirst({
-  //         where: { productoId: current.productoId, nombre: dto.nombre },
-  //       });
-  //       if (dup)
-  //         throw new BadRequestException(
-  //           'Ya existe una presentación con ese nombre para este producto',
-  //         );
-  //     }
-
-  //     // factor > 0
-  //     let factor = undefined as Prisma.Decimal | undefined;
-  //     if (dto.factorUnidadBase !== undefined) {
-  //       factor = new Prisma.Decimal(dto.factorUnidadBase);
-  //       if (factor.lte(0))
-  //         throw new BadRequestException('factorUnidadBase debe ser > 0');
-  //     }
-
-  //     // si la ponemos default, quitar otras
-  //     if (dto.esDefault === true) {
-  //       await tx.productoPresentacion.updateMany({
-  //         where: { productoId: current.productoId, esDefault: true },
-  //         data: { esDefault: false },
-  //       });
-  //     }
-
-  //     return tx.productoPresentacion.update({
-  //       where: { id },
-  //       data: {
-  //         nombre: dto.nombre ?? undefined,
-  //         factorUnidadBase: factor ?? undefined,
-  //         sku: dto.sku?.trim() ?? undefined,
-  //         codigoBarras: dto.codigoBarras?.trim() ?? undefined,
-  //         esDefault: dto.esDefault ?? undefined,
-  //         activo: dto['activo'] ?? undefined,
-  //       },
-  //     });
-  //   });
-  // }
-
   async setDefault(id: number) {
     return this.prisma.$transaction(async (tx) => {
       const p = await tx.productoPresentacion.findUnique({ where: { id } });
@@ -181,7 +128,6 @@ export class PresentacionProductoService {
       where: {
         OR: [
           { nombre: { contains: q, mode: 'insensitive' } },
-          // { sku: { contains: q, mode: 'insensitive' } },
           { codigoBarras: { contains: q, mode: 'insensitive' } },
         ],
         activo: true,

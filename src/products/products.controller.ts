@@ -42,8 +42,6 @@ interface PrecioPresentacionDto {
 
 interface PresentacionDto {
   nombre: string;
-  factorUnidadBase: string; // decimal string
-  sku?: string | null;
   codigoBarras?: string | null;
   esDefault?: boolean;
   preciosPresentacion: PrecioPresentacionDto[];
@@ -116,13 +114,6 @@ const mapPresentacionesArray = (arr: any[]): PresentacionDto[] =>
     const nombre = cleanStr(pr?.nombre);
     if (!nombre) throw new BadRequestException(`${idx}.nombre es requerido`);
 
-    const factor = cleanStr(pr?.factorUnidadBase);
-    if (!isDecimalStr(factor)) {
-      throw new BadRequestException(
-        `${idx}.factorUnidadBase debe ser decimal positivo`,
-      );
-    }
-
     //precios de las presentaciones
     const precios = mapPrecioProductoArray(
       pr?.preciosPresentacion ?? [],
@@ -147,8 +138,6 @@ const mapPresentacionesArray = (arr: any[]): PresentacionDto[] =>
 
     return {
       nombre,
-      factorUnidadBase: factor,
-      sku: cleanStr(pr?.sku) || null,
       codigoBarras: cleanStr(pr?.codigoBarras) || null,
       esDefault: !!pr?.esDefault, // ya viene boolean del front; si viniera string: toBool(pr?.esDefault)
       preciosPresentacion: precios,
