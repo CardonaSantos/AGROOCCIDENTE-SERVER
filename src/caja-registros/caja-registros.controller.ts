@@ -19,15 +19,15 @@ import { CajaRegistrosQueryDto } from './dto/dto-caja-request';
 export class CajaRegistrosController {
   constructor(private readonly cajaRegistrosService: CajaRegistrosService) {}
 
-  /**
-   *
-   * @param pageOptionsDTO limit, page para paginacion (sin sucusalID)
-   * @returns registros de cajas de todas las sucursales
-   */
-  @Get('')
-  findAllCajas(@Query() pageOptionsDTO: CajaRegistrosQueryDto) {
-    return this.cajaRegistrosService.getRegistrosCajas(pageOptionsDTO);
-  }
+  // /**
+  //  *
+  //  * @param pageOptionsDTO limit, page para paginacion (sin sucusalID)
+  //  * @returns registros de cajas de todas las sucursales
+  //  */
+  // @Get('')
+  // findAllCajas(@Query() pageOptionsDTO: CajaRegistrosQueryDto) {
+  //   return this.cajaRegistrosService.getRegistrosCajas(pageOptionsDTO);
+  // }
 
   /** @returns la caja con todos sus detalles */
   @Get('caja/:id')

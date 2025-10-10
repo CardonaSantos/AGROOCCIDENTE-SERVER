@@ -51,7 +51,7 @@ export class CreateMFUtility {
   @IsBoolean()
   esDepositoProveedor?: boolean;
 
-  // relaciones opcionales
+  // relaciones opcionales para movimiento financiero, usuario y
   @IsOptional()
   @IsInt()
   proveedorId?: number;

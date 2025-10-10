@@ -194,6 +194,12 @@ model Usuario {
   movimientosCaja          MovimientoFinanciero[]
   //NUEVOS
   comprasRecepcionadas     CompraRecepcion[]      @relation("UsuarioToCompraRecepciones")
+
+  //relacion con pagos y creditos compras
+  cxpDocumentosCreados     CxPDocumento[] @relation("CxPDocumentoCreadoPor")
+  
+  cxpPagosRegistrados  CxPPago[] @relation("CxPPagoRegistradoPor")
+
 }
 
 // ============================================================================
@@ -1840,6 +1846,9 @@ model CxPDocumento {
   compraId Int? // Permite varios docs por compra (NO @unique)
   compra   Compra? @relation("CompraToCxPDocumentos", fields: [compraId], references: [id], onDelete: SetNull)
 
+  usuarioId     Int
+  usuario       Usuario       @relation("CxPDocumentoCreadoPor", fields: [usuarioId], references: [id], onDelete: Cascade)
+
   folioProveedor   String?
   fechaEmision     DateTime  @default(now())
   fechaVencimiento DateTime?
@@ -1887,6 +1896,9 @@ model CxPPago {
   id          Int          @id @default(autoincrement())
   documentoId Int
   documento   CxPDocumento @relation(fields: [documentoId], references: [id], onDelete: Cascade)
+
+  registradoPorId       Int
+  registradoPor         Usuario             @relation("CxPPagoRegistradoPor", fields: [registradoPorId], references: [id], onDelete: Cascade)
 
   fechaPago              DateTime              @default(now())
   monto                  Decimal               @db.Decimal(14, 2)

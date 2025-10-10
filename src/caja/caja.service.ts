@@ -269,7 +269,7 @@ export class CajaService {
   }
 
   /**
-   * NUEVO SERVICIO QUE USAREMOS
+   * NUEVO SERVICIO CORE PARA CERRAR
    * @param registroCajaId
    * @returns
    */
@@ -569,16 +569,6 @@ export class CajaService {
         warnings,
       };
     });
-  }
-
-  // Helper (puedes mover a repository)
-  // Si no quieres un raw, usa aggregate de Prisma directamente
-  private async momentoMovimientoFinancieroSum(registroCajaId: number) {
-    const agg = await this.prisma.movimientoFinanciero.aggregate({
-      _sum: { deltaCaja: true },
-      where: { registroCajaId },
-    });
-    return { deltaCaja: agg._sum.deltaCaja ?? 0 };
   }
 
   /**
@@ -991,53 +981,6 @@ export class CajaService {
     });
   }
 
-  //=============================================>
-  /**
-   * Obtiene el snapshot diario de saldo de una sucursal. Si no existe,
-   * intenta recalcular mínimos usando cierres de caja del día.
-   */
-  async getSaldoDiario(sucursalId: number, fechaISO?: string) {}
-
-  /**
-   * Sugerencia de saldo para abrir la próxima caja:
-   * 1) Si hay turno ABIERTO en la sucursal => 0 (no debería abrirse otra caja).
-   * 2) Si NO hay turno abierto:
-   *    - Usa saldoFinal del ÚLTIMO turno CERRADO/ARQUEO (este ya incluye deltas).
-   *    - Si no hay, usa snapshot diario (saldoFinalCaja si existe; fallback saldoFinal).
-   *    - Si tampoco hay, 0.
-   */
-  // async getUltimoSaldoSucursal(sucursalId: number): Promise<number> {
-  //   // 1) Si hay turno ABIERTO, sugerimos 0 (evita doble apertura)
-  //   const abierta = await this.prisma.registroCaja.findFirst({
-  //     where: { sucursalId, estado: EstadoTurnoCaja.ABIERTO, fechaCierre: null },
-  //     select: { id: true },
-  //   });
-  //   if (abierta) return 0;
-
-  //   // 2) Último turno CERRADO/ARQUEO: su saldoFinal YA incluye deltas (incluye parciales)
-  //   const ultima = await this.prisma.registroCaja.findFirst({
-  //     where: {
-  //       sucursalId,
-  //       estado: { in: [EstadoTurnoCaja.CERRADO, EstadoTurnoCaja.ARQUEO] },
-  //     },
-  //     orderBy: { fechaCierre: 'desc' },
-  //     select: { saldoFinal: true },
-  //   });
-  //   if (ultima?.saldoFinal != null) {
-  //     const sf = Number(ultima.saldoFinal);
-  //     return Math.abs(sf) < 0.01 ? 0 : sf;
-  //   }
-
-  //   // 3) Fallback: snapshot diario (tu modelo actual usa saldoFinalCaja)
-  //   const snap = await this.prisma.sucursalSaldoDiario.findFirst({
-  //     where: { sucursalId },
-  //     orderBy: { fecha: 'desc' }, // tu campo de fecha en el snapshot
-  //     select: { saldoFinalCaja: true }, // <-- ¡Úsalo, no 'saldoFinal'!
-  //   });
-
-  //   return snap ? Number(snap.saldoFinalCaja) : 0;
-  // }
-
   /**
    * Sugerencia de saldo para abrir caja a NIVEL SUCURSAL (no por usuario).
    * Preferimos el snapshot diario; si no existe, caemos al último turno cerrado.
@@ -1295,103 +1238,6 @@ export class CajaService {
       items,
     };
   }
-
-  //VINCULAR CON CAJA TURNO
-  // En tu CajaService o un “VentasFinanzasService”
-  // async attachAndRecordSaleTx(
-  //   tx: Prisma.TransactionClient,
-  //   ventaId: number,
-  //   sucursalId: number,
-  //   usuarioId: number, // quien registró la venta
-  //   opts?: { exigirCajaSiEfectivo?: boolean },
-  // ) {
-  //   const { exigirCajaSiEfectivo = true } = opts ?? {};
-
-  //   // 1) traigo venta con método de pago
-  //   const venta = await tx.venta.findUnique({
-  //     where: { id: ventaId },
-  //     select: {
-  //       id: true,
-  //       totalVenta: true,
-  //       registroCajaId: true,
-  //       sucursalId: true,
-  //       referenciaPago: true,
-  //       usuarioId: true,
-  //       metodoPago: { select: { metodoPago: true } }, // string enum: CONTADO | TRANSFERENCIA | TARJETA | CREDITO...
-  //     },
-  //   });
-  //   if (!venta) throw new NotFoundException('Venta no encontrada');
-
-  //   const metodo = venta.metodoPago?.metodoPago ?? 'CONTADO';
-  //   const requiereCaja = metodo === 'CONTADO' && venta.totalVenta > 0;
-
-  //   let registroCajaId: number | null = venta.registroCajaId ?? null;
-
-  //   // 2) si es CONTADO, asegurar caja abierta y linkear
-  //   if (requiereCaja) {
-  //     // busca caja abierta
-  //     const cajaAbierta = await tx.registroCaja.findFirst({
-  //       where: { sucursalId, estado: 'ABIERTO', fechaCierre: null },
-  //       orderBy: { fechaApertura: 'desc' },
-  //       select: { id: true },
-  //     });
-
-  //     if (!cajaAbierta) {
-  //       if (exigirCajaSiEfectivo) {
-  //         throw new BadRequestException(
-  //           'No hay caja abierta para venta en efectivo.',
-  //         );
-  //       }
-  //     } else {
-  //       // lock & recheck
-  //       await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
-  //       await tx.$queryRaw`
-  //       SELECT id FROM "RegistroCaja"
-  //       WHERE id = ${cajaAbierta.id}
-  //       FOR UPDATE NOWAIT
-  //     `;
-  //       // linkear si aún no estaba linkeada
-  //       await tx.venta.updateMany({
-  //         where: { id: venta.id, registroCajaId: null },
-  //         data: { registroCajaId: cajaAbierta.id },
-  //       });
-  //       const linked = await tx.venta.findUnique({
-  //         where: { id: venta.id },
-  //         select: { registroCajaId: true },
-  //       });
-  //       registroCajaId = linked?.registroCajaId ?? null;
-  //     }
-  //   }
-
-  //   // 3) Crear MovimientoFinanciero desde la venta (una sola verdad contable)
-  //   //    - CONTADO: deltaCaja +total
-  //   //    - TARJETA/TRANSFERENCIA: deltaBanco +total
-  //   //    - CREDITO: no crear movimiento (se creará al cobrar)
-  //   if (metodo !== 'CREDITO' && venta.totalVenta > 0) {
-  //     const esEfectivo = metodo === 'CONTADO';
-  //     await tx.movimientoFinanciero.create({
-  //       data: {
-  //         fecha: new Date(),
-  //         sucursalId,
-  //         registroCajaId: esEfectivo ? registroCajaId : null,
-  //         clasificacion: 'INGRESO',
-  //         motivo: 'VENTA',
-  //         metodoPago: metodo,
-  //         deltaCaja: esEfectivo ? venta.totalVenta : 0,
-  //         deltaBanco: !esEfectivo ? venta.totalVenta : 0,
-  //         descripcion: `Venta #${venta.id}`,
-  //         referencia: venta.referenciaPago ?? null,
-  //         usuarioId: usuarioId ?? venta.usuarioId,
-  //         // extras que te sirven para filtros:
-  //         esDepositoCierre: false,
-  //         esDepositoProveedor: false,
-  //         afectaInventario: false, // inventario lo llevas en HistorialStock
-  //       },
-  //     });
-  //   }
-
-  //   return { ventaId: venta.id, registroCajaId };
-  // }
 
   // CajaService
   async attachAndRecordSaleTx(

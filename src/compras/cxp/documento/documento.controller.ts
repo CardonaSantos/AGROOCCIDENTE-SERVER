@@ -1,4 +1,12 @@
-import { Controller, Get, Post, Body, Patch, Param, Delete } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Patch,
+  Param,
+  Delete,
+} from '@nestjs/common';
 import { DocumentoService } from './documento.service';
 import { CreateDocumentoDto } from './dto/create-documento.dto';
 import { UpdateDocumentoDto } from './dto/update-documento.dto';
@@ -9,26 +17,11 @@ export class DocumentoController {
 
   @Post()
   create(@Body() createDocumentoDto: CreateDocumentoDto) {
-    return this.documentoService.create(createDocumentoDto);
+    return this.documentoService.createCreditoRegist(createDocumentoDto);
   }
 
   @Get()
-  findAll() {
-    return this.documentoService.findAll();
-  }
-
-  @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.documentoService.findOne(+id);
-  }
-
-  @Patch(':id')
-  update(@Param('id') id: string, @Body() updateDocumentoDto: UpdateDocumentoDto) {
-    return this.documentoService.update(+id, updateDocumentoDto);
-  }
-
-  @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.documentoService.remove(+id);
+  get() {
+    return this.documentoService.getRegists();
   }
 }

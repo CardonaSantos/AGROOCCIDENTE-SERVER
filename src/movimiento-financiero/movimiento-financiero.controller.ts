@@ -23,11 +23,6 @@ export class MovimientoFinancieroController {
     return this.movimientoFinancieroService.crearMovimiento(dto);
   }
 
-  @Get()
-  findAll() {
-    return this.movimientoFinancieroService.findAll();
-  }
-
   @Get('get-simples')
   getMovimientosFinancieros() {
     return this.movimientoFinancieroService.getMovimientosFinancierosSimple();

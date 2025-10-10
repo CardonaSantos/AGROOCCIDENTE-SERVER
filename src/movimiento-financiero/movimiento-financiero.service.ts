@@ -268,115 +268,6 @@ export class MovimientoFinancieroService {
     );
   }
 
-  // private mapMotivoToEffects(dto: CrearMovimientoDto) {
-  //   const m = dto.motivo;
-  //   const x = dto.monto;
-
-  //   // Defaults
-  //   let clasificacion: ClasificacionAdmin = ClasificacionAdmin.TRANSFERENCIA;
-  //   let deltaCaja = 0,
-  //     deltaBanco = 0;
-  //   let necesitaTurno = false;
-
-  //   switch (m) {
-  //     case MotivoMovimiento.VENTA:
-  //       clasificacion = ClasificacionAdmin.INGRESO;
-  //       if (dto.metodoPago === 'EFECTIVO') {
-  //         deltaCaja = +x;
-  //         necesitaTurno = true;
-  //       } else {
-  //         deltaBanco = +x;
-  //       }
-  //       break;
-  //     //NUEVO
-  //     case MotivoMovimiento.BANCO_A_CAJA: {
-  //       clasificacion = ClasificacionAdmin.TRANSFERENCIA;
-  //       deltaCaja = +x; // entra efectivo a caja
-  //       deltaBanco = -x; // sale del banco
-  //       necesitaTurno = true; // requiere caja abierta
-  //       break;
-  //     }
-
-  //     case MotivoMovimiento.OTRO_INGRESO:
-  //       clasificacion = ClasificacionAdmin.INGRESO;
-  //       if (dto.metodoPago === 'EFECTIVO') {
-  //         deltaCaja = +x;
-  //         necesitaTurno = true;
-  //       } else {
-  //         deltaBanco = +x;
-  //       }
-  //       break;
-
-  //     case MotivoMovimiento.GASTO_OPERATIVO:
-  //       clasificacion = ClasificacionAdmin.GASTO_OPERATIVO;
-  //       if (dto.metodoPago === 'EFECTIVO') {
-  //         deltaCaja = -x;
-  //         necesitaTurno = true;
-  //       } else {
-  //         deltaBanco = -x;
-  //       }
-  //       break;
-
-  //     case MotivoMovimiento.COMPRA_MERCADERIA:
-  //     case MotivoMovimiento.COSTO_ASOCIADO:
-  //       clasificacion = ClasificacionAdmin.COSTO_VENTA;
-  //       if (dto.metodoPago === 'EFECTIVO') {
-  //         deltaCaja = -x;
-  //         necesitaTurno = true;
-  //       } else {
-  //         deltaBanco = -x;
-  //       } // pago desde banco
-  //       break;
-
-  //     case MotivoMovimiento.DEPOSITO_CIERRE:
-  //       clasificacion = ClasificacionAdmin.TRANSFERENCIA;
-  //       deltaCaja = -x;
-  //       deltaBanco = +x;
-  //       necesitaTurno = true;
-  //       break;
-
-  //     case MotivoMovimiento.DEPOSITO_PROVEEDOR:
-  //       clasificacion = ClasificacionAdmin.COSTO_VENTA;
-  //       deltaCaja = -x;
-  //       deltaBanco = 0;
-  //       necesitaTurno = true;
-  //       break;
-
-  //     case MotivoMovimiento.PAGO_PROVEEDOR_BANCO:
-  //       clasificacion = ClasificacionAdmin.COSTO_VENTA;
-  //       deltaCaja = 0;
-  //       deltaBanco = -x;
-  //       break;
-
-  //     case MotivoMovimiento.AJUSTE_SOBRANTE:
-  //       clasificacion = ClasificacionAdmin.AJUSTE;
-  //       deltaCaja = +x;
-  //       necesitaTurno = true;
-  //       break;
-
-  //     case MotivoMovimiento.AJUSTE_FALTANTE:
-  //       clasificacion = ClasificacionAdmin.AJUSTE;
-  //       deltaCaja = -x;
-  //       necesitaTurno = true;
-  //       break;
-
-  //     case MotivoMovimiento.DEVOLUCION:
-  //       clasificacion = ClasificacionAdmin.CONTRAVENTA;
-  //       if (dto.metodoPago === 'EFECTIVO') {
-  //         deltaCaja = -x;
-  //         necesitaTurno = true;
-  //       } else {
-  //         deltaBanco = -x;
-  //       }
-  //       break;
-
-  //     default:
-  //       throw new BadRequestException('Motivo no soportado');
-  //   }
-
-  //   return { clasificacion, deltaCaja, deltaBanco, necesitaTurno };
-  // }
-
   private mapMotivoToEffects(dto: CrearMovimientoDto) {
     const m = dto.motivo;
     const x = Number(dto.monto);
@@ -477,6 +368,14 @@ export class MovimientoFinancieroService {
         break;
       }
 
+      case MotivoMovimiento.PAGO_CREDITO: {
+        // o PAGO_CXP / PAGO_PROVEEDOR
+        clasificacion = ClasificacionAdmin.COSTO_VENTA;
+        if (esEfectivo) deltaCaja = -x;
+        else deltaBanco = -x;
+        break;
+      }
+
       default:
         throw new BadRequestException('Motivo no soportado');
     }
@@ -489,14 +388,6 @@ export class MovimientoFinancieroService {
 
   private afectaInventario(motivo: MotivoMovimiento) {
     return motivo === MotivoMovimiento.COMPRA_MERCADERIA; // recepción de compra
-  }
-
-  create(createMovimientoFinancieroDto: CreateMovimientoFinancieroDto) {
-    return 'This action adds a new movimientoFinanciero';
-  }
-
-  findAll() {
-    return `This action returns all movimientoFinanciero`;
   }
 
   async getMovimientosFinancierosSimple() {
