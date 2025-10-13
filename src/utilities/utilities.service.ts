@@ -197,4 +197,6 @@ export class UtilitiesService {
       );
     }
   }
+
+  //ADICION DE STOCKS
 }

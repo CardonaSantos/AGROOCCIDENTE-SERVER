@@ -18,26 +18,16 @@ import * as isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
 import * as customParseFormat from 'dayjs/plugin/customParseFormat';
 import { TZGT } from 'src/utils/utils';
 import { MovimientoFinancieroService } from 'src/movimiento-financiero/movimiento-financiero.service';
-import { Prisma } from '@prisma/client';
+import { CxPCuota, Prisma } from '@prisma/client';
 import { RegistroCaja } from '@prisma/client';
+import { DeletePagoCuota } from './dto/delete-pago-cuota';
+import { verifyProps } from 'src/utils/verifyPropsFromDTO';
 dayjs.extend(customParseFormat);
 dayjs.extend(utc);
 dayjs.extend(timezone);
 dayjs.extend(isSameOrBefore);
 dayjs.extend(isSameOrAfter);
 dayjs.locale('es');
-
-const verifyProps = (obj: CreateComprasPagoDto, keyProps: string[]) => {
-  const isEmpty = (v: unknown) =>
-    v === undefined || v === null || (typeof v === 'string' && v.trim() === '');
-
-  const faltantes = keyProps.filter((k) => isEmpty(obj[k]));
-  if (faltantes.length) {
-    throw new BadRequestException(
-      `Propiedades faltantes: ${faltantes.join(', ')}`,
-    );
-  }
-};
 
 @Injectable()
 export class ComprasPagosService {
@@ -48,6 +38,11 @@ export class ComprasPagosService {
     private readonly mf: MovimientoFinancieroService,
   ) {}
 
+  /**
+   * Crea y mata el registro de pago de una cuota
+   * @param dto Datos basicos para pagar y decidir que deltas usar para caja o banco
+   * @returns Registro de pago a una cuota
+   */
   async create(dto: CreateComprasPagoDto) {
     this.logger.log(`DTO recibido:\n${JSON.stringify(dto, null, 2)}`);
 
@@ -311,6 +306,55 @@ export class ComprasPagosService {
       if (error instanceof HttpException) throw error;
       throw new InternalServerErrorException(
         'Fatal error: Error inesperado en modulo pago de creditos compras',
+      );
+    }
+  }
+
+  async deletePagoCuota(dto: DeletePagoCuota) {
+    try {
+      const { cuotaId, documentoId, usuarioId } = dto;
+      this.logger.log(`DTO recibido:\n${JSON.stringify(dto, null, 2)}`);
+
+      verifyProps<DeletePagoCuota>(dto, [
+        'cuotaId',
+        'documentoId',
+        'usuarioId',
+      ]);
+
+      const deletedCuota = await this.prisma.$transaction(async (tx) => {
+        const doc = await tx.cxPDocumento.findUnique({
+          where: {
+            id: documentoId,
+          },
+        });
+
+        const cuota = await tx.cxPCuota.findUnique({
+          where: {
+            id: cuotaId,
+          },
+        });
+
+        const user = await tx.usuario.findUnique({
+          where: {
+            id: usuarioId,
+          },
+        });
+
+        if (!doc) throw new BadRequestException('Documento ID no válido');
+        if (!cuota) throw new BadRequestException('Cuota ID no válido');
+        if (!user) throw new BadRequestException('user ID no válido');
+
+        const newPagoCuotaDeleted: CxPCuota = await tx.cxPCuota.delete({
+          where: {
+            id: cuotaId,
+          },
+        });
+      });
+    } catch (error) {
+      this.logger.error('Error en eliminar pago de cuota: ', error?.stack);
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException(
+        'Fatal error: Error inesperado en modulo: eliminar pago de cuota',
       );
     }
   }

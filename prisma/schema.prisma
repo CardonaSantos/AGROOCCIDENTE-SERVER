@@ -287,6 +287,7 @@ model ProductoPresentacion {
   historialStock          HistorialStock[]
   //NUEVOS
   recepcionesCompraLineas CompraRecepcionLinea[] @relation("PresentacionToCompraRecepcionLinea")
+  lineasDocumento CxPDocumentoLinea[] @relation("DocumentoLineaToPresentacion")
 
   @@unique([productoId, nombre])
   @@index([productoId])
@@ -1443,6 +1444,9 @@ model CompraDetalle {
   presentacion      ProductoPresentacion?  @relation("CompraDetalleToPresentacion", fields: [presentacionId], references: [id], onDelete: SetNull)
   //NUEVOS
   recepcionesLineas CompraRecepcionLinea[]
+
+  lineasDocumento CxPDocumentoLinea[] @relation("DocumentoLineaToCompraDetalle")
+
 }
 
 enum EstadoCompra {
@@ -1763,6 +1767,9 @@ model CompraRecepcion {
   //NUEVOS
   stockPresentacionLotes StockPresentacion[] @relation("StockPresentacionToCompraRecepcion")
 
+  documentos  CxPDocumentoRecepcion[] @relation("RecepcionDocumentos")
+  pagosOrigen CxPPago[]               @relation("PagoOrigenRecepcion")
+
   @@index([compraId, fecha])
 }
 
@@ -1823,14 +1830,15 @@ enum PlanCuotaModo {
 
 model CondicionPago {
   id              Int           @id @default(autoincrement())
-  nombre          String // "Contado", "15 días", "30/60/90", "4 quincenas", etc.
-  diasCredito     Int? // Net X
+  nombre          String
+  diasCredito     Int?
   cantidadCuotas  Int?
   diasEntreCuotas Int?
-  interes         Decimal?      @db.Decimal(5, 2) // % (define si es mensual/anual en tu lógica)
+  interes         Decimal?      @db.Decimal(5, 2)
   tipoInteres     InteresTipo   @default(NONE)
   modoGeneracion  PlanCuotaModo @default(IGUALES)
 
+  // ←→ CxPDocumento (N:1)  [Relación nombrada]
   cxpDocumentos CxPDocumento[] @relation("CondicionPagoToCxPDocumentos")
 
   createdAt DateTime @default(now())
@@ -1843,11 +1851,11 @@ model CxPDocumento {
   proveedorId Int
   proveedor   Proveedor @relation("ProveedorToCxPDocumentos", fields: [proveedorId], references: [id], onDelete: Cascade)
 
-  compraId Int? // Permite varios docs por compra (NO @unique)
+  compraId Int?
   compra   Compra? @relation("CompraToCxPDocumentos", fields: [compraId], references: [id], onDelete: SetNull)
 
-  usuarioId     Int
-  usuario       Usuario       @relation("CxPDocumentoCreadoPor", fields: [usuarioId], references: [id], onDelete: Cascade)
+  usuarioId Int
+  usuario   Usuario @relation("CxPDocumentoCreadoPor", fields: [usuarioId], references: [id], onDelete: Cascade)
 
   folioProveedor   String?
   fechaEmision     DateTime  @default(now())
@@ -1858,24 +1866,48 @@ model CxPDocumento {
   interesTotal   Decimal @default(0) @db.Decimal(14, 2)
 
   estado          CxPEstado      @default(PENDIENTE)
-  // Parametrización usada para generar las cuotas (auditable)
+
   condicionPagoId Int?
   condicionPago   CondicionPago? @relation("CondicionPagoToCxPDocumentos", fields: [condicionPagoId], references: [id], onDelete: SetNull)
 
-  cuotas CxPCuota[]
-  pagos  CxPPago[]
+  // ←→ CxPCuota (1:N)  [Relación nombrada para consistencia]
+  cuotas CxPCuota[] @relation("DocumentoToCuotas")
+
+  // ←→ CxPPago (1:N)
+  pagos  CxPPago[]  @relation("DocumentoToPagos")
+
+  // ←→ CxPDocumentoRecepcion (1:N con tabla puente)
+  recepciones CxPDocumentoRecepcion[] @relation("DocumentoRecepciones")
+
+  // ←→ CxPDocumentoLinea (1:N)
+  lineas CxPDocumentoLinea[] @relation("DocumentoToLineas")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([proveedorId, folioProveedor])
   @@index([proveedorId, estado])
   @@index([compraId])
+}
+
+model CxPDocumentoRecepcion {
+  documentoId Int
+  documento   CxPDocumento   @relation("DocumentoRecepciones", fields: [documentoId], references: [id], onDelete: Cascade)
+
+  recepcionId Int
+  recepcion   CompraRecepcion @relation("RecepcionDocumentos", fields: [recepcionId], references: [id], onDelete: Cascade)
+
+  // Valor de la recepción que esta factura respalda (opcional)
+  montoAsociado Decimal? @db.Decimal(14, 2)
+
+  @@id([documentoId, recepcionId])
+  @@index([recepcionId])
 }
 
 model CxPCuota {
   id               Int          @id @default(autoincrement())
   documentoId      Int
-  documento        CxPDocumento @relation(fields: [documentoId], references: [id], onDelete: Cascade)
+  documento        CxPDocumento @relation("DocumentoToCuotas", fields: [documentoId], references: [id], onDelete: Cascade)
   numero           Int
   fechaVencimiento DateTime
   monto            Decimal      @db.Decimal(14, 2)
@@ -1883,6 +1915,7 @@ model CxPCuota {
   estado           CuotaEstado  @default(PENDIENTE)
   pagadaEn         DateTime?
 
+  // ←→ CxPPagoCuota (1:N)
   pagos CxPPagoCuota[]
 
   createdAt DateTime @default(now())
@@ -1893,23 +1926,29 @@ model CxPCuota {
 }
 
 model CxPPago {
-  id          Int          @id @default(autoincrement())
-  documentoId Int
-  documento   CxPDocumento @relation(fields: [documentoId], references: [id], onDelete: Cascade)
+  id            Int          @id @default(autoincrement())
+  documentoId   Int
+  documento     CxPDocumento @relation("DocumentoToPagos", fields: [documentoId], references: [id], onDelete: Cascade)
 
-  registradoPorId       Int
-  registradoPor         Usuario             @relation("CxPPagoRegistradoPor", fields: [registradoPorId], references: [id], onDelete: Cascade)
+  registradoPorId Int
+  registradoPor   Usuario @relation("CxPPagoRegistradoPor", fields: [registradoPorId], references: [id], onDelete: Cascade)
 
-  fechaPago              DateTime              @default(now())
-  monto                  Decimal               @db.Decimal(14, 2)
+  fechaPago              DateTime @default(now())
+  monto                  Decimal  @db.Decimal(14, 2)
   metodoPago             MetodoPago
   referencia             String?
   observaciones          String?
+
   // Enlace a Caja/Banco (1–1)
   movimientoFinancieroId Int?                  @unique
   movimientoFinanciero   MovimientoFinanciero? @relation("CxPPagoToMovimiento", fields: [movimientoFinancieroId], references: [id], onDelete: SetNull)
 
+  // ←→ CxPPagoCuota (1:N)
   cuotas CxPPagoCuota[]
+
+  // Trazabilidad: pago originado al cerrar una recepción (opcional)
+  compraRecepcionId Int?
+  compraRecepcion   CompraRecepcion? @relation("PagoOrigenRecepcion", fields: [compraRecepcionId], references: [id], onDelete: SetNull)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1917,15 +1956,39 @@ model CxPPago {
   @@index([documentoId, fechaPago])
 }
 
+model CxPDocumentoLinea {
+  id              Int      @id @default(autoincrement())
+
+  // ←→ CxPDocumento (N:1)
+  documentoId     Int
+  documento       CxPDocumento @relation("DocumentoToLineas", fields: [documentoId], references: [id], onDelete: Cascade)
+
+  // Opcional: match con la línea de compra
+  compraDetalleId Int?
+  compraDetalle   CompraDetalle? @relation("DocumentoLineaToCompraDetalle", fields: [compraDetalleId], references: [id], onDelete: SetNull)
+
+  // Opcional: referencia a la presentación
+  presentacionId  Int?
+  presentacion    ProductoPresentacion? @relation("DocumentoLineaToPresentacion", fields: [presentacionId], references: [id], onDelete: SetNull)
+
+  descripcion     String?
+  cantidad        Int?
+  costoUnitario   Decimal? @db.Decimal(12, 4)
+  subtotal        Decimal  @db.Decimal(14, 2)
+}
+
 model CxPPagoCuota {
   pagoId  Int
   pago    CxPPago  @relation(fields: [pagoId], references: [id], onDelete: Cascade)
+
   cuotaId Int
   cuota   CxPCuota @relation(fields: [cuotaId], references: [id], onDelete: Cascade)
+
   monto   Decimal  @db.Decimal(14, 2)
 
   @@id([pagoId, cuotaId])
 }
+
 
 //TICKET
 enum EstadoTicket {
