@@ -4,6 +4,7 @@ import {
   Injectable,
   InternalServerErrorException,
   Logger,
+  NotFoundException,
 } from '@nestjs/common';
 import { CreateDocumentoDto, PlanCuotaFila } from './dto/create-documento.dto';
 import { PrismaService } from 'src/prisma/prisma.service';
@@ -25,6 +26,11 @@ import {
 } from '@prisma/client';
 import { MovimientoFinancieroService } from 'src/movimiento-financiero/movimiento-financiero.service';
 import { CreateMFUtility } from 'src/movimiento-financiero/utilities/createMFDto';
+import { CreditFromCompraTypes, selectCreditoFromCompra } from './selects';
+import {
+  normalizarCreditoFromCompra,
+  UICreditoCompra,
+} from './helpers/normalizer';
 dayjs.extend(customParseFormat);
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -63,19 +69,62 @@ export class DocumentoService {
     }
   }
 
+  /**
+   *
+   * @param compraId ID de compra
+   * @returns Registro de credito compra con cuotas, pagos, etc. Unico, retorno obj.
+   */
+  async getCreditoFromCompra(compraId: number): Promise<UICreditoCompra> {
+    try {
+      if (!Number.isFinite(compraId) || compraId <= 0) {
+        throw new BadRequestException('ID de compra no válido');
+      }
+
+      const credit: CreditFromCompraTypes | null =
+        await this.prisma.cxPDocumento.findFirst({
+          where: { compraId },
+          take: 1,
+          select: selectCreditoFromCompra,
+        });
+
+      if (!credit) {
+        throw new NotFoundException('Compra o crédito no encontrado');
+      }
+
+      const ui = normalizarCreditoFromCompra(credit);
+      return ui;
+    } catch (error: any) {
+      this.logger.error('Error en getCreditoFromCompra', error?.stack || error);
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException(
+        'Error inesperado al obtener el crédito.',
+      );
+    }
+  }
+
+  /**
+   *
+   * @returns eliminar todo los registros - prueba
+   */
+  async deleteAll() {
+    return await this.prisma.cxPDocumento.deleteMany({});
+  }
+
+  /**
+   *
+   * @returns get de pruebas - creditos
+   */
   async getRegists() {
     return await this.prisma.cxPDocumento.findMany({
       include: {
         condicionPago: true,
         pagos: true,
         cuotas: true,
-        usuario: true,
-        proveedor: true,
-        compra: true,
       },
     });
   }
 
+  // CREACION DE CREDITO ==================>
   /**
    *
    * @param dto Crear credito funcion Main (y sus derivados)
