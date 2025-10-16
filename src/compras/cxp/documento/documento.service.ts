@@ -76,8 +76,13 @@ export class DocumentoService {
    */
   async getCreditoFromCompra(compraId: number): Promise<UICreditoCompra> {
     try {
+      this.logger.log('El id de documento es: ', compraId);
       if (!Number.isFinite(compraId) || compraId <= 0) {
-        throw new BadRequestException('ID de compra no válido');
+        // throw new BadRequestException('ID de compra no válido');
+        this.logger.log(
+          'El id proporcionado no corresponde con ningún registro de compra con credito',
+        );
+        return;
       }
 
       const credit: CreditFromCompraTypes | null =
@@ -88,7 +93,8 @@ export class DocumentoService {
         });
 
       if (!credit) {
-        throw new NotFoundException('Compra o crédito no encontrado');
+        this.logger.error('Compra o crédito no encontrado');
+        return;
       }
 
       const ui = normalizarCreditoFromCompra(credit);
@@ -132,6 +138,40 @@ export class DocumentoService {
   async createCreditoRegist(dto: CreateDocumentoDto) {
     try {
       this.logger.log(`DTO recibido:\n${JSON.stringify(dto, null, 2)}`);
+
+      // Suma de cuotas vs montoOriginal
+      const sumaCuotas = round2(
+        dto.cuotas!.reduce((a, c) => a + Number(c.monto), 0),
+      );
+      if (
+        dto.interesTipo === 'NONE' &&
+        Math.abs(sumaCuotas - Number(dto.montoOriginal)) > 0.01
+      ) {
+        throw new BadRequestException(
+          'Con interés NONE, la suma de cuotas debe igualar el montoOriginal.',
+        );
+      }
+
+      // Si hay enganche, cuota #1 debe coincidir
+      if (dto.planCuotaModo === 'PRIMERA_MAYOR' && (dto.enganche ?? 0) > 0) {
+        if (
+          !dto.cuotas?.length ||
+          Math.abs(Number(dto.cuotas[0].monto) - Number(dto.enganche)) > 0.01
+        ) {
+          throw new BadRequestException(
+            'El monto de la cuota #1 debe coincidir con el enganche.',
+          );
+        }
+      }
+
+      // Si registrarPagoEngancheAhora => metodoPago obligatorio
+      if (dto.registrarPagoEngancheAhora && !dto.metodoPago) {
+        throw new BadRequestException(
+          'Debes enviar metodoPago para registrar el pago del enganche.',
+        );
+      }
+
+      const today = dayjs().tz(TZGT).format('YYYY');
 
       this.requiereProps(dto, [
         'usuarioId',
@@ -212,7 +252,7 @@ export class DocumentoService {
           data: {
             proveedorId: dto.proveedorId,
             compraId: dto.compraId,
-            folioProveedor: 'XD',
+            folioProveedor: `DOC`,
             fechaEmision: new Date(dto.fechaEmisionISO),
             fechaVencimiento: new Date(
               dto.cuotas![dto.cuotas!.length - 1].fechaISO,
@@ -226,6 +266,16 @@ export class DocumentoService {
 
             // Si tienes el campo en el schema (migración):
             // usuarioId: dto.usuarioId,
+          },
+        });
+
+        const folioProv = `DOC-0${doc.id}-${today}`;
+        await tx.cxPDocumento.update({
+          where: {
+            id: doc.id,
+          },
+          data: {
+            folioProveedor: folioProv,
           },
         });
 
@@ -308,82 +358,107 @@ export class DocumentoService {
       usuarioId: number;
       sucursalId: number;
       cuentaBancariaId?: number;
-      metodoPago: any; // enum MetodoPago
+      metodoPago: any; // tu enum MetodoPago
       descripcion?: string;
-      monto: number;
+      monto: number; // <- enganche a pagar (lo que mandó el front)
     },
   ) {
-    // localizar cuota #1
-    const cuota1 = await tx.cxPCuota.findFirst({
-      where: { documentoId: args.documentoId, numero: 1 },
-    });
-    if (!cuota1)
-      throw new BadRequestException(
-        'No se encontró la cuota #1 para aplicar el enganche.',
-      );
-
-    // Validar monto coherente con saldo
-    const toPay = Math.min(Number(args.monto), Number(cuota1.saldo));
-    if (toPay <= 0)
+    // 0) Validaciones básicas
+    const monto = round2(Number(args.monto ?? 0));
+    if (!(monto > 0)) {
       throw new BadRequestException('El monto de enganche es inválido.');
+    }
 
-    // 1) Movimiento financiero (usa tu servicio utilitario)
+    const doc = await tx.cxPDocumento.findUnique({
+      where: { id: args.documentoId },
+      select: { id: true, montoOriginal: true },
+    });
+    if (!doc) {
+      throw new BadRequestException('Documento de CxP no encontrado.');
+    }
+
+    const cuotas = await tx.cxPCuota.findMany({
+      where: {
+        documentoId: args.documentoId,
+        estado: { in: ['PENDIENTE', 'PARCIAL'] },
+      },
+      orderBy: { numero: 'asc' },
+    });
+    if (!cuotas.length) {
+      throw new BadRequestException(
+        'No hay cuotas pendientes para aplicar el enganche.',
+      );
+    }
+
     const mov = await this.movimientoFinanciero.createMovimiento(
       {
         sucursalId: args.sucursalId,
         usuarioId: args.usuarioId,
         proveedorId: args.proveedorId,
         cuentaBancariaId: args.cuentaBancariaId,
-        monto: toPay,
-        motivo: 'PAGO_CREDITO', // ⚠️ Ajusta al MotivoMovimiento correcto en tu enum
+        monto,
+        motivo: 'PAGO_CREDITO', // ajusta a tu enum si es distinto
         metodoPago: args.metodoPago,
-        descripcion: args.descripcion ?? 'Pago de enganche (cuota #1) CxP',
+        descripcion:
+          args.descripcion ??
+          'Pago de enganche (aplicación a cuotas en cascada)',
       } as CreateMFUtility,
       { tx },
     );
 
-    // 2) Pago CxP
     const pago = await tx.cxPPago.create({
       data: {
         fechaPago: new Date(),
-        monto: toPay,
+        monto,
         metodoPago: args.metodoPago,
-        referencia: `ENG-${args.documentoId}-${dayjs().tz(TZGT).format('YYYYMMDDHHmm')}`,
-        observaciones: 'Pago de enganche (cuota #1)',
-        movimientoFinanciero: {
-          connect: {
-            id: mov.id,
-          },
-        },
-        documento: {
-          connect: {
-            id: args.documentoId,
-          },
-        },
-        registradoPor: {
-          connect: {
-            id: args.usuarioId,
-          },
-        },
-        // registradoPorId: args.usuarioId, // si tu schema lo tiene
+        referencia: `ENG-${args.documentoId}-${dayjs().tz(TZGT).format('YYYYMMDDHHmmss')}`,
+        observaciones: args.descripcion ?? 'Pago de enganche',
+        movimientoFinanciero: { connect: { id: mov.id } },
+        documento: { connect: { id: args.documentoId } },
+        registradoPor: { connect: { id: args.usuarioId } },
       },
     });
 
-    // 3) Vínculo Pago↔Cuota
-    await tx.cxPPagoCuota.create({
-      data: { pagoId: pago.id, cuotaId: cuota1.id, monto: toPay },
-    });
+    let restante = monto;
 
-    // 4) Cerrar cuota si procede
-    const nuevoSaldo = round2(Number(cuota1.saldo) - toPay);
-    await tx.cxPCuota.update({
-      where: { id: cuota1.id },
-      data: {
-        saldo: nuevoSaldo,
-        estado: nuevoSaldo <= 0 ? 'PAGADA' : 'PARCIAL',
-        pagadaEn: nuevoSaldo <= 0 ? new Date() : null,
-      },
-    });
+    for (const c of cuotas) {
+      if (restante <= 0) break;
+
+      const saldo = round2(Number(c.saldo));
+      if (saldo <= 0) continue;
+
+      const abono = Math.min(restante, saldo);
+
+      await tx.cxPPagoCuota.create({
+        data: { pagoId: pago.id, cuotaId: c.id, monto: abono },
+      });
+
+      const nuevoSaldo = round2(saldo - abono);
+      await tx.cxPCuota.update({
+        where: { id: c.id },
+        data: {
+          saldo: nuevoSaldo,
+          estado: nuevoSaldo <= 0 ? 'PAGADA' : 'PARCIAL',
+          pagadaEn: nuevoSaldo <= 0 ? new Date() : null,
+        },
+      });
+
+      restante = round2(restante - abono);
+    }
+
+    if (restante > 0.009) {
+      this.logger.warn(
+        `Pago de enganche con excedente Q${restante} en doc ${args.documentoId}.`,
+      );
+    }
+
+    // 5) Recalcular documento (saldo/estado/interésTotal)
+    // Tu versión de actualizarSaldosDocumentoTx requiere montoOriginal; lo leemos del doc.
+    await this.actualizarSaldosDocumentoTx(
+      tx,
+      args.documentoId,
+      Number(doc.montoOriginal),
+    );
   }
 
   /** Recalcula saldo y estado del documento tras crear cuotas y/o aplicar pagos. */

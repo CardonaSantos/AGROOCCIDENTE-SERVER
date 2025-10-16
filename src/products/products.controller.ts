@@ -26,6 +26,7 @@ import { RolPrecio, TipoEmpaque } from '@prisma/client';
 import { plainToInstance } from 'class-transformer';
 import { validateOrReject } from 'class-validator';
 import { QueryParamsInventariado } from './query/query';
+import { newQueryDTO } from './query/newQuery';
 
 // ---- DTOS del payload que esperas en tu servicio ----
 interface PrecioProductoDto {
@@ -223,17 +224,29 @@ export class ProductsController {
     return this.productsService.create(dto, imagenes);
   }
 
-  @Get('/sucursal/:id')
-  async findAllProductToSale(@Param('id', ParseIntPipe) id: number) {
-    return await this.productsService.findAllProductsToSale(id);
+  /**
+   * FUNCION PARA RETORNO DE PRODUCTOS Y PRESENTACIONES EN EL UI (REFACTOR, CON BUSUQUEDA Y FILTROS)
+   * @param id
+   * @returns
+   */
+  @Get('get-products-presentations-for-pos')
+  async findAllProductToSale(
+    @Query(
+      new ValidationPipe({
+        transform: true,
+        transformOptions: { enableImplicitConversion: true },
+      }),
+    )
+    dto: newQueryDTO,
+  ) {
+    return await this.productsService.getProductPresentationsForPOS(dto);
   }
-  // findAllProductsToSale
-  //ENCONTRAR TODAS PARA INVENTARIADO
-  // @Get('/products/for-inventary')
-  // async findAll() {
-  //   return await this.productsService.findAll();
-  // }
 
+  /**
+   * FUNCION QUE RETORNA Y FETCHEA PRODUCTOS-PRESENTACIONES AL INVENTARIO GENERAL
+   * @param dto
+   * @returns
+   */
   @Get('/products/for-inventary')
   async getAll(
     @Query(

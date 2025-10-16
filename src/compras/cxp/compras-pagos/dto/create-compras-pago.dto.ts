@@ -10,15 +10,65 @@ import {
   IsISO8601,
   Matches,
   MaxLength,
+  ValidateNested,
+  ArrayNotEmpty,
+  IsIn,
+  Min,
 } from 'class-validator';
 
-const DECIMAL_14_2 = /^\d{1,12}(\.\d{1,2})?$/; // compatible con @db.Decimal(14,2)
+const DECIMAL_14_2 = /^\d{1,12}(\.\d{1,2})?$/; // @db.Decimal(14,2)
 
-export class CreateComprasPagoDto {
+// ---------------- Recepción anidada ----------------
+export class CreateRecepcionItemDto {
   @Type(() => Number)
   @IsInt()
   @IsPositive()
-  cuentaBancariaId: number;
+  compraDetalleId!: number;
+
+  @Type(() => Number)
+  @IsInt()
+  @IsPositive()
+  refId!: number;
+
+  @IsIn(['PRESENTACION', 'PRODUCTO'])
+  tipo!: 'PRESENTACION' | 'PRODUCTO';
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  cantidad!: number;
+
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  fechaVencimientoISO?: string | null;
+}
+
+export class CreateRecepcionDesdeCreditoDto {
+  @Type(() => Number)
+  @IsInt()
+  @IsPositive()
+  compraId!: number;
+
+  @ArrayNotEmpty()
+  @ValidateNested({ each: true })
+  @Type(() => CreateRecepcionItemDto)
+  items!: CreateRecepcionItemDto[];
+}
+
+// --------------- Pago + Recepción (unificado) ---------------
+export class CreateComprasPagoConRecepcionDto {
+  // --- canal de pago (deja ambos opcionales; valida en servicio según metodoPago)
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @IsPositive()
+  cuentaBancariaId?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @IsPositive()
+  cajaId?: number;
 
   @Type(() => Number)
   @IsInt()
@@ -66,7 +116,7 @@ export class CreateComprasPagoDto {
   @MaxLength(500)
   observaciones?: string;
 
-  // ---- Comprobante opcional (para evidencias / matching en banco; el server decide cómo usarlo) ----
+  // ---- Comprobante opcional ----
   @IsOptional()
   @IsEnum(ComprobanteTipo)
   comprobanteTipo?: ComprobanteTipo;
@@ -84,4 +134,10 @@ export class CreateComprasPagoDto {
   @IsString()
   @MaxLength(500)
   comprobanteUrl?: string;
+
+  // ---- NUEVO: bloque recepcion opcional ----
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => CreateRecepcionDesdeCreditoDto)
+  recepcion?: CreateRecepcionDesdeCreditoDto;
 }

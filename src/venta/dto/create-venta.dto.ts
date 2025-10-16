@@ -51,10 +51,10 @@ export class CreateVentaDto {
 
   @IsArray()
   productos: Array<{
-    productoId: number;
+    productoId?: number; // 👈 ahora opcional
     cantidad: number;
     selectedPriceId: number;
-    presentacionId: number | null;
+    presentacionId?: number | null;
   }>;
 
   @IsEnum(MetodoPago)

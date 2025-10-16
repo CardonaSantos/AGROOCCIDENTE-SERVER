@@ -37,6 +37,9 @@ import * as utc from 'dayjs/plugin/utc';
 import * as timezone from 'dayjs/plugin/timezone';
 import * as isSameOrAfter from 'dayjs/plugin/isSameOrAfter';
 import * as isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
+import { newQueryDTO } from './query/newQuery';
+import { verifyProps } from 'src/utils/verifyPropsFromDTO';
+import { buildSearchForProducto } from './HELPERS';
 dayjs.extend(utc);
 dayjs.extend(timezone);
 dayjs.extend(isSameOrBefore);
@@ -46,7 +49,7 @@ dayjs.locale('es');
 const toDecimal = (value: string | number) => {
   return new Prisma.Decimal(value);
 };
-
+//HELPÉ
 @Injectable()
 export class ProductsService {
   private readonly logger = new Logger(ProductsService.name);
@@ -313,6 +316,236 @@ export class ProductsService {
       this.logger.error('Error en findAll productos:', error);
       throw new InternalServerErrorException('Error al obtener los productos');
     }
+  }
+
+  /**
+   * Funcion que retorna y filtra productos para el POS, apoyandose de servicios que usa el inventariado
+   * @param dto
+   * @returns PRODUCTOS Y PRESENTACIONES FILTRADAS PARA UN TABLE PAGINADO
+   */
+  async getProductPresentationsForPOS(dto: newQueryDTO) {
+    try {
+      this.logger.log(
+        `DTO recibido en search de productos POS:\n${JSON.stringify(dto, null, 2)}`,
+      );
+
+      verifyProps<newQueryDTO>(dto, ['sucursalId', 'limit', 'page']);
+      const page = Math.max(1, Number(dto.page) || 1);
+      const limit = Math.min(Math.max(1, Number(dto.limit) || 20), 100);
+
+      const whereProducto: Prisma.ProductoWhereInput = {};
+      const wherePresentacion: Prisma.ProductoPresentacionWhereInput = {};
+
+      this.asignePropsWhereInput(dto, whereProducto);
+      this.asignePropsWhereInputPresentation(dto, wherePresentacion);
+
+      // Para paginar el "mix" haremos:
+      const [totalProducts, totalPresentations] = await Promise.all([
+        this.prisma.producto.count({ where: whereProducto }),
+        this.prisma.productoPresentacion.count({ where: wherePresentacion }),
+      ]);
+
+      const totalCount = totalProducts + totalPresentations;
+      const totalPages = Math.max(1, Math.ceil(totalCount / limit));
+      const skipCombined = (page - 1) * limit;
+
+      let skipProd = 0;
+      let skipPres = 0;
+      if (skipCombined < totalProducts) {
+        skipProd = skipCombined;
+      } else {
+        skipProd = totalProducts;
+        skipPres = skipCombined - totalProducts;
+      }
+
+      const takeProd = Math.max(0, Math.min(limit, totalProducts - skipProd));
+      const remaining = limit - takeProd;
+      const takePres = Math.max(
+        0,
+        Math.min(remaining, totalPresentations - skipPres),
+      );
+
+      const [products, presentations] = await Promise.all([
+        this.prisma.producto.findMany({
+          where: whereProducto,
+          skip: skipProd,
+          take: takeProd,
+          select: productoSelect,
+          orderBy: { id: 'asc' },
+        }),
+        this.prisma.productoPresentacion.findMany({
+          where: wherePresentacion,
+          skip: skipPres,
+          take: takePres,
+          select: presentacionSelect,
+          orderBy: { id: 'asc' },
+        }),
+      ]);
+
+      const productsArray = Array.isArray(products)
+        ? this.normalizerProductsInventario(products)
+        : [];
+
+      const presentationsArray = Array.isArray(presentations)
+        ? this.normalizerProductPresentacionInventario(presentations)
+        : [];
+
+      const mixed = [
+        ...productsArray.map((x) => ({ ...x, __source: 'producto' })),
+        ...presentationsArray.map((x) => ({ ...x, __source: 'presentacion' })),
+      ];
+
+      return {
+        data: mixed,
+        meta: {
+          totalCount,
+          totalPages,
+          page,
+          limit,
+          totals: {
+            productos: totalProducts,
+            presentaciones: totalPresentations,
+          },
+        },
+      };
+    } catch (error) {
+      this.logger.error('Error generado en get productos POS: ', error?.stack);
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException(
+        'Fatal Error: Error inesperado en modulo de productos',
+      );
+    }
+  }
+
+  asignePropsWhereInput(dto: newQueryDTO, where: Prisma.ProductoWhereInput) {
+    const {
+      cats,
+      codigoItem,
+      codigoProveedor,
+      priceRange,
+      nombreItem,
+      sucursalId,
+      tipoEmpaque, // pendiente de migración
+    } = dto;
+
+    if (!dto) throw new BadRequestException('Datos inválidos');
+
+    // 1) filtros existentes
+    if (Array.isArray(cats) && cats.length > 0) {
+      where.categorias = { some: { id: { in: cats } } };
+    }
+
+    if (sucursalId) {
+      where.stock = { some: { sucursalId: { equals: sucursalId } } };
+    }
+
+    if (codigoItem) {
+      // si el front todavía manda codigoItem, mantenlo
+      where.codigoProducto = { contains: codigoItem, mode: 'insensitive' };
+    }
+
+    if (codigoProveedor) {
+      where.codigoProveedor = {
+        contains: codigoProveedor,
+        mode: 'insensitive',
+      };
+    }
+
+    if (nombreItem) {
+      where.nombre = { contains: nombreItem, mode: 'insensitive' };
+    }
+
+    if (priceRange != null) {
+      if (Array.isArray(priceRange) && priceRange.length === 2) {
+        const [min, max] = priceRange;
+        where.precios = {
+          some: {
+            precio: { gte: min ?? 0, lte: max ?? Number.MAX_SAFE_INTEGER },
+          },
+        };
+      } else if (typeof priceRange === 'number') {
+        where.precios = { some: { precio: { equals: priceRange } } };
+      }
+    }
+
+    const toAndArray = (
+      x?: Prisma.ProductoWhereInput | Prisma.ProductoWhereInput[],
+    ): Prisma.ProductoWhereInput[] => (Array.isArray(x) ? x : x ? [x] : []);
+
+    const toPresentacionAndArray = (
+      x?:
+        | Prisma.ProductoPresentacionWhereInput
+        | Prisma.ProductoPresentacionWhereInput[],
+    ): Prisma.ProductoPresentacionWhereInput[] =>
+      Array.isArray(x) ? x : x ? [x] : [];
+
+    // 2) BUSQUEDA UNIFICADA (q) — fallback al único input
+    const q = (dto as any).q ?? dto.nombreItem ?? dto.codigoItem ?? '';
+    const textSearch = buildSearchForProducto(q);
+    if (textSearch) {
+      where.AND = [...toAndArray(where.AND), textSearch];
+    }
+
+    return where;
+  }
+
+  asignePropsWhereInputPresentation(
+    dto: newQueryDTO,
+    where: Prisma.ProductoPresentacionWhereInput,
+  ) {
+    const {
+      cats,
+      codigoItem,
+      codigoProveedor,
+      priceRange,
+      nombreItem,
+      sucursalId,
+      tipoEmpaque,
+    } = dto;
+
+    if (!dto) throw new BadRequestException('Datos inválidos');
+
+    if (sucursalId) {
+      where.stockPresentaciones = {
+        some: { sucursalId: { equals: sucursalId } },
+      };
+    }
+
+    if (codigoItem) {
+      where.codigoBarras = { contains: codigoItem, mode: 'insensitive' };
+    }
+
+    if (nombreItem) {
+      where.nombre = { contains: nombreItem, mode: 'insensitive' };
+    }
+
+    if (Array.isArray(cats) && cats.length > 0) {
+      where.producto = { is: { categorias: { some: { id: { in: cats } } } } };
+    }
+
+    if (codigoProveedor) {
+      where.producto = {
+        is: {
+          ...(where.producto?.is ?? {}),
+          codigoProveedor: { contains: codigoProveedor, mode: 'insensitive' },
+        },
+      };
+    }
+
+    if (priceRange != null) {
+      if (Array.isArray(priceRange) && priceRange.length === 2) {
+        const [min, max] = priceRange;
+        where.precios = {
+          some: {
+            precio: { gte: min ?? 0, lte: max ?? Number.MAX_SAFE_INTEGER },
+          },
+        };
+      } else if (typeof priceRange === 'number') {
+        where.precios = { some: { precio: { equals: priceRange } } };
+      }
+    }
+    // tipoEmpaque: cuando migres, filtra aquí
+    return where;
   }
 
   async findAll() {
@@ -1101,8 +1334,8 @@ export class ProductsService {
         precios,
         stocks,
         stocksBySucursal: stocksBySucursal,
-        image: p.imagenesProducto[0].url,
-        images: p.imagenesProducto,
+        image: p?.imagenesProducto[0]?.url,
+        images: p?.imagenesProducto,
       };
     });
   }
@@ -1110,50 +1343,49 @@ export class ProductsService {
   normalizerProductPresentacionInventario(
     arrayProductos: PresentacionWithSelect[],
   ): ProductoInventarioResponse[] {
-    return arrayProductos.map((p) => {
+    return (arrayProductos ?? []).map((p) => {
       // precios
       const precios: PrecioProductoNormalized[] = (p.precios ?? []).map(
         (pr) => ({
           id: pr.id,
           orden: pr.orden,
-          precio: pr.precio.toString(),
+          precio: pr.precio?.toString?.() ?? '0',
           rol: pr.rol,
           tipo: pr.tipo,
         }),
       );
 
       // stocks crudos
-      const stocks: StocksProducto[] = (p.stockPresentaciones ?? []).map(
-        (s) => ({
-          id: s.id,
-          cantidad: Number(s.cantidadPresentacion ?? 0),
-          fechaIngreso: s.fechaIngreso
-            ? dayjs(s.fechaIngreso).format('DD-MM-YYYY')
-            : '',
-          fechaVencimiento: s.fechaVencimiento
-            ? dayjs(s.fechaVencimiento).format('DD-MM-YYYY')
-            : '',
-        }),
-      );
+      const stockPres = p.stockPresentaciones ?? [];
+      const stocks: StocksProducto[] = stockPres.map((s) => ({
+        id: s.id,
+        cantidad: Number(s.cantidadPresentacion ?? 0),
+        fechaIngreso: s.fechaIngreso
+          ? dayjs(s.fechaIngreso).format('DD-MM-YYYY')
+          : '',
+        fechaVencimiento: s.fechaVencimiento
+          ? dayjs(s.fechaVencimiento).format('DD-MM-YYYY')
+          : '',
+      }));
 
-      //retorno un objeto con RECORD personalizado
-      const dict = (p.stockPresentaciones ?? []).reduce<
-        Record<string, StockPorSucursal>
-      >((acc, s) => {
-        const sucursalId = s.sucursal.id ?? 0;
-        const key = String(sucursalId);
-        const nombre = s.sucursal?.nombre ?? key;
-        //existe? sino nuevo
-        const item = acc[key] ?? {
-          sucursalId: sucursalId,
-          nombre: nombre,
-          cantidad: 0,
-        };
-        item.cantidad += Number(s.cantidadPresentacion ?? 0);
-        acc[key] = item;
-        return acc;
-      }, {});
+      // stocks por sucursal (ojo con s.sucursal null)
+      const dict = stockPres.reduce<Record<string, StockPorSucursal>>(
+        (acc, s) => {
+          const sucursalId = s.sucursal?.id ?? 0; // <- antes accedías sin "?"
+          const key = String(sucursalId);
+          const nombre = s.sucursal?.nombre ?? key;
+          const item = acc[key] ?? { sucursalId, nombre, cantidad: 0 };
+          item.cantidad += Number(s.cantidadPresentacion ?? 0);
+          acc[key] = item;
+          return acc;
+        },
+        {},
+      );
       const stocksBySucursal: StocksBySucursal = Object.values(dict);
+
+      // imágenes (pueden no existir)
+      const images = p.producto?.imagenesProducto ?? [];
+      const image = images[0]?.url ?? ''; // usa "" o una URL placeholder si tienes una
 
       return {
         id: p.id,
@@ -1164,12 +1396,12 @@ export class ProductsService {
           p.costoReferencialPresentacion != null
             ? p.costoReferencialPresentacion.toString()
             : '0',
-        tipoPresentacion: p.tipoPresentacion,
+        tipoPresentacion: p.tipoPresentacion ?? null,
         precios,
         stocks,
-        stocksBySucursal: stocksBySucursal,
-        image: p.producto.imagenesProducto[0].url,
-        images: p.producto.imagenesProducto,
+        stocksBySucursal,
+        image,
+        images, // mantén arreglo completo para el front; caerá en []
       };
     });
   }

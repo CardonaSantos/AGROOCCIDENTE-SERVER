@@ -49,36 +49,28 @@ export class VentaService {
       apellidos,
     } = createVentaDto;
 
-    this.logger.log('La reference es: ', referenciaPago);
-    this.logger.log('La tipoComprobante es: ', tipoComprobante);
-
-    // normaliza referencia
+    this.logger.log(
+      `DTO recibido en generar ventas:\n${JSON.stringify(createVentaDto, null, 2)}`,
+    );
     const referenciaPagoValid =
       referenciaPago && referenciaPago.trim() !== ''
         ? referenciaPago.trim()
         : null;
 
-    // ⛔️ TEMP: ventas por presentaciones deshabilitadas
-    if (productos.some((p) => !!p.presentacionId)) {
-      throw new BadRequestException(
-        'La venta por presentaciones está deshabilitada temporalmente. Selecciona el producto base.',
-      );
-    }
-
     try {
       return await this.prisma.$transaction(async (tx) => {
-        // === Notificaciones (igual)
+        // ===== Usuarios para notificaciones (igual)
         const usuariosNotif = await tx.usuario.findMany({
           where: { rol: { in: ['ADMIN', 'VENDEDOR'] } },
         });
         const usuariosNotifIds = usuariosNotif.map((u) => u.id);
 
-        // === Cliente (igual)
+        // ===== Cliente (igual)
         let clienteConnect: { connect: { id: number } } | undefined;
         if (clienteId) {
           clienteConnect = { connect: { id: clienteId } };
         } else if (nombre) {
-          const nuevoCliente = await tx.cliente.create({
+          const nuevo = await tx.cliente.create({
             data: {
               nombre,
               dpi,
@@ -88,98 +80,172 @@ export class VentaService {
               apellidos,
             },
           });
-          clienteConnect = { connect: { id: nuevoCliente.id } };
+          clienteConnect = { connect: { id: nuevo.id } };
         }
 
-        // === Validación de precios (SOLO producto) y normalización de líneas
+        // ===== Tipos auxiliares
         type LineaEntrada = (typeof productos)[number];
-        type LineaValidada = {
+
+        type LineaProd = {
           productoId: number;
           cantidad: number;
-          precioVenta: Prisma.Decimal; // precio del producto (no presentación)
+          precioVenta: Prisma.Decimal;
           tipoPrecio: string;
           selectedPriceId: number;
         };
 
-        const validados: LineaValidada[] = await Promise.all(
-          productos.map<Promise<LineaValidada>>(async (p: LineaEntrada) => {
-            // precio debe ser de producto (presentacionId === null)
-            const precio = await tx.precioProducto.findUnique({
-              where: { id: p.selectedPriceId },
-              select: {
-                id: true,
-                precio: true,
-                tipo: true,
-                usado: true,
-                presentacionId: true,
-                productoId: true,
-              },
+        type LineaPres = {
+          presentacionId: number;
+          productoId: number; // dueño de la presentación
+          cantidad: number;
+          precioVenta: Prisma.Decimal;
+          tipoPrecio: string;
+          selectedPriceId: number;
+        };
+
+        const prodValidadas: LineaProd[] = [];
+        const presValidadas: LineaPres[] = [];
+
+        // ===== Validar cada línea contra el precio seleccionado
+        for (const p of productos as LineaEntrada[]) {
+          const precio = await tx.precioProducto.findUnique({
+            where: { id: p.selectedPriceId },
+            select: {
+              id: true,
+              precio: true,
+              tipo: true,
+              usado: true,
+              presentacionId: true,
+              productoId: true,
+              // opcional: rol, etc.
+            },
+          });
+
+          if (!precio || precio.usado) {
+            throw new BadRequestException(
+              `Precio no válido (#${p.selectedPriceId}).`,
+            );
+          }
+
+          const cantidad = Number(p.cantidad ?? 0);
+          if (!Number.isFinite(cantidad) || cantidad <= 0) {
+            throw new BadRequestException(
+              `Cantidad inválida en una de las líneas.`,
+            );
+          }
+
+          // Rama: el precio es de PRESENTACIÓN
+          if (precio.presentacionId) {
+            const presentacionId = Number(precio.presentacionId);
+
+            // Cross-check si el cliente mandó presentacionId
+            if (p.presentacionId && p.presentacionId !== presentacionId) {
+              throw new BadRequestException(
+                `El precio #${precio.id} no corresponde a la presentación indicada (${p.presentacionId}).`,
+              );
+            }
+
+            // Obtenemos el producto dueño de la presentación para trackers/relación
+            const pres = await tx.productoPresentacion.findUnique({
+              where: { id: presentacionId },
+              select: { id: true, productoId: true },
             });
-
-            if (!precio || precio.usado) {
+            if (!pres) {
               throw new BadRequestException(
-                `Precio no válido para producto ${p.productoId}`,
-              );
-            }
-            if (precio.presentacionId) {
-              // seguridad: no permitimos precios de presentaciones
-              throw new BadRequestException(
-                `El precio seleccionado pertenece a una presentación y la venta por presentaciones está deshabilitada.`,
-              );
-            }
-            if (precio.productoId !== p.productoId) {
-              throw new BadRequestException(
-                `El precio no corresponde al producto ${p.productoId}.`,
+                `Presentación ${presentacionId} no existe.`,
               );
             }
 
-            const cantidad = Number(p.cantidad ?? 0);
-            if (!Number.isFinite(cantidad) || cantidad <= 0) {
-              throw new BadRequestException(
-                `Cantidad inválida para producto ${p.productoId}.`,
-              );
-            }
-
-            return {
-              productoId: p.productoId,
+            presValidadas.push({
+              presentacionId,
+              productoId: pres.productoId,
               cantidad,
               precioVenta: precio.precio as Prisma.Decimal,
               tipoPrecio: precio.tipo as unknown as string,
               selectedPriceId: p.selectedPriceId,
-            };
-          }),
-        );
-
-        // === Consolidar por (productoId, selectedPriceId)
-        const keyOf = (x: LineaValidada) =>
-          `${x.productoId}|${x.selectedPriceId}`;
-        const mapa = new Map<string, LineaValidada>();
-        for (const cur of validados) {
-          const k = keyOf(cur);
-          const e = mapa.get(k);
-          if (e) {
-            e.cantidad += cur.cantidad;
-          } else {
-            mapa.set(k, { ...cur });
+            });
+            continue;
           }
-        }
-        const consolidados = Array.from(mapa.values());
 
-        // === Foto cantidades anteriores (Stock base)
-        const cantidadesAnteriores: Record<number, number> = {};
-        const productosUnicos = Array.from(
-          new Set(consolidados.map((x) => x.productoId)),
+          // Rama: el precio es de PRODUCTO
+          if (precio.productoId) {
+            const productoId = Number(precio.productoId);
+
+            // Cross-check si el cliente mandó productoId
+            if (p.productoId && p.productoId !== productoId) {
+              throw new BadRequestException(
+                `El precio #${precio.id} no corresponde al producto indicado (${p.productoId}).`,
+              );
+            }
+
+            prodValidadas.push({
+              productoId,
+              cantidad,
+              precioVenta: precio.precio as Prisma.Decimal,
+              tipoPrecio: precio.tipo as unknown as string,
+              selectedPriceId: p.selectedPriceId,
+            });
+            continue;
+          }
+
+          // Si llegamos aquí, el precio no está asociado ni a producto ni a presentación
+          throw new BadRequestException(
+            `Precio #${p.selectedPriceId} sin entidad asociada.`,
+          );
+        }
+
+        // ===== Consolidar (productoId, selectedPriceId) y (presentacionId, selectedPriceId)
+        const keyProd = (x: LineaProd) =>
+          `${x.productoId}|${x.selectedPriceId}`;
+        const keyPres = (x: LineaPres) =>
+          `${x.presentacionId}|${x.selectedPriceId}`;
+
+        const mapProd = new Map<string, LineaProd>();
+        for (const cur of prodValidadas) {
+          const k = keyProd(cur);
+          const ex = mapProd.get(k);
+          if (ex) ex.cantidad += cur.cantidad;
+          else mapProd.set(k, { ...cur });
+        }
+        const prodConsolidadas = Array.from(mapProd.values());
+
+        const mapPres = new Map<string, LineaPres>();
+        for (const cur of presValidadas) {
+          const k = keyPres(cur);
+          const ex = mapPres.get(k);
+          if (ex) ex.cantidad += cur.cantidad;
+          else mapPres.set(k, { ...cur });
+        }
+        const presConsolidadas = Array.from(mapPres.values());
+
+        // ===== Fotos de stock anterior
+        const cantidadesAnterioresProd: Record<number, number> = {};
+        const unicProdIds = Array.from(
+          new Set(prodConsolidadas.map((x) => x.productoId)),
         );
-        for (const prodId of productosUnicos) {
+        for (const pid of unicProdIds) {
           const agg = await tx.stock.aggregate({
-            where: { productoId: prodId, sucursalId },
+            where: { productoId: pid, sucursalId },
             _sum: { cantidad: true },
           });
-          cantidadesAnteriores[prodId] = agg._sum.cantidad ?? 0;
+          cantidadesAnterioresProd[pid] = agg._sum.cantidad ?? 0;
         }
 
-        // === Descontar stock (solo base, FIFO por fechaIngreso)
-        for (const linea of consolidados) {
+        const cantidadesAnterioresPres: Record<number, number> = {};
+        const unicPresIds = Array.from(
+          new Set(presConsolidadas.map((x) => x.presentacionId)),
+        );
+        for (const prId of unicPresIds) {
+          const agg = await tx.stockPresentacion.aggregate({
+            where: { presentacionId: prId, sucursalId },
+            _sum: { cantidadPresentacion: true },
+          });
+          cantidadesAnterioresPres[prId] = agg._sum.cantidadPresentacion ?? 0;
+        }
+
+        // ===== Descontar STOCK (Producto -> Stock; Presentación -> StockPresentacion)
+        // Producto: FIFO por fechaIngreso
+        for (const linea of prodConsolidadas) {
           let restante = linea.cantidad;
           const lotes = await tx.stock.findMany({
             where: {
@@ -187,9 +253,8 @@ export class VentaService {
               sucursalId,
               cantidad: { gt: 0 },
             },
-            orderBy: { fechaIngreso: 'asc' }, // puedes cambiar a FEFO si lo deseas
+            orderBy: { fechaIngreso: 'asc' },
           });
-
           for (const lote of lotes) {
             if (restante <= 0) break;
             const usar = Math.min(restante, lote.cantidad);
@@ -206,14 +271,40 @@ export class VentaService {
           }
         }
 
-        // === Notificaciones de stock mínimo (producto)
-        for (const prodId of productosUnicos) {
+        // Presentación: FIFO por fechaIngreso en StockPresentacion
+        for (const linea of presConsolidadas) {
+          let restante = linea.cantidad;
+          const lotes = await tx.stockPresentacion.findMany({
+            where: {
+              presentacionId: linea.presentacionId,
+              sucursalId,
+              cantidadPresentacion: { gt: 0 },
+            },
+            orderBy: { fechaIngreso: 'asc' },
+          });
+          for (const lote of lotes) {
+            if (restante <= 0) break;
+            const usar = Math.min(restante, lote.cantidadPresentacion);
+            await tx.stockPresentacion.update({
+              where: { id: lote.id },
+              data: { cantidadPresentacion: { decrement: usar } },
+            });
+            restante -= usar;
+          }
+          if (restante > 0) {
+            throw new BadRequestException(
+              `Stock insuficiente para presentación ${linea.presentacionId}.`,
+            );
+          }
+        }
+
+        // ===== Notificaciones stock bajo (dejamos productos; presentaciones si tienes thresholds análogos puedes replicarlo)
+        for (const prodId of unicProdIds) {
           const agg = await tx.stock.aggregate({
             where: { productoId: prodId, sucursalId },
             _sum: { cantidad: true },
           });
           const stockGlobal = agg._sum.cantidad ?? 0;
-
           const th = await tx.stockThreshold.findUnique({
             where: { productoId: prodId },
           });
@@ -224,7 +315,6 @@ export class VentaService {
               where: { id: prodId },
               select: { nombre: true },
             });
-
             for (const uId of usuariosNotifIds) {
               const existe = await tx.notificacion.findFirst({
                 where: {
@@ -246,13 +336,18 @@ export class VentaService {
           }
         }
 
-        // === Total venta (Decimal)
-        const totalVenta = consolidados.reduce((sum, x) => {
-          const linea = x.precioVenta.mul(x.cantidad);
-          return sum.add(linea);
-        }, new Prisma.Decimal(0));
+        // ===== Total venta
+        const totalVentaProd = prodConsolidadas.reduce(
+          (sum, x) => sum.add(x.precioVenta.mul(x.cantidad)),
+          new Prisma.Decimal(0),
+        );
+        const totalVentaPres = presConsolidadas.reduce(
+          (sum, x) => sum.add(x.precioVenta.mul(x.cantidad)),
+          new Prisma.Decimal(0),
+        );
+        const totalVenta = totalVentaProd.add(totalVentaPres);
 
-        // === Crear venta + líneas (solo producto)
+        // ===== Crear venta + líneas
         const venta = await tx.venta.create({
           data: {
             tipoComprobante,
@@ -264,32 +359,71 @@ export class VentaService {
             imei,
             sucursal: { connect: { id: sucursalId } },
             productos: {
-              create: consolidados.map((x) => ({
-                producto: { connect: { id: x.productoId } },
-                cantidad: x.cantidad,
-                precioVenta: toNumber4(x.precioVenta),
-                // sin presentacionId
-              })),
+              create: [
+                // líneas de producto base
+                ...prodConsolidadas.map((x) => ({
+                  producto: { connect: { id: x.productoId } },
+                  cantidad: x.cantidad,
+                  precioVenta: toNumber4(x.precioVenta),
+                  // selectedPriceId: x.selectedPriceId,
+                  // presentacionId queda null
+                })),
+                // líneas de presentación
+                ...presConsolidadas.map((x) => ({
+                  // si tu modelo de línea admite ambos, conecta ambos:
+                  producto: { connect: { id: x.productoId } },
+                  presentacion: { connect: { id: x.presentacionId } },
+                  cantidad: x.cantidad,
+                  precioVenta: toNumber4(x.precioVenta),
+                  // selectedPriceId: x.selectedPriceId,
+                })),
+              ],
             },
           },
         });
+        this.logger.log('La venta es: ', venta);
 
-        // === Tracker: cantidad vendida en unidades base (aquí == cantidad)
-        await this.tracker.trackerSalidaProductoVenta(
-          tx,
-          consolidados.map((x) => ({
-            productoId: x.productoId,
-            cantidadVendida: x.cantidad,
-            cantidadAnterior: cantidadesAnteriores[x.productoId] ?? 0,
-          })),
-          sucursalId,
-          usuarioId,
-          venta.id,
-          'SALIDA_VENTA',
-          `Registro generado por venta #${venta.id}`,
-        );
+        // ===== Trackers
+        if (prodConsolidadas.length) {
+          await this.tracker.trackerSalidaProductoVenta(
+            tx,
+            prodConsolidadas.map((x) => ({
+              productoId: x.productoId,
+              cantidadVendida: x.cantidad,
+              cantidadAnterior: cantidadesAnterioresProd[x.productoId] ?? 0,
+            })),
+            sucursalId,
+            usuarioId,
+            venta.id,
+            'SALIDA_VENTA',
+            `Registro generado por venta #${venta.id}`,
+          );
+        }
 
-        // === Pago
+        if (
+          presConsolidadas.length &&
+          (this.tracker as any).trackerSalidaPresentacionVenta
+        ) {
+          // si tu servicio ya trae tracker para presentaciones
+          await (this.tracker as any).trackerSalidaPresentacionVenta(
+            tx,
+            presConsolidadas.map((x) => ({
+              presentacionId: x.presentacionId,
+              productoId: x.productoId,
+              cantidadVendida: x.cantidad,
+              cantidadAnterior: cantidadesAnterioresPres[x.presentacionId] ?? 0,
+            })),
+            sucursalId,
+            usuarioId,
+            venta.id,
+            'SALIDA_VENTA',
+            `Registro generado por venta #${venta.id}`,
+          );
+        }
+        // Si aún no tienes tracker para presentaciones, puedes omitir este bloque
+        // o implementar uno análogo al de productos.
+
+        // ===== Pago + vincular a venta (igual)
         const pago = await tx.pago.create({
           data: {
             metodoPago: metodoPago || 'CONTADO',
@@ -302,7 +436,7 @@ export class VentaService {
           data: { metodoPago: { connect: { id: pago.id } } },
         });
 
-        // === Caja (igual)
+        // ===== Caja (igual)
         await this.cajaService.attachAndRecordSaleTx(
           tx,
           venta.id,

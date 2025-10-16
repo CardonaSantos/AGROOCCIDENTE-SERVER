@@ -5,7 +5,6 @@ import {
   InternalServerErrorException,
   Logger,
 } from '@nestjs/common';
-import { CreateComprasPagoDto } from './dto/create-compras-pago.dto';
 import { UpdateComprasPagoDto } from './dto/update-compras-pago.dto';
 import { PrismaService } from 'src/prisma/prisma.service';
 
@@ -22,6 +21,10 @@ import { CxPCuota, Prisma } from '@prisma/client';
 import { RegistroCaja } from '@prisma/client';
 import { DeletePagoCuota } from './dto/delete-pago-cuota';
 import { verifyProps } from 'src/utils/verifyPropsFromDTO';
+import {
+  CreateComprasPagoConRecepcionDto,
+  CreateRecepcionItemDto,
+} from './dto/create-compras-pago.dto';
 dayjs.extend(customParseFormat);
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -43,7 +46,7 @@ export class ComprasPagosService {
    * @param dto Datos basicos para pagar y decidir que deltas usar para caja o banco
    * @returns Registro de pago a una cuota
    */
-  async create(dto: CreateComprasPagoDto) {
+  async create(dto: CreateComprasPagoConRecepcionDto) {
     this.logger.log(`DTO recibido:\n${JSON.stringify(dto, null, 2)}`);
 
     try {
@@ -72,6 +75,8 @@ export class ComprasPagosService {
         comprobanteNumero,
         comprobanteFecha,
         comprobanteUrl,
+        //NUEVO
+        recepcion,
       } = dto;
 
       // Normalizar/validar monto como Decimal(14,2)
@@ -286,6 +291,8 @@ export class ComprasPagosService {
           // 10) (Opcional) persistir comprobante en algún lado si tu esquema lo soporta
           // - Por ahora, lo dejamos como metadata en movimiento/pago vía `referencia` y `observaciones`.
           // - Si más adelante añades tabla de comprobantes, se inserta aquí.
+          this.logger.log('Llamando al registro de create stock credito ');
+          await this.creatStockFromCompraCreditoParcial(tx, dto);
 
           return {
             pago,
@@ -357,5 +364,296 @@ export class ComprasPagosService {
         'Fatal error: Error inesperado en modulo: eliminar pago de cuota',
       );
     }
+  }
+
+  //VER DETALLES DE LOS PRODUCTOS YA RECEPCIONADOS
+  async getDetallesConRecepcion(compraId: number) {
+    // 1) Detalles de la compra
+    const detalles = await this.prisma.compraDetalle.findMany({
+      where: { compraId },
+      select: {
+        id: true,
+        cantidad: true, // pedido
+        costoUnitario: true,
+        creadoEn: true,
+        actualizadoEn: true,
+        fechaVencimiento: true, // si la guardas en detalle
+        productoId: true,
+        presentacionId: true,
+        producto: {
+          select: {
+            id: true,
+            nombre: true,
+            codigoProducto: true,
+            precioCostoActual: true,
+          },
+        },
+        presentacion: {
+          select: { id: true, nombre: true, codigoBarras: true },
+        },
+      },
+    });
+
+    // 2) Sumas recibidas por línea
+    const recibidos = await this.prisma.compraRecepcionLinea.groupBy({
+      by: ['compraDetalleId'],
+      where: { compraRecepcion: { compraId } },
+      _sum: { cantidadRecibida: true },
+    });
+    const recMap = new Map(
+      recibidos.map((r) => [r.compraDetalleId, r._sum.cantidadRecibida ?? 0]),
+    );
+
+    // 3) Normalizado para la UI (pedido/recibido/pendiente)
+    return detalles.map((d) => {
+      const recibido = recMap.get(d.id) ?? 0;
+      const pendiente = Math.max(0, d.cantidad - recibido);
+
+      const esPresentacion = !!d.presentacionId;
+      return {
+        id: d.id,
+        cantidad: d.cantidad,
+        costoUnitario: d.costoUnitario,
+        creadoEn: d.creadoEn.toISOString(),
+        actualizadoEn: d.actualizadoEn.toISOString(),
+        recibido,
+        pendiente,
+        producto: {
+          id: esPresentacion ? d.presentacion!.id : d.producto!.id,
+          nombre: esPresentacion ? d.presentacion!.nombre : d.producto!.nombre,
+          codigo: esPresentacion
+            ? (d.presentacion!.codigoBarras ?? undefined)
+            : (d.producto!.codigoProducto ?? undefined),
+          tipo: esPresentacion
+            ? ('PRESENTACION' as const)
+            : ('PRODUCTO' as const),
+          precioCosto: d.costoUnitario,
+          fechaVencimiento: d.fechaVencimiento
+            ? d.fechaVencimiento.toISOString()
+            : undefined,
+        },
+      };
+    });
+  }
+
+  ///RECEPCIONAR PRODUCTOS ENVIANDO A BACK
+  async creatStockFromCompraCreditoParcial(
+    tx: Prisma.TransactionClient,
+    dto: CreateComprasPagoConRecepcionDto,
+  ) {
+    const { recepcion, sucursalId, documentoId, registradoPorId } = dto;
+    if (!recepcion || !recepcion.items?.length) return null;
+
+    // 1) Header de recepción
+    const header = await tx.compraRecepcion.create({
+      data: {
+        compraId: recepcion.compraId,
+        usuarioId: registradoPorId, // o el usuario en sesión
+        fecha: new Date(),
+        observaciones: `Recepción generada desde pago de documento #${documentoId}`,
+      },
+    });
+
+    // 2) Procesar líneas
+    for (const p of recepcion.items) {
+      const fechaVenc = p.fechaVencimientoISO
+        ? new Date(p.fechaVencimientoISO)
+        : null;
+
+      if (p.tipo === 'PRODUCTO') {
+        // a) validar producto
+        const prod = await tx.producto.findUnique({
+          where: { id: p.refId },
+          select: { id: true, precioCostoActual: true },
+        });
+        if (!prod) {
+          throw new Error(`Producto con ID ${p.refId} no encontrado`);
+        }
+
+        // b) crear stock
+        await tx.stock.create({
+          data: {
+            producto: { connect: { id: prod.id } },
+            cantidad: p.cantidad,
+            precioCosto: prod.precioCostoActual,
+            costoTotal: prod.precioCostoActual * p.cantidad,
+            fechaIngreso: new Date(),
+            sucursal: { connect: { id: sucursalId } },
+          },
+        });
+
+        // c) línea de recepción (sirve para sumar “recibido”)
+        await tx.compraRecepcionLinea.create({
+          data: {
+            compraRecepcionId: header.id,
+            compraDetalleId: p.compraDetalleId,
+            productoId: prod.id,
+            cantidadRecibida: p.cantidad,
+            fechaExpiracion: fechaVenc,
+          },
+        });
+      }
+
+      if (p.tipo === 'PRESENTACION') {
+        // a) validar presentacion y producto padre
+        const pres = await tx.productoPresentacion.findUnique({
+          where: { id: p.refId },
+          select: {
+            id: true,
+            productoId: true,
+          },
+        });
+
+        if (!pres) {
+          throw new Error(`Presentación con ID ${p.refId} no encontrada`);
+        }
+
+        // b) crear stock de presentación
+        const sp = await tx.stockPresentacion.create({
+          data: {
+            producto: { connect: { id: pres.productoId } },
+            presentacion: { connect: { id: pres.id } },
+            sucursal: { connect: { id: sucursalId } },
+            cantidadRecibidaInicial: p.cantidad, // # de presentaciones recibidas
+            cantidadPresentacion: p.cantidad, // unidades por presentación (factor)
+            fechaIngreso: new Date(),
+            fechaVencimiento: fechaVenc,
+            compraRecepcion: { connect: { id: header.id } }, // traza recibo
+          },
+        });
+
+        // c) línea de recepción (ligada al lote de presentación)
+        await tx.compraRecepcionLinea.create({
+          data: {
+            compraRecepcion: {
+              connect: {
+                id: header.id,
+              },
+            },
+            compraDetalle: {
+              connect: {
+                id: p.compraDetalleId,
+              },
+            },
+            presentacion: {
+              connect: {
+                id: pres.id,
+              },
+            },
+            cantidadRecibida: p.cantidad,
+            fechaExpiracion: fechaVenc,
+            stockPresentacion: { connect: { id: sp.id } },
+          },
+        });
+      }
+    }
+
+    // 3) (Opcional) asociar recepción al documento
+    await tx.cxPDocumentoRecepcion.upsert({
+      where: {
+        documentoId_recepcionId: {
+          documentoId,
+          recepcionId: header.id,
+        },
+      },
+      create: { documentoId, recepcionId: header.id },
+      update: {},
+    });
+
+    return header; // => { id: number, ... }
+  }
+
+  async createProductsStocks(
+    tx: Prisma.TransactionClient,
+    items: CreateRecepcionItemDto[],
+    sucursalId: number,
+    compraRecepcionId: number,
+  ) {
+    const results = [];
+    for (const p of items) {
+      const prod = await tx.producto.findUnique({
+        where: { id: p.refId },
+        select: { id: true, precioCostoActual: true },
+      });
+      if (!prod) throw new Error(`Producto con ID ${p.refId} no encontrado`);
+
+      await tx.stock.create({
+        data: {
+          producto: { connect: { id: prod.id } },
+          cantidad: p.cantidad,
+          precioCosto: prod.precioCostoActual,
+          costoTotal: prod.precioCostoActual * p.cantidad,
+          fechaIngreso: new Date(),
+          sucursal: { connect: { id: sucursalId } },
+        },
+      });
+
+      await tx.compraRecepcionLinea.create({
+        data: {
+          compraRecepcionId,
+          compraDetalleId: p.compraDetalleId,
+          productoId: prod.id,
+          cantidadRecibida: p.cantidad,
+          fechaExpiracion: p.fechaVencimientoISO
+            ? new Date(p.fechaVencimientoISO)
+            : null,
+        },
+      });
+
+      results.push(true);
+    }
+    return results;
+  }
+
+  async creatPresentacionesStocks(
+    tx: Prisma.TransactionClient,
+    items: CreateRecepcionItemDto[],
+    sucursalId: number,
+    compraRecepcionId: number,
+  ) {
+    const results = [];
+    for (const p of items) {
+      const pres = await tx.productoPresentacion.findUnique({
+        where: { id: p.refId },
+        select: {
+          id: true,
+          productoId: true,
+          costoReferencialPresentacion: true,
+        },
+      });
+      if (!pres)
+        throw new Error(`Presentación con ID ${p.refId} no encontrada`);
+
+      const sp = await tx.stockPresentacion.create({
+        data: {
+          productoId: pres.productoId,
+          presentacionId: pres.id,
+          sucursalId,
+          cantidadRecibidaInicial: p.cantidad,
+          cantidadPresentacion: p.cantidad,
+          fechaIngreso: new Date(),
+          fechaVencimiento: p.fechaVencimientoISO
+            ? new Date(p.fechaVencimientoISO)
+            : null,
+          compraRecepcionId,
+        },
+      });
+
+      await tx.compraRecepcionLinea.create({
+        data: {
+          compraRecepcionId,
+          compraDetalleId: p.compraDetalleId,
+          presentacionId: pres.id,
+          cantidadRecibida: p.cantidad,
+          fechaExpiracion: p.fechaVencimientoISO
+            ? new Date(p.fechaVencimientoISO)
+            : null,
+          stockPresentacionId: sp.id,
+        },
+      });
+
+      results.push(true);
+    }
+    return results;
   }
 }
