@@ -7,10 +7,13 @@ import {
   Param,
   Delete,
   ParseIntPipe,
+  Query,
+  ValidationPipe,
 } from '@nestjs/common';
 import { VentaService } from './venta.service';
 import { CreateVentaDto } from './dto/create-venta.dto';
 import { UpdateVentaDto } from './dto/update-venta.dto';
+import { QueryVentasTable } from './query/queryTableVentas';
 
 @Controller('venta')
 export class VentaController {
@@ -35,8 +38,26 @@ export class VentaController {
   }
 
   @Get('/find-my-sucursal-sales/:id')
-  async findAllSaleSucursal(@Param('id', ParseIntPipe) id: number) {
-    return await this.ventaService.findAllSaleSucursal(id);
+  async findAllSaleSucursal(
+    @Param('id', ParseIntPipe) id: number,
+    @Query(
+      new ValidationPipe({
+        transform: true,
+        transformOptions: { enableImplicitConversion: true },
+      }),
+    )
+    query: QueryVentasTable,
+  ) {
+    // overrule: sucursal viene del path param
+    const q: QueryVentasTable = {
+      ...query,
+      sucursalId: id,
+      page: query.page ?? 1,
+      limit: query.limit ?? 20,
+      sortBy: query.sortBy ?? 'fechaVenta',
+      sortDir: (query.sortDir ?? 'desc') as 'asc' | 'desc',
+    };
+    return this.ventaService.findAllSaleSucursal(q);
   }
 
   @Get('/get-ventas-caja/:id/:usuarioId')

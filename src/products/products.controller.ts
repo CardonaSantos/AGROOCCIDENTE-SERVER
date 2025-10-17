@@ -19,8 +19,14 @@ import {
 import { ProductsService } from './products.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
-import { CreateNewProductDto } from './dto/create-productNew.dto';
-import { FileFieldsInterceptor } from '@nestjs/platform-express';
+import {
+  CreateNewProductDto,
+  PresentacionCreateDto,
+} from './dto/create-productNew.dto';
+import {
+  AnyFilesInterceptor,
+  FileFieldsInterceptor,
+} from '@nestjs/platform-express';
 import { join } from 'path';
 import { RolPrecio, TipoEmpaque } from '@prisma/client';
 import { plainToInstance } from 'class-transformer';
@@ -108,44 +114,43 @@ const mapPrecioProductoArray = (
     }
     return { rol, orden, precio: precioStr };
   });
-
-const mapPresentacionesArray = (arr: any[]): PresentacionDto[] =>
-  (Array.isArray(arr) ? arr : []).map((pr, i) => {
-    const idx = `presentaciones[${i}]`;
-    const nombre = cleanStr(pr?.nombre);
-    if (!nombre) throw new BadRequestException(`${idx}.nombre es requerido`);
-
-    //precios de las presentaciones
-    const precios = mapPrecioProductoArray(
-      pr?.preciosPresentacion ?? [],
-      `${idx}.preciosPresentacion`,
-    );
-
-    // Validate tipoPresentacion
-    const tipoPresentacion = pr?.tipoPresentacion;
-    if (!tipoPresentacion) {
-      throw new BadRequestException(`${idx}.tipoPresentacion es requerido`);
+const mapPrecioPresentacionArray = (
+  arr: any[],
+  label: string,
+): PrecioPresentacionDto[] =>
+  (Array.isArray(arr) ? arr : []).map((p, i) => {
+    const idx = `${label}[${i}]`;
+    const rol = cleanStr(p?.rol) as RolPrecio;
+    const orden = toIntOrThrow(p?.orden, `${idx}.orden`);
+    const precioStr = cleanStr(p?.precio);
+    if (!isDecimalStr(precioStr)) {
+      throw new BadRequestException(`${idx}.precio debe ser decimal positivo`);
     }
-
-    // Validate costoReferencialPresentacion
-    const costoReferencialPresentacion = cleanStr(
-      pr?.costoReferencialPresentacion,
-    );
-    if (!isDecimalStr(costoReferencialPresentacion)) {
-      throw new BadRequestException(
-        `${idx}.costoReferencialPresentacion debe ser decimal positivo`,
-      );
-    }
-
-    return {
-      nombre,
-      codigoBarras: cleanStr(pr?.codigoBarras) || null,
-      esDefault: !!pr?.esDefault, // ya viene boolean del front; si viniera string: toBool(pr?.esDefault)
-      preciosPresentacion: precios,
-      tipoPresentacion: tipoPresentacion,
-      costoReferencialPresentacion: costoReferencialPresentacion,
-    };
+    return { rol, orden, precio: precioStr };
   });
+
+export function mapPresentacionesArray(arr: any[]): PresentacionCreateDto[] {
+  return (arr ?? []).map((p, i) => ({
+    nombre: cleanStr(p?.nombre),
+    codigoBarras: cleanStr(p?.codigoBarras) || undefined,
+    esDefault: !!p?.esDefault,
+
+    tipoPresentacion: p?.tipoPresentacion,
+    costoReferencialPresentacion: toDecimalStringOrNull(
+      p?.costoReferencialPresentacion,
+      `presentaciones[${i}].costoReferencialPresentacion`,
+    )!, // no debe ser null
+
+    // 👇 NUEVOS (ya los mandas desde el FE)
+    descripcion: cleanStr(p?.descripcion) || null,
+    stockMinimo: toNullableInt(p?.stockMinimo),
+
+    preciosPresentacion: mapPrecioPresentacionArray(
+      Array.isArray(p?.preciosPresentacion) ? p?.preciosPresentacion : [],
+      `presentaciones[${i}].preciosPresentacion`,
+    ),
+  }));
+}
 
 @Controller('products')
 export class ProductsController {
@@ -155,20 +160,21 @@ export class ProductsController {
 
   @Post()
   @UseInterceptors(
-    FileFieldsInterceptor([{ name: 'images', maxCount: 10 }], {
+    AnyFilesInterceptor({
       limits: { fileSize: 5 * 1024 * 1024 },
     }),
   )
   async create(
-    @UploadedFiles() files: { images?: Express.Multer.File[] },
+    @UploadedFiles() files: Express.Multer.File[],
     @Body() body: Record<string, any>,
   ) {
-    // ---- 1) Parsear/normalizar primitivas ----
+    // ---- 1) Parseo/normalizado (igual que ya lo tienes) ----
     this.logger.debug(
       'RAW presentaciones:',
       typeof body.presentaciones,
       body.presentaciones?.slice?.(0, 200),
     );
+
     const parsed = safeJsonParse<any[]>(
       body.presentaciones,
       [],
@@ -197,19 +203,20 @@ export class ProductsController {
         'precioVenta',
       ),
 
+      // Asegúrate que tu mapper conserve descripcion y stockMinimo
       presentaciones: mapPresentacionesArray(
         safeJsonParse<any[]>(body.presentaciones, [], 'presentaciones'),
       ),
     };
 
-    // 🔒 Validación con class-validator
+    // 🔒 Validación
     const dto = plainToInstance(CreateNewProductDto, dtoPlain);
     await validateOrReject(dto, {
       whitelist: true,
       forbidNonWhitelisted: true,
     });
 
-    // Regla de negocio adicional: 1 sola default
+    // Regla: solo 1 default
     const defaults = (dto.presentaciones ?? []).filter(
       (p) => p.esDefault,
     ).length;
@@ -219,9 +226,30 @@ export class ProductsController {
       );
     }
 
-    const imagenes = files.images ?? [];
+    // ---- 2) ARCHIVOS: ahora files es un ARRAY, filtra por fieldname ----
 
-    return this.productsService.create(dto, imagenes);
+    for (const f of files) {
+      this.logger.debug(
+        `file field=${f.fieldname} name=${f.originalname} type=${f.mimetype}`,
+      );
+    }
+
+    // a) Imágenes del PRODUCTO
+    const productImages = files.filter((f) => f.fieldname === 'images');
+
+    // b) Imágenes por PRESENTACIÓN: presentaciones[<idx>].images
+    const presImages = new Map<number, Express.Multer.File[]>();
+    for (const f of files) {
+      const m = /^presentaciones\[(\d+)\]\.images$/.exec(f.fieldname);
+      if (m) {
+        const idx = Number(m[1]);
+        if (!presImages.has(idx)) presImages.set(idx, []);
+        presImages.get(idx)!.push(f);
+      }
+    }
+
+    // ---- 3) Service (pasa ambas colecciones) ----
+    return this.productsService.create(dto, productImages, presImages);
   }
 
   /**

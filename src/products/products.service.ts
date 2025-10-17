@@ -60,10 +60,15 @@ export class ProductsService {
     private readonly cloudinaryService: CloudinaryService,
     private readonly presentacionPrducto: PresentacionProductoService,
   ) {}
+
   //AJUSTAR CREACION DE IMAGENES
-  async create(dto: CreateNewProductDto, imagenes: Express.Multer.File[]) {
+  // products.service.ts (solo el método create)
+  async create(
+    dto: CreateNewProductDto,
+    imagenes: Express.Multer.File[],
+    presImages: Map<number, Express.Multer.File[]> = new Map(),
+  ) {
     try {
-      // const { presentacion } = dto;
       const {
         codigoProducto,
         creadoPorId,
@@ -76,31 +81,41 @@ export class ProductsService {
         presentaciones,
         stockMinimo,
       } = dto;
-      this.logger.log('Data para crear un producto:', JSON.stringify(dto));
+
+      this.logger.log(
+        `DTO recibido en crear producto:\n${JSON.stringify(dto, null, 2)}`,
+      );
 
       return await this.prisma.$transaction(async (tx) => {
+        // OJO: en schema es Float?, así que parsea a number
+        const costoActualNumber =
+          precioCostoActual != null && String(precioCostoActual).trim() !== ''
+            ? Number(precioCostoActual)
+            : null;
+
         const newProduct = await tx.producto.create({
           data: {
-            precioCostoActual: parseInt(precioCostoActual),
-            codigoProducto: codigoProducto,
-            codigoProveedor: codigoProveedor,
-            nombre: nombre,
-            descripcion: descripcion,
+            precioCostoActual: costoActualNumber,
+            codigoProducto,
+            codigoProveedor: codigoProveedor || null,
+            nombre,
+            descripcion: descripcion || null,
             categorias: {
               connect: categorias?.map((id) => ({ id })) ?? [],
             },
           },
         });
 
+        // Precios a nivel producto
         const preciosCreados = await Promise.all(
-          dto.precioVenta.map((precio) =>
+          (precioVenta ?? []).map((precio) =>
             tx.precioProducto.create({
               data: {
                 productoId: newProduct.id,
-                precio: precio.precio,
+                precio: precio.precio, // string OK (Decimal)
                 estado: 'APROBADO',
                 tipo: 'ESTANDAR',
-                creadoPorId: dto.creadoPorId,
+                creadoPorId: creadoPorId,
                 fechaCreacion: new Date(),
                 orden: precio.orden,
                 rol: precio.rol,
@@ -109,90 +124,63 @@ export class ProductsService {
           ),
         );
 
-        if (dto.stockMinimo != null) {
-          this.logger.debug(
-            'entrando ala creacion de stock minimo, el producto a añadirle es: ',
-            newProduct,
-          );
-
+        // Stock mínimo de producto (1:1)
+        if (stockMinimo != null) {
           await tx.stockThreshold.create({
             data: {
               productoId: newProduct.id,
-              stockMinimo: dto.stockMinimo,
+              stockMinimo,
             },
           });
-          this.logger.debug('Lumbra de stock minimo creado');
         }
 
-        if (!imagenes?.length) {
-          this.logger.debug('No hay imágenes para subir o crear');
-        } else {
-          const promesas = imagenes.map((bufferImagen) =>
-            this.cloudinaryService.subirImagenFile(bufferImagen),
+        // Imágenes del PRODUCTO
+        if (imagenes?.length) {
+          const uploads = await Promise.allSettled(
+            imagenes.map((file) =>
+              this.cloudinaryService.subirImagenFile(file),
+            ),
           );
 
-          const resultados = await Promise.allSettled(promesas);
+          for (let idx = 0; idx < uploads.length; idx++) {
+            const r = uploads[idx];
+            const file = imagenes[idx];
 
-          for (let idx = 0; idx < resultados.length; idx++) {
-            const res = resultados[idx];
-            const imagenBuffer = imagenes[idx];
-            if (res.status === 'fulfilled') {
-              const { url, public_id } = res.value;
-              console.log(`OK: Imagen ${idx} subida → ${url}`);
+            if (r.status === 'fulfilled') {
+              const { url, public_id } = r.value;
               await this.vincularProductoImagen(
                 tx,
                 newProduct.id,
                 url,
                 public_id,
+                file?.originalname,
               );
             } else {
-              this.logger.error(
-                `Error subiendo imagen [${idx}] (${imagenBuffer}):`,
-                res.reason,
-              );
+              this.logger.error(`Error subiendo imagen [${idx}]`, r.reason);
             }
           }
+        } else {
+          this.logger.debug('No hay imágenes de producto para subir/crear');
         }
 
-        const presentacionesValidas = presentaciones.every((p) => {
-          if (typeof p.codigoBarras !== 'string' || p.codigoBarras === '')
-            return false;
-          if (typeof p.esDefault !== 'boolean') return false;
-
-          if (typeof p.nombre !== 'string' || p.nombre === '') return false;
-
-          const preciosValidos = p.preciosPresentacion.every((precio) => {
-            if (precio.orden <= 0) return false;
-            if (toDecimal(precio.precio).lte(0)) return false;
-            const RolesPrecios = Object.values(RolPrecio) as RolPrecio[];
-            if (!RolesPrecios.includes(precio.rol)) return false;
-
-            return true;
-          });
-
-          if (!preciosValidos) return false;
-
-          return true;
-        });
-
-        if (!presentacionesValidas) {
-          throw new BadRequestException(
-            'Alguna presentación tiene un formato no válido',
-          );
-        }
-
-        await this.presentacionPrducto.create(
+        const createdPresentations = await this.presentacionPrducto.create(
           tx,
-          presentaciones,
+          presentaciones ?? [],
           newProduct.id,
+          presImages,
+          creadoPorId,
         );
 
-        return { newProduct, preciosCreados };
+        return {
+          newProduct,
+          preciosCreados,
+          presentaciones: createdPresentations,
+        };
       });
     } catch (error) {
-      this.logger.error('Error al crear producto con threshold:', error);
+      this.logger.error('Error al crear producto:', error);
       throw new InternalServerErrorException(
-        'No se pudo crear el producto y su stock mínimo',
+        'No se pudo crear el producto y sus datos asociados',
       );
     }
   }
@@ -209,7 +197,7 @@ export class ProductsService {
         productoId,
         url,
         public_id: publicId,
-        altTexto,
+        altTexto: altTexto ?? null,
       },
     });
   }
@@ -435,10 +423,6 @@ export class ProductsService {
       where.categorias = { some: { id: { in: cats } } };
     }
 
-    if (sucursalId) {
-      where.stock = { some: { sucursalId: { equals: sucursalId } } };
-    }
-
     if (codigoItem) {
       // si el front todavía manda codigoItem, mantenlo
       where.codigoProducto = { contains: codigoItem, mode: 'insensitive' };
@@ -504,12 +488,6 @@ export class ProductsService {
     } = dto;
 
     if (!dto) throw new BadRequestException('Datos inválidos');
-
-    if (sucursalId) {
-      where.stockPresentaciones = {
-        some: { sucursalId: { equals: sucursalId } },
-      };
-    }
 
     if (codigoItem) {
       where.codigoBarras = { contains: codigoItem, mode: 'insensitive' };
@@ -1163,13 +1141,6 @@ export class ProductsService {
         };
       }
 
-      if (sucursalId) {
-        where.stock = {
-          some: {
-            sucursalId: sucursalId,
-          },
-        };
-      }
       // WHERE DINAMICO DE PRESENTACIONES PRODUCTOS
       if (productoNombre) {
         wherePresentaciones.nombre = {
@@ -1209,13 +1180,39 @@ export class ProductsService {
         };
       }
 
-      if (sucursalId) {
-        wherePresentaciones.stockPresentaciones = {
-          some: {
-            sucursalId: sucursalId,
+      const productoSelectFor = (
+        sucursalId?: number,
+      ): Prisma.ProductoSelect => ({
+        ...productoSelect,
+        stock: {
+          // filtra los renglones de stock que se devuelven, pero
+          // NO condiciona que el producto exista
+          where: sucursalId ? { sucursalId } : undefined,
+          select: {
+            id: true,
+            cantidad: true,
+            fechaVencimiento: true,
+            fechaIngreso: true,
+            sucursal: { select: { id: true, nombre: true } },
           },
-        };
-      }
+        },
+      });
+
+      const presentacionSelectFor = (
+        sucursalId?: number,
+      ): Prisma.ProductoPresentacionSelect => ({
+        ...presentacionSelect,
+        stockPresentaciones: {
+          where: sucursalId ? { sucursalId } : undefined,
+          select: {
+            id: true,
+            cantidadPresentacion: true,
+            fechaVencimiento: true,
+            fechaIngreso: true,
+            sucursal: { select: { id: true, nombre: true } },
+          },
+        },
+      });
 
       this.logger.log(`DTO recibido:\n${JSON.stringify(dto, null, 2)}`);
 
@@ -1391,7 +1388,7 @@ export class ProductsService {
         id: p.id,
         nombre: p.nombre,
         codigoProducto: p.codigoBarras ?? '',
-        descripcion: 'PRESENTACION',
+        descripcion: p.descripcion ?? '',
         precioCosto:
           p.costoReferencialPresentacion != null
             ? p.costoReferencialPresentacion.toString()

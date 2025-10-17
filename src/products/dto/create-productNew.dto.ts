@@ -70,7 +70,21 @@ export class PresentacionCreateDto {
   tipoPresentacion: TipoEmpaque;
 
   @IsString()
+  @Matches(DECIMAL_RE, {
+    message: 'costoReferencialPresentacion debe ser decimal positivo',
+  })
   costoReferencialPresentacion: string;
+
+  // 👇 NUEVO
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
+  descripcion?: string | null;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  stockMinimo?: number | null;
 }
 
 // --------- DTO principal ---------

@@ -43,6 +43,7 @@ export const presentacionSelect = {
   actualizadoEn: true,
   esDefault: true,
   costoReferencialPresentacion: true,
+  descripcion: true,
   precios: {
     select: {
       id: true,

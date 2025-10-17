@@ -17,6 +17,10 @@ import { HistorialStockTrackerService } from 'src/historial-stock-tracker/histor
 import { CreateRequisicionRecepcionLineaDto } from 'src/recepcion-requisiciones/dto/requisicion-recepcion-create.dto';
 import { SoloIDProductos } from 'src/recepcion-requisiciones/dto/create-venta-tracker.dto';
 import { CajaService } from 'src/caja/caja.service';
+import { SelectTypeVentas } from './select/selecSalesType';
+import { QueryVentasTable } from './query/queryTableVentas';
+import { normalizerVentas } from './helpers/normailizerVenta';
+import { normalizeVentaForPDF } from './helpers/venta-pdf.normalizer';
 const toNumber4 = (v: number | Prisma.Decimal) =>
   typeof v === 'number' ? v : Number(v.toFixed(4));
 @Injectable()
@@ -477,69 +481,249 @@ export class VentaService {
     }
   }
 
-  async findAllSaleSucursal(id: number) {
+  async findAllSaleSucursal(query: QueryVentasTable) {
     try {
-      const ventas = await this.prisma.venta.findMany({
-        where: { sucursalId: id },
-        orderBy: { fechaVenta: 'desc' },
-        select: {
-          id: true,
-          clienteId: true,
-          cliente: {
-            select: {
-              id: true,
-              dpi: true,
-              nombre: true,
-              telefono: true,
-              direccion: true,
-              creadoEn: true,
-              actualizadoEn: true,
-              departamentoId: true,
-              departamento: { select: { id: true, nombre: true } },
-              municipio: { select: { id: true, nombre: true } },
+      const {
+        sucursalId,
+        page = 1,
+        limit = 20,
+        sortBy = 'fechaVenta',
+        sortDir = 'desc',
+        nombreCliente,
+        telefonoCliente,
+        referenciaPago,
+        codigoItem,
+        texto,
+        fechaDesde,
+        fechaHasta,
+        montoMin,
+        montoMax,
+        cats,
+        metodoPago,
+        tipoComprobante,
+      } = query;
+
+      if (!sucursalId) {
+        throw new BadRequestException('sucursalId es requerido');
+      }
+
+      this.logger.log(
+        `DTO recibido query ventas historial:\n${JSON.stringify(query, null, 2)}`,
+      );
+
+      const AND: Prisma.VentaWhereInput[] = [{ sucursalId }];
+
+      // rango de fechas
+      if (fechaDesde || fechaHasta) {
+        AND.push({
+          fechaVenta: {
+            gte: fechaDesde
+              ? new Date(`${fechaDesde}T00:00:00.000Z`)
+              : undefined,
+            lte: fechaHasta
+              ? new Date(`${fechaHasta}T23:59:59.999Z`)
+              : undefined,
+          },
+        });
+      }
+
+      // montos
+      if (montoMin != null || montoMax != null) {
+        AND.push({
+          totalVenta: {
+            gte: montoMin ?? undefined,
+            lte: montoMax ?? undefined,
+          },
+        });
+      }
+
+      // nombre/telefono cliente y/o cliente final
+      if (nombreCliente) {
+        AND.push({
+          OR: [
+            {
+              cliente: {
+                nombre: { contains: nombreCliente, mode: 'insensitive' },
+              },
+            },
+            {
+              nombreClienteFinal: {
+                contains: nombreCliente,
+                mode: 'insensitive',
+              },
+            },
+          ],
+        });
+      }
+
+      if (telefonoCliente) {
+        AND.push({
+          OR: [
+            {
+              cliente: {
+                telefono: { contains: telefonoCliente, mode: 'insensitive' },
+              },
+            },
+            {
+              telefonoClienteFinal: {
+                contains: telefonoCliente,
+                mode: 'insensitive',
+              },
+            },
+          ],
+        });
+      }
+
+      // referencia pago
+      if (referenciaPago) {
+        AND.push({
+          referenciaPago: { contains: referenciaPago, mode: 'insensitive' },
+        });
+      }
+
+      // código de item (producto o presentación)
+      if (codigoItem) {
+        AND.push({
+          productos: {
+            some: {
+              OR: [
+                {
+                  producto: {
+                    codigoProducto: {
+                      contains: codigoItem,
+                      mode: 'insensitive',
+                    },
+                  },
+                },
+                {
+                  presentacion: {
+                    codigoBarras: { contains: codigoItem, mode: 'insensitive' },
+                  },
+                },
+              ],
             },
           },
-          fechaVenta: true,
-          horaVenta: true,
+        });
+      }
+
+      // categorías de productos
+      if (cats?.length) {
+        AND.push({
           productos: {
-            select: {
-              id: true,
-              ventaId: true,
-              productoId: true,
-              cantidad: true,
-              creadoEn: true,
-              precioVenta: true,
-              estado: true,
+            some: {
               producto: {
-                select: {
-                  id: true,
-                  nombre: true,
-                  descripcion: true,
-                  codigoProducto: true,
-                  creadoEn: true,
-                  actualizadoEn: true,
+                categorias: {
+                  some: { id: { in: cats } },
                 },
               },
             },
           },
-          totalVenta: true,
+        });
+      }
+
+      // método(s) de pago
+      if (metodoPago?.length) {
+        AND.push({
           metodoPago: {
-            select: {
-              id: true,
-              ventaId: true,
-              monto: true,
-              metodoPago: true,
-              fechaPago: true,
+            is: {
+              metodoPago: { in: metodoPago },
             },
           },
-          nombreClienteFinal: true,
-          telefonoClienteFinal: true,
-          direccionClienteFinal: true,
-          referenciaPago: true,
-          tipoComprobante: true,
+        });
+      }
+
+      // tipo(s) de comprobante
+      if (tipoComprobante?.length) {
+        AND.push({
+          tipoComprobante: { in: tipoComprobante },
+        });
+      }
+
+      // búsqueda libre "texto"
+      if (texto) {
+        AND.push({
+          OR: [
+            { cliente: { nombre: { contains: texto, mode: 'insensitive' } } },
+            { nombreClienteFinal: { contains: texto, mode: 'insensitive' } },
+            { referenciaPago: { contains: texto, mode: 'insensitive' } },
+            {
+              productos: {
+                some: {
+                  producto: {
+                    nombre: { contains: texto, mode: 'insensitive' },
+                  },
+                },
+              },
+            },
+            {
+              productos: {
+                some: {
+                  presentacion: {
+                    nombre: { contains: texto, mode: 'insensitive' },
+                  },
+                },
+              },
+            },
+            {
+              productos: {
+                some: {
+                  producto: {
+                    codigoProducto: { contains: texto, mode: 'insensitive' },
+                  },
+                },
+              },
+            },
+            {
+              productos: {
+                some: {
+                  presentacion: {
+                    codigoBarras: { contains: texto, mode: 'insensitive' },
+                  },
+                },
+              },
+            },
+          ],
+        });
+      }
+
+      const where: Prisma.VentaWhereInput = { AND };
+
+      // ordenamiento
+      const orderBy: Prisma.VentaOrderByWithRelationInput[] = [];
+      if (sortBy === 'clienteNombre') {
+        orderBy.push({ cliente: { nombre: sortDir } as any });
+      } else {
+        orderBy.push({ [sortBy]: sortDir });
+      }
+
+      const skip = (page - 1) * limit;
+      const take = limit;
+
+      // query principal
+      const [ventas, total] = await this.prisma.$transaction([
+        this.prisma.venta.findMany({
+          where,
+          orderBy,
+          skip,
+          take,
+          select: SelectTypeVentas,
+        }),
+        this.prisma.venta.count({ where }),
+      ]);
+
+      return {
+        data: normalizerVentas(ventas), // la UI puede normalizar, o lo normalizamos aquí (abajo te doy un normalizador)
+        meta: {
+          page,
+          limit,
+          total,
+          totalPages: Math.max(1, Math.ceil(total / limit)),
+          hasNext: skip + ventas.length < total,
+          hasPrev: page > 1,
+          sortBy,
+          sortDir,
         },
-      });
-      return ventas; // ya coincide con tu `Venta[]` en TS
+      };
     } catch (error) {
       console.error(error);
       throw new InternalServerErrorException('Error al obtener las ventas');
@@ -548,14 +732,11 @@ export class VentaService {
 
   async findOneSale(id: number) {
     try {
-      const ventas = await this.prisma.venta.findUnique({
-        where: {
-          id: id,
-        },
-
+      const venta = await this.prisma.venta.findUnique({
+        where: { id },
         include: {
           cliente: true,
-          metodoPago: true,
+          metodoPago: true, // puede ser objeto o array según tu modelo
           sucursal: {
             select: {
               direccion: true,
@@ -567,18 +748,39 @@ export class VentaService {
           },
           productos: {
             include: {
-              producto: true,
+              // 👇 incluimos ambas caras para poder normalizar
+              producto: {
+                select: {
+                  id: true,
+                  nombre: true,
+                  descripcion: true,
+                  codigoProducto: true,
+                  creadoEn: true,
+                  actualizadoEn: true,
+                },
+              },
+              presentacion: {
+                select: {
+                  id: true,
+                  nombre: true,
+                  descripcion: true,
+                  codigoBarras: true,
+                  creadoEn: true,
+                  actualizadoEn: true,
+                },
+              },
             },
-            orderBy: {
-              precioVenta: 'desc',
-            },
+            orderBy: { id: 'asc' },
           },
         },
       });
-      return ventas;
+
+      if (!venta) return null;
+
+      return normalizeVentaForPDF(venta);
     } catch (error) {
       console.error(error);
-      throw new InternalServerErrorException('Error al obtener las ventas');
+      throw new InternalServerErrorException('Error al obtener la venta');
     }
   }
 
