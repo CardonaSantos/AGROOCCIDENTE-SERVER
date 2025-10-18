@@ -1403,6 +1403,7 @@ export class CuotasService {
             .toDate(),
           estado: 'PENDIENTE',
           monto: 0,
+          numero: 1,
         },
       });
     }

@@ -40,6 +40,7 @@ import * as isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
 import { newQueryDTO } from './query/newQuery';
 import { verifyProps } from 'src/utils/verifyPropsFromDTO';
 import { buildSearchForProducto } from './HELPERS';
+import { itemsBase } from './seed/utils';
 dayjs.extend(utc);
 dayjs.extend(timezone);
 dayjs.extend(isSameOrBefore);
@@ -1401,5 +1402,61 @@ export class ProductsService {
         images, // mantén arreglo completo para el front; caerá en []
       };
     });
+  }
+
+  //SEEED
+  async seedProductosBasicos(creadoPorId: number) {
+    const report: Array<{
+      codigoProducto: string;
+      status: 'created' | 'skipped' | 'error';
+      error?: string;
+    }> = [];
+
+    for (const base of itemsBase) {
+      // Idempotencia por codigoProducto
+      const exists = await this.prisma.producto.findUnique({
+        where: { codigoProducto: base.codigoProducto },
+        select: { id: true },
+      });
+
+      if (exists) {
+        report.push({ codigoProducto: base.codigoProducto, status: 'skipped' });
+        continue;
+      }
+
+      try {
+        await this.create(
+          {
+            ...base,
+            creadoPorId,
+            precioCostoActual:
+              base.precioCostoActual != null
+                ? String(base.precioCostoActual)
+                : undefined,
+          },
+          [], // sin imágenes de PRODUCTO
+          new Map(), // sin imágenes de PRESENTACIONES
+        );
+        report.push({ codigoProducto: base.codigoProducto, status: 'created' });
+      } catch (e: any) {
+        this.logger.error(
+          `Error creando ${base.codigoProducto}: ${e?.message ?? e}`,
+        );
+        report.push({
+          codigoProducto: base.codigoProducto,
+          status: 'error',
+          error: e?.message ?? String(e),
+        });
+      }
+    }
+
+    const summary = {
+      created: report.filter((r) => r.status === 'created').length,
+      skipped: report.filter((r) => r.status === 'skipped').length,
+      errors: report.filter((r) => r.status === 'error').length,
+      details: report,
+    };
+
+    return summary;
   }
 }

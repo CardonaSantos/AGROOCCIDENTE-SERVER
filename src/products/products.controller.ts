@@ -326,6 +326,19 @@ export class ProductsController {
     // return await this.productsService.loadCSVandImportProducts(ruta);
   }
 
+  //SEED
+
+  /**
+   * Ejecuta el seed de 20 productos.
+   * Ejemplo:
+   *   GET /seed/productos-basicos-gt?creadoPorId=1
+   */
+  @Get('productos-basicos-gt')
+  async run(@Query('creadoPorId', ParseIntPipe) creadoPorId = '1') {
+    const uid = Number(creadoPorId) || 1;
+    return this.productsService.seedProductosBasicos(uid);
+  }
+
   @Get('search')
   async getBySearchProducts(
     @Query('q') q: string,

@@ -19,7 +19,9 @@
 // [S13] Notificaciones
 // [S14] Ubicación (Departamentos / Municipios)
 // [S15] Otros (Sorteos)
-//
+// [S16] RECEPCIONES DE COMPRAS
+// [S17] COMPRAS A PAGAR
+// [S18] NOTIFICACIONES CREDITO VENTA
 // Nota: No se han cambiado nombres ni propiedades; únicamente se reordenó y
 // se añadieron comentarios de organización.
 // ============================================================================
@@ -84,6 +86,7 @@ enum TipoNotificacion {
   VENCIMIENTO
   STOCK_BAJO
   OTRO
+  CREDITO_VENTA
 }
 
 enum EstadoNotificacion {
@@ -122,23 +125,26 @@ model Sucursal {
   EliminacionStock             EliminacionStock[]
   RegistroCaja                 RegistroCaja[]
 
-  saldosDiarios          SucursalSaldoDiario[]
-  VentaEliminada         VentaEliminada[]
-  VentaCuota             VentaCuota[]
-  PlantillaComprobante   PlantillaComprobante[]
-  Reparacion             Reparacion[]
-  MetaUsuario            MetaUsuario[]
-  MetaCobros             MetaCobros[]
-  DepositoCobro          DepositoCobro[]
-  requisiciones          Requisicion[]
-  resumenesVenta         ResumenVenta[]
-  HistorialStock         HistorialStock[]
-  HistorialPrecioCosto   HistorialPrecioCosto[]
-  garantias              Garantia[]
-  compras                Compra[]
-  pedidos                Pedido[]
-  movimientosFinancieros MovimientoFinanciero[]
-  stockPresentaciones    StockPresentacion[]    @relation("SucursalToStockPresentacion")
+  saldosDiarios           SucursalSaldoDiario[]
+  VentaEliminada          VentaEliminada[]
+  VentaCuota              VentaCuota[]
+  PlantillaComprobante    PlantillaComprobante[]
+  Reparacion              Reparacion[]
+  MetaUsuario             MetaUsuario[]
+  MetaCobros              MetaCobros[]
+  DepositoCobro           DepositoCobro[]
+  requisiciones           Requisicion[]
+  resumenesVenta          ResumenVenta[]
+  HistorialStock          HistorialStock[]
+  HistorialPrecioCosto    HistorialPrecioCosto[]
+  garantias               Garantia[]
+  compras                 Compra[]
+  pedidos                 Pedido[]
+  movimientosFinancieros  MovimientoFinanciero[]
+  stockPresentaciones     StockPresentacion[]     @relation("SucursalToStockPresentacion")
+  //relaciones con peticiones credito
+  solicitudesCreditoVenta SolicitudCreditoVenta[] @relation("SucursalToSolicitudCreditoVenta")
+  abonosCredito           AbonoCredito[]          @relation("Sucursal_AbonosCredito") // <— backref
 }
 
 model Usuario {
@@ -199,6 +205,18 @@ model Usuario {
   cxpDocumentosCreados CxPDocumento[] @relation("CxPDocumentoCreadoPor")
 
   cxpPagosRegistrados CxPPago[] @relation("CxPPagoRegistradoPor")
+
+  // Quien crea la solicitud de crédito
+  solicitudesCreditoVentaSolicitadas SolicitudCreditoVenta[] @relation("CreditoSolicitadoPor")
+
+  // Quien aprueba/rechaza la solicitud
+  solicitudesCreditoVentaAprobadas SolicitudCreditoVenta[] @relation("CreditoAprobadoPor")
+
+  // Acciones registradas en el historial (actor)
+  solicitudesCreditoVentaHistorialActuados SolicitudCreditoVentaHistorial[] @relation("ActorSolicitudCredito")
+
+  historialCredito VentaCuotaHistorial[] @relation("Usuario_HistorialCredito") // <— backref
+  abonosCredito    AbonoCredito[]        @relation("Usuario_AbonosCredito") // <— backref
 }
 
 // ============================================================================
@@ -250,6 +268,8 @@ model Producto {
   presentaciones           ProductoPresentacion[]
   stockPresentaciones      StockPresentacion[]              @relation("ProductoToStockPresentacion")
   recepcionesCompraLineas  CompraRecepcionLinea[]
+
+  solicitudesCreditoLineas SolicitudCreditoVentaLinea[] @relation("SolicitudCreditoLineaToProducto")
 }
 
 model ProductoPresentacion {
@@ -287,6 +307,8 @@ model ProductoPresentacion {
   //NUEVOS
   recepcionesCompraLineas CompraRecepcionLinea[] @relation("PresentacionToCompraRecepcionLinea")
   lineasDocumento         CxPDocumentoLinea[]    @relation("DocumentoLineaToPresentacion")
+
+  solicitudesCreditoLineas SolicitudCreditoVentaLinea[] @relation("SolicitudCreditoLineaToPresentacion")
 
   @@unique([productoId, nombre])
   @@index([productoId])
@@ -727,6 +749,8 @@ model Cliente {
   fechaEliminacion DateTime? // Opcional: cuándo fue dado de baja
   pedidos          Pedido[]
 
+  solicitudesCreditoVenta SolicitudCreditoVenta[] @relation("ClienteToSolicitudCreditoVenta")
+
   @@unique([dpi, id]) // Índice compuesto que permite múltiples null en dpi
 }
 
@@ -758,6 +782,8 @@ model Venta {
   garantias             Garantia[]
   referenciaPago        String?          @unique
   tipoComprobante       TipoComprobante  @default(RECIBO)
+
+  solicitudCredito SolicitudCreditoVenta? @relation("SolicitudCreditoVentaToVenta")
 
   @@unique([imei, id]) // Permite null en `imei` sin conflicto de unicidad 
 }
@@ -872,92 +898,6 @@ model RegistroGarantia {
   actualizadoEn DateTime @updatedAt
 }
 
-enum EstadoGarantia {
-  RECIBIDO
-  DIAGNOSTICO
-  EN_REPARACION
-  ESPERANDO_PIEZAS
-  REPARADO
-  REEMPLAZADO
-  RECHAZADO_CLIENTE
-  CANCELADO
-  CERRADO
-}
-
-model VentaCuota {
-  id                   Int         @id @default(autoincrement())
-  clienteId            Int // Cliente relacionado
-  cliente              Cliente     @relation(fields: [clienteId], references: [id], onDelete: Cascade)
-  usuarioId            Int // Usuario que autorizó la venta
-  usuario              Usuario     @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
-  sucursalId           Int // Sucursal donde se realizó la venta
-  sucursal             Sucursal    @relation(fields: [sucursalId], references: [id], onDelete: Cascade)
-  totalVenta           Float // Monto total de la venta
-  cuotaInicial         Float // Monto inicial pagado
-  cuotasTotales        Int // Número total de cuotas
-  fechaInicio          DateTime    @default(now()) // Fecha en que se inició la venta a crédito
-  estado               EstadoCuota @default(ACTIVA) // Enum para manejar el estado de la venta
-  cuotas               Cuota[] // Relación con las cuotas individuales
-  // productos           VentaProducto[] // Relación con los productos vendidos
-  creadoEn             DateTime    @default(now())
-  actualizadoEn        DateTime    @updatedAt
-  dpi                  String?
-  testigos             Json
-  fechaContrato        DateTime    @default(now()) //
-  montoVenta           Float
-  garantiaMeses        Int
-  totalPagado          Float       @default(0) // Total pagado hasta el momento (se actualizará con cada pago)
-  diasEntrePagos       Int         @default(0)
-  interes              Int         @default(0) // Porcentaje de interés aplicado al crédito (por ejemplo, 15 para 15%)
-  comentario           String?
-  //
-  // Relación directa con la venta original
-  ventaId              Int?        @unique
-  venta                Venta?      @relation(fields: [ventaId], references: [id], onDelete: Cascade)
-  montoTotalConInteres Int?
-  //PAGOS QUE TIENE QUE HACER
-}
-
-model Cuota {
-  id               Int        @id @default(autoincrement())
-  ventaCuotaId     Int // Relación con la venta a cuotas
-  ventaCuota       VentaCuota @relation(fields: [ventaCuotaId], references: [id], onDelete: Cascade)
-  monto            Float // Monto de la cuota
-  fechaVencimiento DateTime? // Fecha en que debe realizarse el pago
-  fechaPago        DateTime? // ya no es default, sino que la actualizaremos cuando hagamos el pago
-  estado           EstadoPago @default(PENDIENTE) // Estado de la cuota
-  usuarioId        Int? // Usuario que recibió el pago (null si no se ha pagado)
-  usuario          Usuario?   @relation(fields: [usuarioId], references: [id], onDelete: SetNull)
-  creadoEn         DateTime   @default(now())
-  actualizadoEn    DateTime   @updatedAt
-  comentario       String?
-  //1. MONTO QUE TIENE QUE PAGAR
-  montoEsperado    Float?
-  // 2. Saldo pendiente (calculable)
-}
-
-enum EstadoPago {
-  PENDIENTE
-  PAGADA
-  ATRASADA
-}
-
-enum EstadoCuota {
-  ACTIVA
-  COMPLETADA
-  CANCELADA
-}
-
-model PlantillaComprobante {
-  id            Int       @id @default(autoincrement())
-  nombre        String // Nombre o tipo de plantilla (Ej. "Plantilla Cuota Teléfonos")
-  texto         String // Texto enriquecido de la plantilla (puede ser un string largo o HTML)
-  sucursalId    Int?
-  sucursal      Sucursal? @relation(fields: [sucursalId], references: [id], onDelete: SetNull)
-  creadoEn      DateTime  @default(now())
-  actualizadoEn DateTime  @updatedAt
-}
-
 // ============================================================================
 // [S7] TALLER / REPARACIONES
 // ============================================================================
@@ -1057,8 +997,9 @@ model RegistroCaja {
   // (Puede ser redundante si confías en los movimientos de cierre)
   depositado Boolean @default(false)
 
-  creadoEn      DateTime @default(now())
-  actualizadoEn DateTime @updatedAt
+  creadoEn      DateTime       @default(now())
+  actualizadoEn DateTime       @updatedAt
+  abonosCredito AbonoCredito[] @relation("Caja_AbonosCredito") // <— backref
 
   // @@index([sucursalId, estado])
   @@index([sucursalId, estado, fechaCierre])
@@ -1816,17 +1757,6 @@ enum CuotaEstado {
   VENCIDA
 }
 
-enum InteresTipo {
-  NONE
-  SIMPLE
-  COMPUESTO
-}
-
-enum PlanCuotaModo {
-  IGUALES
-  PRIMERA_MAYOR
-}
-
 model CondicionPago {
   id              Int           @id @default(autoincrement())
   nombre          String
@@ -1992,4 +1922,327 @@ model CxPPagoCuota {
 enum EstadoTicket {
   ACTIVO // El sorteo está en curso
   INACTIVO // El sorteo ha finalizado
+}
+
+// ============================================================================
+// [S18] APROVACION CREDITO VENTA
+// ============================================================================
+model SolicitudCreditoVenta {
+  id Int @id @default(autoincrement())
+
+  // Contexto de la venta/cliente/sucursal
+  sucursalId Int
+  sucursal   Sucursal @relation("SucursalToSolicitudCreditoVenta", fields: [sucursalId], references: [id], onDelete: Cascade)
+
+  clienteId Int?
+  cliente   Cliente? @relation("ClienteToSolicitudCreditoVenta", fields: [clienteId], references: [id], onDelete: SetNull)
+
+  // Snapshot de datos del cliente final (si no está registrado)
+  nombreCliente    String?
+  telefonoCliente  String?
+  direccionCliente String?
+
+  // Propuesta económica
+  totalPropuesto          Float
+  cuotaInicialPropuesta   Float         @default(0)
+  cuotasTotalesPropuestas Int
+  interesTipo             InteresTipo   @default(NONE)
+  interesPorcentaje       Int           @default(0) // p.ej. 15 => 15%
+  planCuotaModo           PlanCuotaModo @default(IGUALES)
+  diasEntrePagos          Int           @default(30)
+  fechaPrimeraCuota       DateTime?
+
+  comentario    String?
+  garantiaMeses Int     @default(0)
+  testigos      Json?
+
+  // Flujo de aprobación (mismo patrón que SolicitudPrecio)
+  estado          EstadoSolicitud @default(PENDIENTE)
+  solicitadoPorId Int?
+  solicitadoPor   Usuario?        @relation("CreditoSolicitadoPor", fields: [solicitadoPorId], references: [id], onDelete: SetNull)
+
+  aprobadoPorId Int?
+  aprobadoPor   Usuario? @relation("CreditoAprobadoPor", fields: [aprobadoPorId], references: [id], onDelete: SetNull)
+
+  fechaSolicitud DateTime  @default(now())
+  fechaRespuesta DateTime?
+  motivoRechazo  String?
+
+  // En caso de aprobación, se liga a la Venta creada
+  ventaId Int?   @unique
+  venta   Venta? @relation("SolicitudCreditoVentaToVenta", fields: [ventaId], references: [id], onDelete: SetNull)
+
+  // Líneas e historial
+  lineas    SolicitudCreditoVentaLinea[]
+  historial SolicitudCreditoVentaHistorial[]
+
+  creadoEn      DateTime @default(now())
+  actualizadoEn DateTime @updatedAt
+
+  @@index([estado, sucursalId, fechaSolicitud])
+  @@index([solicitadoPorId])
+}
+
+model SolicitudCreditoVentaLinea {
+  id          Int                   @id @default(autoincrement())
+  solicitudId Int
+  solicitud   SolicitudCreditoVenta @relation(fields: [solicitudId], references: [id], onDelete: Cascade)
+
+  productoId Int?
+  producto   Producto? @relation("SolicitudCreditoLineaToProducto", fields: [productoId], references: [id], onDelete: SetNull)
+
+  presentacionId Int?
+  presentacion   ProductoPresentacion? @relation("SolicitudCreditoLineaToPresentacion", fields: [presentacionId], references: [id], onDelete: SetNull)
+
+  // Cantidad / precio
+  cantidad       Int
+  precioUnitario Float // precio aplicado a la propuesta
+  precioListaRef Float? // opcional: precio de lista al momento (auditoría)
+  descuento      Float? // opcional por línea
+  subtotal       Float
+
+  // Snapshots opcionales (por si luego cambian nombres/códigos)
+  nombreProductoSnapshot     String?
+  presentacionNombreSnapshot String?
+  codigoBarrasSnapshot       String?
+
+  creadoEn      DateTime @default(now())
+  actualizadoEn DateTime @updatedAt
+
+  @@index([solicitudId])
+}
+
+enum AccionSolicitudCredito {
+  CREADA
+  EDITADA
+  APROBADA
+  RECHAZADA
+  CANCELADA
+}
+
+model SolicitudCreditoVentaHistorial {
+  id          Int                   @id @default(autoincrement())
+  solicitudId Int
+  solicitud   SolicitudCreditoVenta @relation(fields: [solicitudId], references: [id], onDelete: Cascade)
+
+  accion     AccionSolicitudCredito
+  comentario String?
+  actorId    Int?
+  actor      Usuario?               @relation("ActorSolicitudCredito", fields: [actorId], references: [id], onDelete: SetNull)
+
+  fecha DateTime @default(now())
+
+  @@index([solicitudId, fecha])
+}
+
+// ============================================================================
+// [19] CLIENTES Y VENTAS (incluye Garantías y Ventas a Cuotas)
+// ============================================================================
+enum EstadoGarantia {
+  RECIBIDO
+  DIAGNOSTICO
+  EN_REPARACION
+  ESPERANDO_PIEZAS
+  REPARADO
+  REEMPLAZADO
+  RECHAZADO_CLIENTE
+  CANCELADO
+  CERRADO
+}
+
+enum FrecuenciaPago {
+  SEMANAL
+  QUINCENAL
+  MENSUAL
+}
+
+enum InteresTipo {
+  NONE
+  SIMPLE
+  COMPUESTO
+}
+
+enum PlanCuotaModo {
+  IGUALES
+  PRIMERA_MAYOR
+  CRECIENTES
+  DECRECIENTES
+}
+
+model VentaCuota {
+  id         Int      @id @default(autoincrement())
+  clienteId  Int
+  cliente    Cliente  @relation(fields: [clienteId], references: [id], onDelete: Cascade)
+  usuarioId  Int
+  usuario    Usuario  @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  sucursalId Int
+  sucursal   Sucursal @relation(fields: [sucursalId], references: [id], onDelete: Cascade)
+
+  // Mantenemos tus campos:
+  totalVenta           Float
+  cuotaInicial         Float
+  cuotasTotales        Int
+  fechaInicio          DateTime    @default(now())
+  estado               EstadoCuota @default(ACTIVA)
+  cuotas               Cuota[]
+  creadoEn             DateTime    @default(now())
+  actualizadoEn        DateTime    @updatedAt
+  dpi                  String?
+  testigos             Json
+  fechaContrato        DateTime    @default(now())
+  montoVenta           Float
+  garantiaMeses        Int
+  totalPagado          Float       @default(0)
+  diasEntrePagos       Int         @default(0)
+  interes              Int         @default(0)
+  comentario           String?
+  ventaId              Int?        @unique
+  venta                Venta?      @relation(fields: [ventaId], references: [id], onDelete: Cascade)
+  montoTotalConInteres Float?
+
+  // ======= NUEVO: parametrización del plan =======
+  frecuenciaPago   FrecuenciaPago @default(MENSUAL) // NEW
+  planCuotaModo    PlanCuotaModo  @default(IGUALES) // NEW
+  interesTipo      InteresTipo    @default(NONE) // NEW
+  diasGracia       Int            @default(0) // NEW
+  moraDiaria       Float          @default(0) // NEW (fija por día; si usas % puedes guardarlo aquí también)
+  fechaProximoPago DateTime? // NEW
+  numeroCredito    String?        @unique // NEW (código legible opcional)
+
+  historial VentaCuotaHistorial[] @relation("Credito_Historial") // <— backref
+  abonos    AbonoCredito[]        @relation("Credito_Abonos") // <— backref
+
+  // ======= Índices útiles =======
+  @@index([estado, sucursalId, fechaInicio])
+}
+
+model Cuota {
+  id             Int        @id @default(autoincrement())
+  ventaCuotaId   Int
+  ventaCuota     VentaCuota @relation(fields: [ventaCuotaId], references: [id], onDelete: Cascade)
+  // Orden y montos programados:
+  numero         Int // NEW: 1..N
+  monto          Float
+  montoEsperado  Float? // lo puedes unificar o mantener como referencia
+  montoCapital   Float? // NEW: si quieres desglose programado
+  montoInteres   Float? // NEW: si quieres desglose programado
+  // Seguimiento de pago:
+  montoPagado    Float      @default(0) // NEW: rápido para queries
+  saldoPendiente Float? // NEW: si prefieres persistir (o calc on-the-fly)
+  moraAcumulada  Float      @default(0) // NEW
+
+  fechaVencimiento DateTime?
+  fechaPago        DateTime?
+  estado           EstadoPago @default(PENDIENTE)
+
+  usuarioId Int?
+  usuario   Usuario? @relation(fields: [usuarioId], references: [id], onDelete: SetNull)
+
+  comentario    String?
+  creadoEn      DateTime     @default(now())
+  actualizadoEn DateTime     @updatedAt
+  abonos        AbonoCuota[] @relation("Cuota_Abonos") // <— backref
+
+  @@unique([ventaCuotaId, numero]) // NEW: cada cuota ordenada única
+  @@index([ventaCuotaId, estado, fechaVencimiento]) // NEW
+  @@index([fechaVencimiento]) // NEW
+}
+
+model AbonoCredito {
+  id           Int        @id @default(autoincrement())
+  ventaCuotaId Int
+  ventaCuota   VentaCuota @relation("Credito_Abonos", fields: [ventaCuotaId], references: [id], onDelete: Cascade)
+
+  sucursalId Int
+  sucursal   Sucursal @relation("Sucursal_AbonosCredito", fields: [sucursalId], references: [id], onDelete: Cascade)
+
+  registroCajaId Int?
+  registroCaja   RegistroCaja? @relation("Caja_AbonosCredito", fields: [registroCajaId], references: [id], onDelete: SetNull)
+
+  usuarioId Int
+  usuario   Usuario @relation("Usuario_AbonosCredito", fields: [usuarioId], references: [id], onDelete: Cascade)
+
+  metodoPago     MetodoPago
+  referenciaPago String?
+  fechaAbono     DateTime   @default(now())
+
+  montoTotal Float
+
+  detalles AbonoCuota[]
+
+  creadoEn      DateTime @default(now())
+  actualizadoEn DateTime @updatedAt
+
+  @@index([ventaCuotaId, fechaAbono])
+  @@index([sucursalId, fechaAbono])
+}
+
+model AbonoCuota {
+  id      Int          @id @default(autoincrement())
+  abonoId Int
+  abono   AbonoCredito @relation(fields: [abonoId], references: [id], onDelete: Cascade)
+
+  cuotaId Int
+  cuota   Cuota @relation("Cuota_Abonos", fields: [cuotaId], references: [id], onDelete: Cascade)
+
+  // Desglose real aplicado:
+  montoCapital Float @default(0)
+  montoInteres Float @default(0)
+  montoMora    Float @default(0)
+  montoTotal   Float // redundante pero práctico en reportes
+
+  @@unique([abonoId, cuotaId])
+  @@index([cuotaId])
+}
+
+enum EstadoPago {
+  PENDIENTE
+  PARCIAL // NEW
+  PAGADA
+  ATRASADA
+}
+
+enum EstadoCuota {
+  ACTIVA
+  COMPLETADA
+  CANCELADA
+  EN_MORA // NEW
+  REPROGRAMADA // NEW
+  PAUSADA // NEW
+}
+
+model PlantillaComprobante {
+  id            Int       @id @default(autoincrement())
+  nombre        String // Nombre o tipo de plantilla (Ej. "Plantilla Cuota Teléfonos")
+  texto         String // Texto enriquecido de la plantilla (puede ser un string largo o HTML)
+  sucursalId    Int?
+  sucursal      Sucursal? @relation(fields: [sucursalId], references: [id], onDelete: SetNull)
+  creadoEn      DateTime  @default(now())
+  actualizadoEn DateTime  @updatedAt
+}
+
+enum AccionCredito {
+  CREADO
+  CAMBIO_ESTADO
+  ABONO
+  REPROGRAMADO
+  MORA_REGISTRADA
+  MORA_CONDONADA
+  AJUSTE_MANUAL
+}
+
+model VentaCuotaHistorial {
+  id           Int        @id @default(autoincrement())
+  ventaCuotaId Int
+  ventaCuota   VentaCuota @relation("Credito_Historial", fields: [ventaCuotaId], references: [id], onDelete: Cascade)
+
+  accion     AccionCredito
+  comentario String?
+
+  usuarioId Int?
+  usuario   Usuario? @relation("Usuario_HistorialCredito", fields: [usuarioId], references: [id], onDelete: SetNull)
+
+  fecha DateTime @default(now())
+
+  @@index([ventaCuotaId, fecha])
 }

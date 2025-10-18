@@ -68,6 +68,7 @@ import { ComprasModule } from './compras/compras.module';
 import { RecepcionesModule } from './compras/recepciones/recepciones.module';
 import { StockThresholdPresentacionModule } from './stock-threshold-presentacion/stock-threshold-presentacion.module';
 import { ImagenesPresentacionesModule } from './imagenes-presentaciones/imagenes-presentaciones.module';
+import { CreditosVentaSolicitudesModule } from './creditos-venta-solicitudes/creditos-venta-solicitudes.module';
 
 @Module({
   imports: [
@@ -138,6 +139,7 @@ import { ImagenesPresentacionesModule } from './imagenes-presentaciones/imagenes
     RecepcionesModule,
     StockThresholdPresentacionModule,
     ImagenesPresentacionesModule,
+    CreditosVentaSolicitudesModule,
   ],
   controllers: [AppController],
   providers: [AppService, CloudinaryProvider, SaldosServiceService],

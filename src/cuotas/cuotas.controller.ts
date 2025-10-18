@@ -24,6 +24,11 @@ import { DeleteCuotaPaymentDTO } from './dto/delete-one-payment-cuota.dto';
 export class CuotasController {
   constructor(private readonly cuotasService: CuotasService) {}
 
+  /**
+   * Generador de registro principal de credito
+   * @param createCuotaDto DTO para generar un credito de venta (envia cuotas listas desde la UI)
+   * @returns
+   */
   @Post()
   // @UsePipes(new ValidationPipe({ transform: true }))
   create(@Body() createCuotaDto: CreateVentaCuotaDto) {
