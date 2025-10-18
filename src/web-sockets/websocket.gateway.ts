@@ -72,7 +72,6 @@ export class LegacyGateway implements OnGatewayConnection, OnGatewayDisconnect {
   handleDisconnect(client: Socket) {
     const userID = this.getUserIDFromClient(client);
     const rol = this.getUserRoleFromClient(client);
-
     // Eliminamos el cliente de todos los mapas
     if (!isNaN(userID)) {
       this.usuarios.delete(userID);

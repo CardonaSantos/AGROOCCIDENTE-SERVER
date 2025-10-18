@@ -1938,9 +1938,9 @@ model SolicitudCreditoVenta {
   cliente   Cliente? @relation("ClienteToSolicitudCreditoVenta", fields: [clienteId], references: [id], onDelete: SetNull)
 
   // Snapshot de datos del cliente final (si no está registrado)
-  nombreCliente    String?
-  telefonoCliente  String?
-  direccionCliente String?
+  nombreCliente    String?//no usamos de momento
+  telefonoCliente  String?//no usamos de momento
+  direccionCliente String?//no usamos de momento
 
   // Propuesta económica
   totalPropuesto          Float
@@ -1953,8 +1953,8 @@ model SolicitudCreditoVenta {
   fechaPrimeraCuota       DateTime?
 
   comentario    String?
-  garantiaMeses Int     @default(0)
-  testigos      Json?
+  garantiaMeses Int     @default(0)//no usamos de momento
+  testigos      Json?//no usamos de momento
 
   // Flujo de aprobación (mismo patrón que SolicitudPrecio)
   estado          EstadoSolicitud @default(PENDIENTE)
@@ -2002,9 +2002,9 @@ model SolicitudCreditoVentaLinea {
   subtotal       Float
 
   // Snapshots opcionales (por si luego cambian nombres/códigos)
-  nombreProductoSnapshot     String?
-  presentacionNombreSnapshot String?
-  codigoBarrasSnapshot       String?
+  nombreProductoSnapshot     String?//no usamos de momento
+  presentacionNombreSnapshot String?//no usamos de momento
+  codigoBarrasSnapshot       String?//no usamos de momento
 
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
@@ -2038,36 +2038,6 @@ model SolicitudCreditoVentaHistorial {
 // ============================================================================
 // [19] CLIENTES Y VENTAS (incluye Garantías y Ventas a Cuotas)
 // ============================================================================
-enum EstadoGarantia {
-  RECIBIDO
-  DIAGNOSTICO
-  EN_REPARACION
-  ESPERANDO_PIEZAS
-  REPARADO
-  REEMPLAZADO
-  RECHAZADO_CLIENTE
-  CANCELADO
-  CERRADO
-}
-
-enum FrecuenciaPago {
-  SEMANAL
-  QUINCENAL
-  MENSUAL
-}
-
-enum InteresTipo {
-  NONE
-  SIMPLE
-  COMPUESTO
-}
-
-enum PlanCuotaModo {
-  IGUALES
-  PRIMERA_MAYOR
-  CRECIENTES
-  DECRECIENTES
-}
 
 model VentaCuota {
   id         Int      @id @default(autoincrement())
@@ -2195,22 +2165,6 @@ model AbonoCuota {
   @@index([cuotaId])
 }
 
-enum EstadoPago {
-  PENDIENTE
-  PARCIAL // NEW
-  PAGADA
-  ATRASADA
-}
-
-enum EstadoCuota {
-  ACTIVA
-  COMPLETADA
-  CANCELADA
-  EN_MORA // NEW
-  REPROGRAMADA // NEW
-  PAUSADA // NEW
-}
-
 model PlantillaComprobante {
   id            Int       @id @default(autoincrement())
   nombre        String // Nombre o tipo de plantilla (Ej. "Plantilla Cuota Teléfonos")
@@ -2219,16 +2173,6 @@ model PlantillaComprobante {
   sucursal      Sucursal? @relation(fields: [sucursalId], references: [id], onDelete: SetNull)
   creadoEn      DateTime  @default(now())
   actualizadoEn DateTime  @updatedAt
-}
-
-enum AccionCredito {
-  CREADO
-  CAMBIO_ESTADO
-  ABONO
-  REPROGRAMADO
-  MORA_REGISTRADA
-  MORA_CONDONADA
-  AJUSTE_MANUAL
 }
 
 model VentaCuotaHistorial {
@@ -2245,4 +2189,61 @@ model VentaCuotaHistorial {
   fecha DateTime @default(now())
 
   @@index([ventaCuotaId, fecha])
+}
+
+enum EstadoPago {
+  PENDIENTE
+  PARCIAL // NEW
+  PAGADA
+  ATRASADA
+}
+
+enum EstadoCuota {
+  ACTIVA
+  COMPLETADA
+  CANCELADA
+  EN_MORA // NEW
+  REPROGRAMADA // NEW
+  PAUSADA // NEW
+}
+
+enum AccionCredito {
+  CREADO
+  CAMBIO_ESTADO
+  ABONO
+  REPROGRAMADO
+  MORA_REGISTRADA
+  MORA_CONDONADA
+  AJUSTE_MANUAL
+}
+
+enum EstadoGarantia {
+  RECIBIDO
+  DIAGNOSTICO
+  EN_REPARACION
+  ESPERANDO_PIEZAS
+  REPARADO
+  REEMPLAZADO
+  RECHAZADO_CLIENTE
+  CANCELADO
+  CERRADO
+}
+
+enum FrecuenciaPago {
+  SEMANAL
+  QUINCENAL
+  MENSUAL
+}
+
+enum InteresTipo {
+  NONE
+  SIMPLE
+  COMPUESTO
+}
+
+enum PlanCuotaModo {
+  IGUALES
+  PRIMERA_MAYOR
+  CRECIENTES
+  DECRECIENTES
 }
