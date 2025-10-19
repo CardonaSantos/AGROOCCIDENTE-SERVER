@@ -1,96 +1,65 @@
+// dto/create-credito-authorization.dto.ts
+import {
+  IsArray,
+  IsEnum,
+  IsInt,
+  IsNumber,
+  IsOptional,
+  IsString,
+  ValidateNested,
+  ArrayMinSize,
+  IsISO8601,
+  IsBoolean,
+} from 'class-validator';
+import { Type } from 'class-transformer';
 import { EstadoSolicitud, InteresTipo, PlanCuotaModo } from '@prisma/client';
-import { IsArray, IsEnum, IsInt, IsOptional, IsString } from 'class-validator';
 
-export type flagItem = 'PRODUCTO' | 'PRESENTACION';
-export class CreateCreditoAutorizationDto {
-  @IsInt({
-    message: 'Sucursal ID no válido',
-  })
-  sucursalId: number;
-
-  @IsInt()
-  clienteId: number;
-  @IsInt()
-  totalPropuesto: number; //total credito
-
-  @IsInt()
-  @IsOptional()
-  cuotaInicialPropuesta: number;
-
-  @IsInt()
-  @IsOptional()
-  cuotasTotalesPropuestas: number;
-
-  @IsEnum(InteresTipo)
-  interesTipo: InteresTipo;
-
-  @IsInt()
-  interesPorcentaje: number;
-
-  @IsEnum(PlanCuotaModo)
-  planCuotaModo: PlanCuotaModo;
-
-  @IsInt()
-  diasEntrePagos: number;
-
-  @IsString()
-  fechaPrimeraCuota: string;
-
-  @IsString()
-  comentario: string;
-
-  @IsEnum(EstadoSolicitud)
-  @IsOptional()
-  estado: EstadoSolicitud;
-
-  @IsInt()
-  solicitadoPorId: number;
-
-  @IsInt()
-  @IsOptional()
-  aprobadoPorId: number;
-
-  @IsString()
-  @IsOptional()
-  fechaRespuesta: string;
-
-  @IsString()
-  @IsOptional()
-  motivoRechazo: string;
-
-  @IsInt()
-  @IsOptional()
-  ventaId: number;
-
-  @IsArray({
-    always: true,
-  })
-  lineas: SolicitudCreditoVentaLinea[];
+export class CuotaPropuestaDto {
+  @IsInt() numero: number; // 0 si ENGANCHE
+  @IsISO8601() fechaISO: string;
+  @IsNumber() monto: number;
+  @IsOptional() @IsEnum(['ENGANCHE', 'NORMAL'] as any) etiqueta?:
+    | 'ENGANCHE'
+    | 'NORMAL';
+  @IsOptional() @IsEnum(['AUTO', 'MANUAL'] as any) origen?: 'AUTO' | 'MANUAL';
+  @IsOptional() @IsBoolean() esManual?: boolean;
+  @IsOptional() @IsNumber() montoCapital?: number;
+  @IsOptional() @IsNumber() montoInteres?: number;
 }
 
-export class SolicitudCreditoVentaLinea {
-  @IsInt()
-  @IsOptional()
-  solicitudId: number;
+export class CreateCreditoAutorizationDto {
+  @IsInt() sucursalId: number;
+  @IsInt() clienteId: number;
 
-  @IsInt()
-  @IsOptional()
-  productoId: number;
+  @IsNumber() totalPropuesto: number; // principal (suma productos)
+  @IsOptional() @IsNumber() cuotaInicialPropuesta?: number;
+  @IsInt() cuotasTotalesPropuestas: number;
 
-  @IsInt()
-  @IsOptional()
-  presentacionId: number;
+  @IsEnum(InteresTipo) interesTipo: InteresTipo;
+  @IsInt() interesPorcentaje: number;
+  @IsEnum(PlanCuotaModo) planCuotaModo: PlanCuotaModo;
+  @IsInt() diasEntrePagos: number;
+  @IsOptional() @IsISO8601() fechaPrimeraCuota?: string;
 
-  @IsInt()
-  cantidad: number;
+  @IsOptional() @IsString() comentario?: string;
 
-  @IsInt()
-  precioUnitario: number;
+  @IsOptional() @IsEnum(EstadoSolicitud) estado?: EstadoSolicitud;
+  @IsInt() solicitadoPorId: number;
 
-  @IsInt()
-  precioListaRef: number; //total de la lista de items
+  // ====== NUEVO: persistimos plan propuesto ======
+  @IsArray()
+  @ArrayMinSize(1)
+  @ValidateNested({ each: true })
+  @Type(() => CuotaPropuestaDto)
+  cuotasPropuestas: CuotaPropuestaDto[];
 
-  @IsInt()
-  subtotal: number; //total del credito(con interés y cuotas, diferente de los productos lista)
-  flagItem: flagItem;
+  // lineas se mantiene igual a como ya la estás enviando:
+  @IsArray() lineas: {
+    productoId?: number;
+    presentacionId?: number;
+    cantidad: number;
+    precioUnitario: number;
+    precioListaRef: number;
+    subtotal: number;
+  }[];
 }

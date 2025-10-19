@@ -6,10 +6,12 @@ import {
   Patch,
   Param,
   Delete,
+  Query,
 } from '@nestjs/common';
 import { CreditoAutorizationService } from './credito-autorization.service';
 import { CreateCreditoAutorizationDto } from './dto/create-credito-autorization.dto';
 import { UpdateCreditoAutorizationDto } from './dto/update-credito-autorization.dto';
+import { GetCreditoAutorizacionesDto } from './dto/get-credito-autorizaciones.dto';
 
 @Controller('credito-authorization')
 export class CreditoAutorizationController {
@@ -22,8 +24,13 @@ export class CreditoAutorizationController {
     return this.creditoAutorizationService.create(createCreditoAutorizationDto);
   }
 
-  @Get('get-authorization-records')
-  getAuthorizationsRecords() {
-    return this.creditoAutorizationService.getAutorizaciones();
+  @Get()
+  async list(@Query() query: GetCreditoAutorizacionesDto) {
+    return this.creditoAutorizationService.getAutorizaciones(query);
+  }
+
+  @Delete('delete-all')
+  async deleteAll() {
+    return this.creditoAutorizationService.deleteAll();
   }
 }

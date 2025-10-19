@@ -1972,7 +1972,11 @@ model SolicitudCreditoVenta {
   ventaId Int?   @unique
   venta   Venta? @relation("SolicitudCreditoVentaToVenta", fields: [ventaId], references: [id], onDelete: SetNull)
 
-  // Líneas e historial
+  //lineas cuotas custom desde UI
+  cuotasPropuestas SolicitudCreditoVentaCuota[] // <— NUEVA relación
+
+
+  // Líneas e historial  
   lineas    SolicitudCreditoVentaLinea[]
   historial SolicitudCreditoVentaHistorial[]
 
@@ -1982,6 +1986,30 @@ model SolicitudCreditoVenta {
   @@index([estado, sucursalId, fechaSolicitud])
   @@index([solicitadoPorId])
 }
+
+model SolicitudCreditoVentaCuota {
+  id           Int                      @id @default(autoincrement())
+  solicitudId  Int
+  solicitud    SolicitudCreditoVenta    @relation(fields: [solicitudId], references: [id], onDelete: Cascade)
+
+  numero       Int                      // 0 = enganche si aplica
+  fecha        DateTime
+  monto        Float                    // monto total de esa cuota
+  etiqueta     TipoCuotaPropuesta       @default(NORMAL)
+  origen       OrigenCuotaPropuesta     @default(AUTO)
+  esManual     Boolean                  @default(false) // si la UI la editó
+
+  // opcionales por si quieres mostrar desglose:
+  montoCapital Float?
+  montoInteres Float?
+
+  creadoEn      DateTime @default(now())
+  actualizadoEn DateTime @updatedAt
+
+  @@unique([solicitudId, numero])
+  @@index([solicitudId, fecha])
+}
+
 
 model SolicitudCreditoVentaLinea {
   id          Int                   @id @default(autoincrement())
@@ -2033,6 +2061,16 @@ model SolicitudCreditoVentaHistorial {
   fecha DateTime @default(now())
 
   @@index([solicitudId, fecha])
+}
+
+enum TipoCuotaPropuesta {
+  NORMAL
+  ENGANCHE
+}
+
+enum OrigenCuotaPropuesta {
+  AUTO
+  MANUAL
 }
 
 // ============================================================================

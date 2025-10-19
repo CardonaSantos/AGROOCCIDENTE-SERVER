@@ -1,9 +1,10 @@
-import { Prisma, SolicitudCreditoVenta } from '@prisma/client';
+// selects/credit-authorization.select.ts
+import { Prisma } from '@prisma/client';
 
 export const selectCreditAutorization = {
   id: true,
-  creadoEn: true,
-  actualizadoEn: true,
+  sucursalId: true,
+  clienteId: true,
   comentario: true,
   cuotaInicialPropuesta: true,
   cuotasTotalesPropuestas: true,
@@ -15,13 +16,14 @@ export const selectCreditAutorization = {
   totalPropuesto: true,
   planCuotaModo: true,
   fechaPrimeraCuota: true,
-  sucursal: {
-    select: {
-      id: true,
-      nombre: true,
-      direccion: true,
-    },
+  creadoEn: true,
+  actualizadoEn: true,
+
+  solicitadoPor: {
+    select: { id: true, nombre: true, correo: true, rol: true },
   },
+  aprobadoPor: { select: { id: true, nombre: true, correo: true, rol: true } },
+  sucursal: { select: { id: true, nombre: true, direccion: true } },
   cliente: {
     select: {
       id: true,
@@ -31,22 +33,7 @@ export const selectCreditAutorization = {
       direccion: true,
     },
   },
-  aprobadoPor: {
-    select: {
-      id: true,
-      nombre: true,
-      correo: true,
-      rol: true,
-    },
-  },
-  solicitadoPor: {
-    select: {
-      id: true,
-      nombre: true,
-      correo: true,
-      rol: true,
-    },
-  },
+
   lineas: {
     select: {
       id: true,
@@ -61,10 +48,9 @@ export const selectCreditAutorization = {
           codigoProducto: true,
           descripcion: true,
           imagenesProducto: {
-            select: {
-              id: true,
-              url: true,
-            },
+            select: { id: true, url: true },
+            orderBy: { id: 'asc' },
+            take: 1,
           },
         },
       },
@@ -75,14 +61,29 @@ export const selectCreditAutorization = {
           codigoBarras: true,
           descripcion: true,
           imagenesPresentacion: {
-            select: {
-              id: true,
-              url: true,
-            },
+            select: { id: true, url: true },
+            orderBy: { id: 'asc' },
+            take: 1,
           },
         },
       },
     },
+  },
+
+  // ===== NUEVO: calendario propuesto persistido
+  cuotasPropuestas: {
+    select: {
+      id: true,
+      numero: true,
+      fecha: true,
+      monto: true,
+      etiqueta: true, // 'ENGANCHE' | 'NORMAL'
+      origen: true, // 'AUTO' | 'MANUAL'
+      esManual: true,
+      montoCapital: true,
+      montoInteres: true,
+    },
+    orderBy: { numero: 'asc' },
   },
 } satisfies Prisma.SolicitudCreditoVentaSelect;
 
