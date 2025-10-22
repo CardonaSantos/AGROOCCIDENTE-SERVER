@@ -422,6 +422,8 @@ model PrecioProducto {
   // NUEVO: si viene, el precio aplica a ESA presentación
   presentacionId Int?
   presentacion   ProductoPresentacion? @relation(fields: [presentacionId], references: [id], onDelete: Cascade)
+  //para persistencia en lineas de credito auth
+  lineasSeleccionadas SolicitudCreditoVentaLinea[] @relation("PrecioSeleccionadoEnSolicitudLinea")
 
   precio        Decimal      @db.Decimal(12, 4)
   creadoPorId   Int?
@@ -2025,6 +2027,10 @@ model SolicitudCreditoVentaLinea {
   // Cantidad / precio
   cantidad       Int
   precioUnitario Float // precio aplicado a la propuesta
+
+  precioSeleccionadoId   Int
+  precioSeleccionado     PrecioProducto @relation("PrecioSeleccionadoEnSolicitudLinea", fields: [precioSeleccionadoId], references: [id], onDelete: Restrict)
+
   precioListaRef Float? // opcional: precio de lista al momento (auditoría)
   descuento      Float? // opcional por línea
   subtotal       Float

@@ -41,6 +41,12 @@ export const selectCreditAutorization = {
       precioUnitario: true,
       subtotal: true,
       precioListaRef: true,
+      //nuevos
+      precioSeleccionado: true,
+      precioSeleccionadoId: true,
+      productoId: true,
+      presentacionId: true,
+
       producto: {
         select: {
           id: true,

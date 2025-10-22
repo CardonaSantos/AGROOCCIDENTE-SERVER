@@ -23,5 +23,6 @@ import { PrismaModule } from 'src/prisma/prisma.module';
     HistorialStockTrackerService,
     UtilidadesService, // si aún lo usas directo aquí
   ],
+  exports: [VentaService],
 })
 export class VentaModule {}

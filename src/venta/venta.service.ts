@@ -35,7 +35,7 @@ export class VentaService {
     private readonly cajaService: CajaService,
   ) {}
 
-  async create(createVentaDto: CreateVentaDto) {
+  async create(createVentaDto: CreateVentaDto, tx: Prisma.TransactionClient) {
     const {
       sucursalId,
       clienteId,
@@ -56,406 +56,388 @@ export class VentaService {
     this.logger.log(
       `DTO recibido en generar ventas:\n${JSON.stringify(createVentaDto, null, 2)}`,
     );
+
     const referenciaPagoValid =
       referenciaPago && referenciaPago.trim() !== ''
         ? referenciaPago.trim()
         : null;
 
     try {
-      return await this.prisma.$transaction(async (tx) => {
-        // ===== Usuarios para notificaciones (igual)
-        const usuariosNotif = await tx.usuario.findMany({
-          where: { rol: { in: ['ADMIN', 'VENDEDOR'] } },
+      // ===== Usuarios para notificaciones
+      const usuariosNotif = await tx.usuario.findMany({
+        where: { rol: { in: ['ADMIN', 'VENDEDOR'] } },
+      });
+      const usuariosNotifIds = usuariosNotif.map((u) => u.id);
+
+      // ===== Cliente
+      let clienteConnect: { connect: { id: number } } | undefined;
+      if (clienteId) {
+        clienteConnect = { connect: { id: clienteId } };
+      } else if (nombre) {
+        const nuevo = await tx.cliente.create({
+          data: { nombre, dpi, telefono, direccion, observaciones, apellidos },
         });
-        const usuariosNotifIds = usuariosNotif.map((u) => u.id);
+        clienteConnect = { connect: { id: nuevo.id } };
+      }
 
-        // ===== Cliente (igual)
-        let clienteConnect: { connect: { id: number } } | undefined;
-        if (clienteId) {
-          clienteConnect = { connect: { id: clienteId } };
-        } else if (nombre) {
-          const nuevo = await tx.cliente.create({
-            data: {
-              nombre,
-              dpi,
-              telefono,
-              direccion,
-              observaciones,
-              apellidos,
-            },
-          });
-          clienteConnect = { connect: { id: nuevo.id } };
-        }
+      // ===== Tipos auxiliares
+      type LineaEntrada = (typeof productos)[number];
 
-        // ===== Tipos auxiliares
-        type LineaEntrada = (typeof productos)[number];
+      type LineaProd = {
+        productoId: number;
+        cantidad: number;
+        precioVenta: Prisma.Decimal;
+        tipoPrecio: string;
+        selectedPriceId: number;
+      };
 
-        type LineaProd = {
-          productoId: number;
-          cantidad: number;
-          precioVenta: Prisma.Decimal;
-          tipoPrecio: string;
-          selectedPriceId: number;
-        };
+      type LineaPres = {
+        presentacionId: number;
+        productoId: number; // dueño de la presentación
+        cantidad: number;
+        precioVenta: Prisma.Decimal;
+        tipoPrecio: string;
+        selectedPriceId: number;
+      };
 
-        type LineaPres = {
-          presentacionId: number;
-          productoId: number; // dueño de la presentación
-          cantidad: number;
-          precioVenta: Prisma.Decimal;
-          tipoPrecio: string;
-          selectedPriceId: number;
-        };
+      const prodValidadas: LineaProd[] = [];
+      const presValidadas: LineaPres[] = [];
 
-        const prodValidadas: LineaProd[] = [];
-        const presValidadas: LineaPres[] = [];
+      // ===== Validar cada línea contra el precio seleccionado
+      for (const p of productos as LineaEntrada[]) {
+        const precio = await tx.precioProducto.findUnique({
+          where: { id: p.selectedPriceId },
+          select: {
+            id: true,
+            precio: true,
+            tipo: true,
+            usado: true,
+            presentacionId: true,
+            productoId: true,
+          },
+        });
 
-        // ===== Validar cada línea contra el precio seleccionado
-        for (const p of productos as LineaEntrada[]) {
-          const precio = await tx.precioProducto.findUnique({
-            where: { id: p.selectedPriceId },
-            select: {
-              id: true,
-              precio: true,
-              tipo: true,
-              usado: true,
-              presentacionId: true,
-              productoId: true,
-              // opcional: rol, etc.
-            },
-          });
-
-          if (!precio || precio.usado) {
-            throw new BadRequestException(
-              `Precio no válido (#${p.selectedPriceId}).`,
-            );
-          }
-
-          const cantidad = Number(p.cantidad ?? 0);
-          if (!Number.isFinite(cantidad) || cantidad <= 0) {
-            throw new BadRequestException(
-              `Cantidad inválida en una de las líneas.`,
-            );
-          }
-
-          // Rama: el precio es de PRESENTACIÓN
-          if (precio.presentacionId) {
-            const presentacionId = Number(precio.presentacionId);
-
-            // Cross-check si el cliente mandó presentacionId
-            if (p.presentacionId && p.presentacionId !== presentacionId) {
-              throw new BadRequestException(
-                `El precio #${precio.id} no corresponde a la presentación indicada (${p.presentacionId}).`,
-              );
-            }
-
-            // Obtenemos el producto dueño de la presentación para trackers/relación
-            const pres = await tx.productoPresentacion.findUnique({
-              where: { id: presentacionId },
-              select: { id: true, productoId: true },
-            });
-            if (!pres) {
-              throw new BadRequestException(
-                `Presentación ${presentacionId} no existe.`,
-              );
-            }
-
-            presValidadas.push({
-              presentacionId,
-              productoId: pres.productoId,
-              cantidad,
-              precioVenta: precio.precio as Prisma.Decimal,
-              tipoPrecio: precio.tipo as unknown as string,
-              selectedPriceId: p.selectedPriceId,
-            });
-            continue;
-          }
-
-          // Rama: el precio es de PRODUCTO
-          if (precio.productoId) {
-            const productoId = Number(precio.productoId);
-
-            // Cross-check si el cliente mandó productoId
-            if (p.productoId && p.productoId !== productoId) {
-              throw new BadRequestException(
-                `El precio #${precio.id} no corresponde al producto indicado (${p.productoId}).`,
-              );
-            }
-
-            prodValidadas.push({
-              productoId,
-              cantidad,
-              precioVenta: precio.precio as Prisma.Decimal,
-              tipoPrecio: precio.tipo as unknown as string,
-              selectedPriceId: p.selectedPriceId,
-            });
-            continue;
-          }
-
-          // Si llegamos aquí, el precio no está asociado ni a producto ni a presentación
+        if (!precio || precio.usado) {
           throw new BadRequestException(
-            `Precio #${p.selectedPriceId} sin entidad asociada.`,
+            `Precio no válido (#${p.selectedPriceId}).`,
           );
         }
 
-        // ===== Consolidar (productoId, selectedPriceId) y (presentacionId, selectedPriceId)
-        const keyProd = (x: LineaProd) =>
-          `${x.productoId}|${x.selectedPriceId}`;
-        const keyPres = (x: LineaPres) =>
-          `${x.presentacionId}|${x.selectedPriceId}`;
-
-        const mapProd = new Map<string, LineaProd>();
-        for (const cur of prodValidadas) {
-          const k = keyProd(cur);
-          const ex = mapProd.get(k);
-          if (ex) ex.cantidad += cur.cantidad;
-          else mapProd.set(k, { ...cur });
-        }
-        const prodConsolidadas = Array.from(mapProd.values());
-
-        const mapPres = new Map<string, LineaPres>();
-        for (const cur of presValidadas) {
-          const k = keyPres(cur);
-          const ex = mapPres.get(k);
-          if (ex) ex.cantidad += cur.cantidad;
-          else mapPres.set(k, { ...cur });
-        }
-        const presConsolidadas = Array.from(mapPres.values());
-
-        // ===== Fotos de stock anterior
-        const cantidadesAnterioresProd: Record<number, number> = {};
-        const unicProdIds = Array.from(
-          new Set(prodConsolidadas.map((x) => x.productoId)),
-        );
-        for (const pid of unicProdIds) {
-          const agg = await tx.stock.aggregate({
-            where: { productoId: pid, sucursalId },
-            _sum: { cantidad: true },
-          });
-          cantidadesAnterioresProd[pid] = agg._sum.cantidad ?? 0;
+        const cantidad = Number(p.cantidad ?? 0);
+        if (!Number.isFinite(cantidad) || cantidad <= 0) {
+          throw new BadRequestException(
+            `Cantidad inválida en una de las líneas.`,
+          );
         }
 
-        const cantidadesAnterioresPres: Record<number, number> = {};
-        const unicPresIds = Array.from(
-          new Set(presConsolidadas.map((x) => x.presentacionId)),
-        );
-        for (const prId of unicPresIds) {
-          const agg = await tx.stockPresentacion.aggregate({
-            where: { presentacionId: prId, sucursalId },
-            _sum: { cantidadPresentacion: true },
-          });
-          cantidadesAnterioresPres[prId] = agg._sum.cantidadPresentacion ?? 0;
-        }
+        // PRESENTACIÓN
+        if (precio.presentacionId) {
+          const presentacionId = Number(precio.presentacionId);
 
-        // ===== Descontar STOCK (Producto -> Stock; Presentación -> StockPresentacion)
-        // Producto: FIFO por fechaIngreso
-        for (const linea of prodConsolidadas) {
-          let restante = linea.cantidad;
-          const lotes = await tx.stock.findMany({
-            where: {
-              productoId: linea.productoId,
-              sucursalId,
-              cantidad: { gt: 0 },
-            },
-            orderBy: { fechaIngreso: 'asc' },
-          });
-          for (const lote of lotes) {
-            if (restante <= 0) break;
-            const usar = Math.min(restante, lote.cantidad);
-            await tx.stock.update({
-              where: { id: lote.id },
-              data: { cantidad: { decrement: usar } },
-            });
-            restante -= usar;
-          }
-          if (restante > 0) {
+          if (p.presentacionId && p.presentacionId !== presentacionId) {
             throw new BadRequestException(
-              `Stock insuficiente para producto ${linea.productoId}.`,
+              `El precio #${precio.id} no corresponde a la presentación indicada (${p.presentacionId}).`,
+            );
+          }
+
+          const pres = await tx.productoPresentacion.findUnique({
+            where: { id: presentacionId },
+            select: { id: true, productoId: true },
+          });
+          if (!pres) {
+            throw new BadRequestException(
+              `Presentación ${presentacionId} no existe.`,
+            );
+          }
+
+          presValidadas.push({
+            presentacionId,
+            productoId: pres.productoId,
+            cantidad,
+            precioVenta: precio.precio as Prisma.Decimal,
+            tipoPrecio: precio.tipo as unknown as string,
+            selectedPriceId: p.selectedPriceId,
+          });
+          continue;
+        }
+
+        // PRODUCTO
+        if (precio.productoId) {
+          const productoId = Number(precio.productoId);
+
+          if (p.productoId && p.productoId !== productoId) {
+            throw new BadRequestException(
+              `El precio #${precio.id} no corresponde al producto indicado (${p.productoId}).`,
+            );
+          }
+
+          prodValidadas.push({
+            productoId,
+            cantidad,
+            precioVenta: precio.precio as Prisma.Decimal,
+            tipoPrecio: precio.tipo as unknown as string,
+            selectedPriceId: p.selectedPriceId,
+          });
+          continue;
+        }
+
+        throw new BadRequestException(
+          `Precio #${p.selectedPriceId} sin entidad asociada.`,
+        );
+      }
+
+      // ===== Consolidar líneas (productoId,selectedPriceId) y (presentacionId,selectedPriceId)
+      const keyProd = (x: LineaProd) => `${x.productoId}|${x.selectedPriceId}`;
+      const keyPres = (x: LineaPres) =>
+        `${x.presentacionId}|${x.selectedPriceId}`;
+
+      const mapProd = new Map<string, LineaProd>();
+      for (const cur of prodValidadas) {
+        const k = keyProd(cur);
+        const ex = mapProd.get(k);
+        if (ex) ex.cantidad += cur.cantidad;
+        else mapProd.set(k, { ...cur });
+      }
+      const prodConsolidadas = Array.from(mapProd.values());
+
+      const mapPres = new Map<string, LineaPres>();
+      for (const cur of presValidadas) {
+        const k = keyPres(cur);
+        const ex = mapPres.get(k);
+        if (ex) ex.cantidad += cur.cantidad;
+        else mapPres.set(k, { ...cur });
+      }
+      const presConsolidadas = Array.from(mapPres.values());
+
+      // ===== Fotos de stock anterior
+      const cantidadesAnterioresProd: Record<number, number> = {};
+      const unicProdIds = Array.from(
+        new Set(prodConsolidadas.map((x) => x.productoId)),
+      );
+      for (const pid of unicProdIds) {
+        const agg = await tx.stock.aggregate({
+          where: { productoId: pid, sucursalId },
+          _sum: { cantidad: true },
+        });
+        cantidadesAnterioresProd[pid] = agg._sum.cantidad ?? 0;
+      }
+
+      const cantidadesAnterioresPres: Record<number, number> = {};
+      const unicPresIds = Array.from(
+        new Set(presConsolidadas.map((x) => x.presentacionId)),
+      );
+      for (const prId of unicPresIds) {
+        const agg = await tx.stockPresentacion.aggregate({
+          where: { presentacionId: prId, sucursalId },
+          _sum: { cantidadPresentacion: true },
+        });
+        cantidadesAnterioresPres[prId] = agg._sum.cantidadPresentacion ?? 0;
+      }
+
+      // ===== Descontar STOCK (Producto -> Stock; Presentación -> StockPresentacion)
+      // Producto: FIFO
+      for (const linea of prodConsolidadas) {
+        let restante = linea.cantidad;
+        const lotes = await tx.stock.findMany({
+          where: {
+            productoId: linea.productoId,
+            sucursalId,
+            cantidad: { gt: 0 },
+          },
+          orderBy: { fechaIngreso: 'asc' },
+        });
+        for (const lote of lotes) {
+          if (restante <= 0) break;
+          const usar = Math.min(restante, lote.cantidad);
+          await tx.stock.update({
+            where: { id: lote.id },
+            data: { cantidad: { decrement: usar } },
+          });
+          restante -= usar;
+        }
+        if (restante > 0) {
+          throw new BadRequestException(
+            `Stock insuficiente para producto ${linea.productoId}.`,
+          );
+        }
+      }
+
+      // Presentación: FIFO
+      for (const linea of presConsolidadas) {
+        let restante = linea.cantidad;
+        const lotes = await tx.stockPresentacion.findMany({
+          where: {
+            presentacionId: linea.presentacionId,
+            sucursalId,
+            cantidadPresentacion: { gt: 0 },
+          },
+          orderBy: { fechaIngreso: 'asc' },
+        });
+        for (const lote of lotes) {
+          if (restante <= 0) break;
+          const usar = Math.min(restante, lote.cantidadPresentacion);
+          await tx.stockPresentacion.update({
+            where: { id: lote.id },
+            data: { cantidadPresentacion: { decrement: usar } },
+          });
+          restante -= usar;
+        }
+        if (restante > 0) {
+          throw new BadRequestException(
+            `Stock insuficiente para presentación ${linea.presentacionId}.`,
+          );
+        }
+      }
+
+      // ===== Notificaciones stock bajo
+      for (const prodId of unicProdIds) {
+        const agg = await tx.stock.aggregate({
+          where: { productoId: prodId, sucursalId },
+          _sum: { cantidad: true },
+        });
+        const stockGlobal = agg._sum.cantidad ?? 0;
+        const th = await tx.stockThreshold.findUnique({
+          where: { productoId: prodId },
+        });
+        if (!th) continue;
+
+        if (stockGlobal <= th.stockMinimo) {
+          const info = await tx.producto.findUnique({
+            where: { id: prodId },
+            select: { nombre: true },
+          });
+          for (const uId of usuariosNotifIds) {
+            const existe = await tx.notificacion.findFirst({
+              where: {
+                referenciaId: th.id,
+                tipoNotificacion: 'STOCK_BAJO',
+                notificacionesUsuarios: { some: { usuarioId: uId } },
+              },
+            });
+            if (existe) continue;
+
+            await this.notifications.createOneNotification(
+              `El producto ${info?.nombre ?? prodId} ha alcanzado stock mínimo (quedan ${stockGlobal} uds).`,
+              usuarioId,
+              uId,
+              'STOCK_BAJO',
+              th.id,
             );
           }
         }
+      }
 
-        // Presentación: FIFO por fechaIngreso en StockPresentacion
-        for (const linea of presConsolidadas) {
-          let restante = linea.cantidad;
-          const lotes = await tx.stockPresentacion.findMany({
-            where: {
-              presentacionId: linea.presentacionId,
-              sucursalId,
-              cantidadPresentacion: { gt: 0 },
-            },
-            orderBy: { fechaIngreso: 'asc' },
-          });
-          for (const lote of lotes) {
-            if (restante <= 0) break;
-            const usar = Math.min(restante, lote.cantidadPresentacion);
-            await tx.stockPresentacion.update({
-              where: { id: lote.id },
-              data: { cantidadPresentacion: { decrement: usar } },
-            });
-            restante -= usar;
-          }
-          if (restante > 0) {
-            throw new BadRequestException(
-              `Stock insuficiente para presentación ${linea.presentacionId}.`,
-            );
-          }
-        }
+      // ===== Totales
+      const totalVentaProd = prodConsolidadas.reduce(
+        (sum, x) => sum.add(x.precioVenta.mul(x.cantidad)),
+        new Prisma.Decimal(0),
+      );
+      const totalVentaPres = presConsolidadas.reduce(
+        (sum, x) => sum.add(x.precioVenta.mul(x.cantidad)),
+        new Prisma.Decimal(0),
+      );
+      const totalVenta = totalVentaProd.add(totalVentaPres);
 
-        // ===== Notificaciones stock bajo (dejamos productos; presentaciones si tienes thresholds análogos puedes replicarlo)
-        for (const prodId of unicProdIds) {
-          const agg = await tx.stock.aggregate({
-            where: { productoId: prodId, sucursalId },
-            _sum: { cantidad: true },
-          });
-          const stockGlobal = agg._sum.cantidad ?? 0;
-          const th = await tx.stockThreshold.findUnique({
-            where: { productoId: prodId },
-          });
-          if (!th) continue;
-
-          if (stockGlobal <= th.stockMinimo) {
-            const info = await tx.producto.findUnique({
-              where: { id: prodId },
-              select: { nombre: true },
-            });
-            for (const uId of usuariosNotifIds) {
-              const existe = await tx.notificacion.findFirst({
-                where: {
-                  referenciaId: th.id,
-                  tipoNotificacion: 'STOCK_BAJO',
-                  notificacionesUsuarios: { some: { usuarioId: uId } },
-                },
-              });
-              if (existe) continue;
-
-              await this.notifications.createOneNotification(
-                `El producto ${info?.nombre ?? prodId} ha alcanzado stock mínimo (quedan ${stockGlobal} uds).`,
-                usuarioId,
-                uId,
-                'STOCK_BAJO',
-                th.id,
-              );
-            }
-          }
-        }
-
-        // ===== Total venta
-        const totalVentaProd = prodConsolidadas.reduce(
-          (sum, x) => sum.add(x.precioVenta.mul(x.cantidad)),
-          new Prisma.Decimal(0),
-        );
-        const totalVentaPres = presConsolidadas.reduce(
-          (sum, x) => sum.add(x.precioVenta.mul(x.cantidad)),
-          new Prisma.Decimal(0),
-        );
-        const totalVenta = totalVentaProd.add(totalVentaPres);
-
-        // ===== Crear venta + líneas
-        const venta = await tx.venta.create({
-          data: {
-            tipoComprobante,
-            referenciaPago: referenciaPagoValid,
-            usuario: { connect: { id: usuarioId } },
-            cliente: clienteConnect,
-            horaVenta: new Date(),
-            totalVenta: toNumber4(totalVenta),
-            imei,
-            sucursal: { connect: { id: sucursalId } },
-            productos: {
-              create: [
-                // líneas de producto base
-                ...prodConsolidadas.map((x) => ({
-                  producto: { connect: { id: x.productoId } },
-                  cantidad: x.cantidad,
-                  precioVenta: toNumber4(x.precioVenta),
-                  // selectedPriceId: x.selectedPriceId,
-                  // presentacionId queda null
-                })),
-                // líneas de presentación
-                ...presConsolidadas.map((x) => ({
-                  // si tu modelo de línea admite ambos, conecta ambos:
-                  producto: { connect: { id: x.productoId } },
-                  presentacion: { connect: { id: x.presentacionId } },
-                  cantidad: x.cantidad,
-                  precioVenta: toNumber4(x.precioVenta),
-                  // selectedPriceId: x.selectedPriceId,
-                })),
-              ],
-            },
+      // ===== Crear venta + líneas
+      const venta = await tx.venta.create({
+        data: {
+          tipoComprobante,
+          referenciaPago: referenciaPagoValid,
+          usuario: { connect: { id: usuarioId } },
+          cliente: clienteConnect,
+          horaVenta: new Date(),
+          totalVenta: toNumber4(totalVenta),
+          imei,
+          sucursal: { connect: { id: sucursalId } },
+          productos: {
+            create: [
+              ...prodConsolidadas.map((x) => ({
+                producto: { connect: { id: x.productoId } },
+                cantidad: x.cantidad,
+                precioVenta: toNumber4(x.precioVenta),
+              })),
+              ...presConsolidadas.map((x) => ({
+                producto: { connect: { id: x.productoId } },
+                presentacion: { connect: { id: x.presentacionId } },
+                cantidad: x.cantidad,
+                precioVenta: toNumber4(x.precioVenta),
+              })),
+            ],
           },
-        });
-        this.logger.log('La venta es: ', venta);
+        },
+      });
+      this.logger.log('La venta es: ', venta);
 
-        // ===== Trackers
-        if (prodConsolidadas.length) {
-          await this.tracker.trackerSalidaProductoVenta(
-            tx,
-            prodConsolidadas.map((x) => ({
-              productoId: x.productoId,
-              cantidadVendida: x.cantidad,
-              cantidadAnterior: cantidadesAnterioresProd[x.productoId] ?? 0,
-            })),
-            sucursalId,
-            usuarioId,
-            venta.id,
-            'SALIDA_VENTA',
-            `Registro generado por venta #${venta.id}`,
-          );
-        }
-
-        if (
-          presConsolidadas.length &&
-          (this.tracker as any).trackerSalidaPresentacionVenta
-        ) {
-          // si tu servicio ya trae tracker para presentaciones
-          await (this.tracker as any).trackerSalidaPresentacionVenta(
-            tx,
-            presConsolidadas.map((x) => ({
-              presentacionId: x.presentacionId,
-              productoId: x.productoId,
-              cantidadVendida: x.cantidad,
-              cantidadAnterior: cantidadesAnterioresPres[x.presentacionId] ?? 0,
-            })),
-            sucursalId,
-            usuarioId,
-            venta.id,
-            'SALIDA_VENTA',
-            `Registro generado por venta #${venta.id}`,
-          );
-        }
-        // Si aún no tienes tracker para presentaciones, puedes omitir este bloque
-        // o implementar uno análogo al de productos.
-
-        // ===== Pago + vincular a venta (igual)
-        const pago = await tx.pago.create({
-          data: {
-            metodoPago: metodoPago || 'CONTADO',
-            monto: Number(totalVenta),
-            venta: { connect: { id: venta.id } },
-          },
-        });
-        await tx.venta.update({
-          where: { id: venta.id },
-          data: { metodoPago: { connect: { id: pago.id } } },
-        });
-
-        // ===== Caja (igual)
-        await this.cajaService.attachAndRecordSaleTx(
+      // ===== Trackers
+      if (prodConsolidadas.length) {
+        await this.tracker.trackerSalidaProductoVenta(
           tx,
-          venta.id,
+          prodConsolidadas.map((x) => ({
+            productoId: x.productoId,
+            cantidadVendida: x.cantidad,
+            cantidadAnterior: cantidadesAnterioresProd[x.productoId] ?? 0,
+          })),
           sucursalId,
           usuarioId,
-          { exigirCajaSiEfectivo: true },
+          venta.id,
+          'SALIDA_VENTA',
+          `Registro generado por venta #${venta.id}`,
         );
+      }
 
-        return venta;
+      if (
+        presConsolidadas.length &&
+        (this.tracker as any).trackerSalidaPresentacionVenta
+      ) {
+        await (this.tracker as any).trackerSalidaPresentacionVenta(
+          tx,
+          presConsolidadas.map((x) => ({
+            presentacionId: x.presentacionId,
+            productoId: x.productoId,
+            cantidadVendida: x.cantidad,
+            cantidadAnterior: cantidadesAnterioresPres[x.presentacionId] ?? 0,
+          })),
+          sucursalId,
+          usuarioId,
+          venta.id,
+          'SALIDA_VENTA',
+          `Registro generado por venta #${venta.id}`,
+        );
+      }
+
+      // ===== Pago + vincular a venta
+      const pago = await tx.pago.create({
+        data: {
+          metodoPago: metodoPago || 'CONTADO',
+          monto: Number(totalVenta),
+          venta: { connect: { id: venta.id } },
+        },
       });
+      await tx.venta.update({
+        where: { id: venta.id },
+        data: { metodoPago: { connect: { id: pago.id } } },
+      });
+
+      // ===== Caja
+      await this.cajaService.attachAndRecordSaleTx(
+        tx,
+        venta.id,
+        sucursalId,
+        usuarioId,
+        { exigirCajaSiEfectivo: true },
+      );
+
+      return venta;
     } catch (e) {
       this.logger.error('Error en createVenta:', e);
       if (e instanceof HttpException) throw e;
       throw new InternalServerErrorException('Fatal error: Error inesperado');
     }
+  }
+
+  async createVentaTx(dto: CreateVentaDto, tx?: Prisma.TransactionClient) {
+    if (tx) return this.create(dto, tx);
+    return this.prisma.$transaction(async (t) => this.create(dto, t));
   }
 
   async findAll() {

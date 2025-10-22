@@ -22,7 +22,7 @@ export class VentaController {
   // PARA LA CREACION DE VENTAS NORMALES
   @Post()
   async create(@Body() createVentaDto: CreateVentaDto) {
-    return await this.ventaService.create(createVentaDto);
+    return await this.ventaService.createVentaTx(createVentaDto);
   }
 
   @Get()

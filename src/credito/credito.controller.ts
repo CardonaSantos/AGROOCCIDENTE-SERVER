@@ -1,8 +1,26 @@
-import { Controller, Get, Post, Body, Patch, Param, Delete } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Patch,
+  Param,
+  Delete,
+  Query,
+  UsePipes,
+  ValidationPipe,
+} from '@nestjs/common';
 import { CreditoService } from './credito.service';
 import { CreateCreditoDto } from './dto/create-credito.dto';
 import { UpdateCreditoDto } from './dto/update-credito.dto';
+import { CreditoQuery } from './query/query';
 
+@UsePipes(
+  new ValidationPipe({
+    transform: true,
+    whitelist: true,
+  }),
+)
 @Controller('credito')
 export class CreditoController {
   constructor(private readonly creditoService: CreditoService) {}
@@ -12,23 +30,8 @@ export class CreditoController {
     return this.creditoService.create(createCreditoDto);
   }
 
-  @Get()
-  findAll() {
-    return this.creditoService.findAll();
-  }
-
-  @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.creditoService.findOne(+id);
-  }
-
-  @Patch(':id')
-  update(@Param('id') id: string, @Body() updateCreditoDto: UpdateCreditoDto) {
-    return this.creditoService.update(+id, updateCreditoDto);
-  }
-
-  @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.creditoService.remove(+id);
+  @Get() // <-- agrega esto
+  findAll(@Query() query: CreditoQuery) {
+    return this.creditoService.findAll(query);
   }
 }

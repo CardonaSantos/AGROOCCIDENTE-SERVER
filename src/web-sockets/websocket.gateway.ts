@@ -8,83 +8,117 @@ import {
   WebSocketServer,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
-import { Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  HttpException,
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+} from '@nestjs/common';
 import { NotificationToEmit } from './Types/NotificationTypeSocket';
 import { nuevaSolicitud } from './Types/SolicitudType';
 import { solicitudTransferencia } from './Types/TransferenciaType';
 import EventEmitter from 'events';
+//DAYJS
+import * as dayjs from 'dayjs';
+import 'dayjs/locale/es';
+import * as utc from 'dayjs/plugin/utc';
+import * as timezone from 'dayjs/plugin/timezone';
+import * as isSameOrAfter from 'dayjs/plugin/isSameOrAfter';
+import * as isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
+import * as customParseFormat from 'dayjs/plugin/customParseFormat';
+import { SolicitudCreditoVenta } from '@prisma/client';
+import { NormalizedSolicitud } from 'src/credito-autorization/common/normalizerAutorizacionesResponse';
+dayjs.extend(customParseFormat);
+dayjs.extend(utc);
+dayjs.extend(timezone);
+dayjs.extend(isSameOrBefore);
+dayjs.extend(isSameOrAfter);
+dayjs.locale('es');
+
+type CreditAuthorizationCreatedEvent = NormalizedSolicitud;
+
 @Injectable()
 @WebSocketGateway({ namespace: '/legacy', cors: { origin: '*' } })
 export class LegacyGateway implements OnGatewayConnection, OnGatewayDisconnect {
+  private readonly logger = new Logger(LegacyGateway.name);
   @WebSocketServer()
   server: Server;
 
-  // EventEmitter.defaultMaxListeners = 30; // O cualquier número que consideres adecuado
-  // Mantenemos tres mapas separados para diferentes roles
-  private vendedores: Map<number, string> = new Map();
-  private admins: Map<number, string> = new Map();
-  private usuarios: Map<number, string> = new Map();
+  private userSockets = new Map<number, Set<string>>(); //para metricas
+  //persistencia de usuarios
+  private vendedores = new Map<number, string>();
+  private admins = new Map<number, string>();
+  private usuarios = new Map<number, string>();
 
-  // Método para extraer userID desde client
-  private getUserIDFromClient(client: Socket): number {
-    return parseInt(client.handshake.query.userID as string, 10);
-  }
-
-  // Método para extraer el rol del cliente
-  private getUserRoleFromClient(client: Socket): string {
-    return client.handshake.query.rol as string;
+  private num(v: unknown): number | undefined {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
   }
 
   handleConnection(client: Socket) {
-    client.setMaxListeners(40); // Cambia 30 al valor que necesites
-    const userID = this.getUserIDFromClient(client);
-    const rol = this.getUserRoleFromClient(client);
+    client.setMaxListeners(40);
 
-    // Validamos que el userID sea un número válido y que el rol sea reconocido
-    if (!userID || isNaN(userID)) {
-      console.log(`ID de usuario inválido: ${userID}`);
-      client.emit('error', { message: 'ID de usuario inválido' });
-      client.disconnect();
-      return;
-    }
-
-    // Verificar si el usuario ya está conectado
-    if (this.usuarios.has(userID)) {
-      console.log(`Conexión duplicada detectada para el usuario ${userID}.`);
-      client.emit('error', { message: 'Ya tienes una sesión activa' });
-      client.disconnect(); // Desconectar el socket duplicado
-    } else {
-      // Añadir el usuario a los mapas
-      this.usuarios.set(userID, client.id);
-      if (rol === 'ADMIN') {
-        this.admins.set(userID, client.id);
-      } else if (rol === 'VENDEDOR') {
-        this.vendedores.set(userID, client.id);
-      }
-
-      console.log(
-        `Cliente conectado: UserID: ${userID}, SocketID: ${client.id}`,
+    const q = client.handshake.query as Record<string, any>;
+    const userId = this.num(q.userID ?? q.userId);
+    const rol =
+      (q.rol ?? q.role ?? '').toString().trim().toUpperCase() || undefined;
+    const sucursalId = this.num(q.sucursalId);
+    //si el query está mal, entonces sal
+    if (!userId) {
+      this.logger.warn(
+        `WS conexión rechazada: userId inválido (${q.userID ?? q.userId})`,
       );
-      this.logUsuarios(); // Log de los usuarios conectados
+      client.emit('error', { code: 'INVALID_USER_ID' });
+      return client.disconnect(true);
     }
+    //Si los datos son validos, contruimos el socket, guarda identidad
+    client.data.userId = userId;
+    client.data.rol = rol;
+    client.data.sucursalId = sucursalId;
+
+    // a un room publico, unete donde el:`user:${userId}`
+    client.join('public');
+    client.join(`user:${userId}`);
+    if (rol) client.join(`rol:${rol}`);
+    if (sucursalId) client.join(`sucursal:${sucursalId}`);
+
+    //
+    //track multi-pestaña: si no estaba, creale un set
+    if (!this.userSockets.has(userId)) this.userSockets.set(userId, new Set());
+    this.userSockets.get(userId)!.add(client.id); //toma este set del nuevo, y añadele su client id (socket ID)
+
+    this.usuarios.set(userId, client.id);
+    if (rol === 'ADMIN') this.admins.set(userId, client.id);
+    else if (rol === 'VENDEDOR') this.vendedores.set(userId, client.id);
+
+    this.logger.log(
+      `WS conectado sid=${client.id} uid=${userId} rol=${rol ?? '-'} suc=${sucursalId ?? '-'}`,
+    );
+    this.logEstado();
   }
 
   handleDisconnect(client: Socket) {
-    const userID = this.getUserIDFromClient(client);
-    const rol = this.getUserRoleFromClient(client);
+    const userId = client.data?.userId as number | undefined;
+    const rol = client.data?.rol as string | undefined;
 
-    // Eliminamos el cliente de todos los mapas
-    if (!isNaN(userID)) {
-      this.usuarios.delete(userID);
-      if (rol === 'ADMIN') {
-        this.admins.delete(userID);
-      } else {
-        this.vendedores.delete(userID);
+    if (userId) {
+      // Limpia multi-pestaña
+      const set = this.userSockets.get(userId);
+      if (set) {
+        set.delete(client.id);
+        if (set.size === 0) this.userSockets.delete(userId);
       }
-      console.log(
-        `Cliente desconectado: UserID: ${userID}, SocketID: ${client.id}`,
-      );
-      this.logUsuarios();
+
+      // (Compat) limpia mapas “legacy” solo si el que sale es el que estaba guardado
+      if (this.usuarios.get(userId) === client.id) this.usuarios.delete(userId);
+      if (rol === 'ADMIN' && this.admins.get(userId) === client.id)
+        this.admins.delete(userId);
+      if (rol === 'VENDEDOR' && this.vendedores.get(userId) === client.id)
+        this.vendedores.delete(userId);
+
+      this.logger.log(`WS desconectado sid=${client.id} uid=${userId}`);
+      this.logEstado();
     }
   }
 
@@ -107,10 +141,29 @@ export class LegacyGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
+  //=================> HELPERS DE ENVIÓ
+
+  emitToUser<E extends string>(userId: number, event: E, payload: any) {
+    this.server.to(`user:${userId}`).emit(event, payload);
+  }
+
+  emitToRole<E extends string>(rol: string, event: E, payload: any) {
+    this.server.to(`rol:${rol}`).emit(event, payload);
+  }
+
+  emitToSucursal<E extends string>(sucursalId: number, event: E, payload: any) {
+    this.server.to(`sucursal:${sucursalId}`).emit(event, payload);
+  }
+
+  emitToAll<E extends string>(event: E, payload: any) {
+    this.server.emit(event, payload);
+  }
+
+  //=================>
+
   //ENVIAR LAS SOLICITUDES A LOS ADMINS:::::::::::
   handleEnviarSolicitudPrecio(solicitud: nuevaSolicitud, userID: number) {
     const SOCKEID_ADMIN = this.admins.get(userID);
-
     if (SOCKEID_ADMIN) {
       this.server.to(SOCKEID_ADMIN).emit('recibirSolicitud', solicitud);
     } else {
@@ -126,7 +179,6 @@ export class LegacyGateway implements OnGatewayConnection, OnGatewayDisconnect {
     userID: number,
   ) {
     const SOCKEID_ADMIN = this.admins.get(userID);
-
     if (SOCKEID_ADMIN) {
       this.server
         .to(SOCKEID_ADMIN)
@@ -138,10 +190,33 @@ export class LegacyGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
-  // Funciones para loggear el estado de los mapas
-  private logUsuarios() {
-    console.log(`Usuarios conectados: ${this.usuarios.size}`);
-    console.log(`Admins conectados: ${this.admins.size}`);
-    console.log(`Vendedores conectados: ${this.vendedores.size}`);
+  //NUEVO PARA FORMATO ROOMS
+  emitCreditAuthorizationCreated(item: CreditAuthorizationCreatedEvent) {
+    this.server.to(`rol:ADMIN`).emit('credit:authorization.created', item);
+  }
+
+  //DESARROLLO
+  private dumpUserSockets() {
+    const obj: Record<string, string[]> = {};
+    for (const [uid, set] of this.userSockets.entries()) {
+      obj[uid] = Array.from(set.values()); // socketIds activos por usuario
+    }
+    this.logger.log(`userSockets = ${JSON.stringify(obj, null, 2)}`);
+  }
+
+  // Para ver las rooms de un socket
+  private logRooms(client: Socket) {
+    this.logger.log(
+      `rooms de ${client.id}: ${JSON.stringify(Array.from(client.rooms), null, 2)}`,
+    );
+  }
+
+  private logEstado() {
+    const totalSockets =
+      [...this.userSockets.values()].reduce((acc, set) => acc + set.size, 0) ||
+      0;
+    this.logger.log(
+      `Usuarios únicos: ${this.userSockets.size} | Sockets activos: ${totalSockets}`,
+    );
   }
 }

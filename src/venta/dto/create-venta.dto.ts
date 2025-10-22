@@ -12,7 +12,7 @@ import {
 export class CreateVentaDto {
   @IsString()
   @IsOptional()
-  referenciaPago: string;
+  referenciaPago?: string;
 
   @IsEnum(TipoComprobante)
   tipoComprobante: TipoComprobante;
@@ -55,13 +55,14 @@ export class CreateVentaDto {
     cantidad: number;
     selectedPriceId: number;
     presentacionId?: number | null;
+    precioSeleccionadoId?: number;
   }>;
 
   @IsEnum(MetodoPago)
   metodoPago: MetodoPago;
 
   @IsNumber()
-  monto: number;
+  monto?: number;
 
   @IsInt()
   sucursalId: number;

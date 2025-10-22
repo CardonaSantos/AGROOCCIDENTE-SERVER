@@ -59,6 +59,8 @@ export class CreateCreditoAutorizationDto {
     presentacionId?: number;
     cantidad: number;
     precioUnitario: number;
+    precioSeleccionadoId: number;
+
     precioListaRef: number;
     subtotal: number;
   }[];
