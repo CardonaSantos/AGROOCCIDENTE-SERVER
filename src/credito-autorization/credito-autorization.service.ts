@@ -32,6 +32,8 @@ import { VentaService } from 'src/venta/venta.service';
 import { CreateVentaDto } from 'src/venta/dto/create-venta.dto';
 import { cuotasPropuestas } from './dto/simple-interfaces';
 import { CreateAbonoCreditoDTO } from './dto/create-new-payment';
+import { MovimientoFinancieroService } from 'src/movimiento-financiero/movimiento-financiero.service';
+import { CreateMFUtility } from 'src/movimiento-financiero/utilities/createMFDto';
 dayjs.extend(customParseFormat);
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -53,9 +55,9 @@ export class CreditoAutorizationService {
   private readonly logger = new Logger(CreditoAutorizationService.name);
   constructor(
     private readonly prisma: PrismaService,
-
     private readonly ws: LegacyGateway,
     private readonly venta: VentaService,
+    private readonly mf: MovimientoFinancieroService,
   ) {}
   /**
    * CREACION DE REGISTRO DE AUTORIZACION 1er PASO
@@ -262,6 +264,8 @@ export class CreditoAutorizationService {
         'Debe enviar al menos una cuota propuesta.',
       );
     }
+
+    this.logger.log(`Las cuotas son:\n${JSON.stringify(items, null, 2)}`);
 
     const byNumero = new Set<number>();
     const cuotas = items.map((c, idx) => {
@@ -489,6 +493,9 @@ export class CreditoAutorizationService {
       cuentaBancariaId,
       metodoPago,
     } = dto;
+    this.logger.log(
+      `DTO recibido para recepcion de crédito:\n${JSON.stringify(dto, null, 2)}`,
+    );
 
     return this.prisma.$transaction(async (tx) => {
       const authorization = await tx.solicitudCreditoVenta.findUnique({
@@ -585,6 +592,20 @@ export class CreditoAutorizationService {
           );
         }
       }
+
+      const dtoMF: CreateMFUtility = {
+        monto: authorization.cuotaInicialPropuesta,
+        motivo: 'COBRO_CREDITO',
+        sucursalId: creditHeader.sucursalId,
+        usuarioId: adminId,
+        descripcion: comentario,
+        metodoPago: metodoPago,
+        cuentaBancariaId: cuentaBancariaId,
+        registroCajaId: cajaId,
+      };
+
+      const mf = await this.mf.createMovimiento(dtoMF, { tx: tx });
+      this.logger.log('MF: ', mf);
 
       await this.generateCuotasFromCredito(
         tx,
@@ -768,6 +789,7 @@ export class CreditoAutorizationService {
     });
 
     //  Actualizar cada cuota montoPagado + estado
+    //REVISAR QUE EL ENGANCHE SIEMPRE SEA PAGADO EN SU TOTALIDAD
     for (const det of abono.detalles) {
       const prev = await tx.cuota.findUnique({
         where: { id: det.cuotaId },
@@ -783,7 +805,8 @@ export class CreditoAutorizationService {
         where: { id: prev.id },
         data: {
           montoPagado: nuevoPagado,
-          estado: pagada ? 'PAGADA' : 'PARCIAL',
+          // estado: pagada ? 'PAGADA' : 'PARCIAL',
+          estado: 'PAGADA',
           fechaPago: pagada ? new Date() : undefined,
         },
       });

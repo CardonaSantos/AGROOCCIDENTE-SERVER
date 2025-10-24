@@ -9,6 +9,7 @@ import {
   Query,
   UsePipes,
   ValidationPipe,
+  ParseIntPipe,
 } from '@nestjs/common';
 import { CreditoService } from './credito.service';
 import { CreateCreditoDto } from './dto/create-credito.dto';
@@ -33,5 +34,15 @@ export class CreditoController {
   @Get() // <-- agrega esto
   findAll(@Query() query: CreditoQuery) {
     return this.creditoService.findAll(query);
+  }
+
+  @Get('credito-details/:id')
+  getOneCredito(@Param('id', ParseIntPipe) id: number) {
+    return this.creditoService.getOneCredito(id);
+  }
+
+  @Get('simple-credit-dashboard')
+  getSimpleCredits() {
+    return this.creditoService.getSimpleCredits();
   }
 }

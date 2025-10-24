@@ -12,7 +12,6 @@ import {
 } from '@nestjs/common';
 import { CreditoAutorizationService } from './credito-autorization.service';
 import { CreateCreditoAutorizationDto } from './dto/create-credito-autorization.dto';
-import { UpdateCreditoAutorizationDto } from './dto/update-credito-autorization.dto';
 import { GetCreditoAutorizacionesDto } from './dto/get-credito-autorizaciones.dto';
 import { AcceptCreditoDTO } from './dto/acept-credito-auth';
 

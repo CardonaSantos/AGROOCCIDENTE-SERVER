@@ -108,4 +108,40 @@ export class CategoriaService {
       throw new InternalServerErrorException('Error al eliminar la categoria');
     }
   }
+
+  //nuevo
+  async findOneWithCount(id: number) {
+    const cat = await this.prisma.categoria.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        nombre: true,
+        _count: { select: { productos: true } },
+      },
+    });
+    if (!cat) throw new NotFoundException(`Categoria ${id} no encontrada`);
+
+    return {
+      id: cat.id,
+      nombre: cat.nombre,
+      productosCount: cat._count.productos,
+    };
+  }
+
+  async findAllWithCounts() {
+    const cats = await this.prisma.categoria.findMany({
+      select: {
+        id: true,
+        nombre: true,
+        _count: { select: { productos: true } }, // <-- relación
+      },
+      orderBy: { id: 'asc' },
+    });
+
+    return cats.map((c) => ({
+      id: c.id,
+      nombre: c.nombre,
+      productosCount: c._count.productos,
+    }));
+  }
 }

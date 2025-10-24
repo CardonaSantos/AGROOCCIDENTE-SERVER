@@ -32,7 +32,6 @@ export const SelectCreditos = {
   moraDiaria: true,
   fechaProximoPago: true,
   numeroCredito: true,
-
   // Relaciones clave
   cliente: {
     select: {
@@ -59,7 +58,6 @@ export const SelectCreditos = {
       tipoSucursal: true,
     },
   },
-
   // Venta y sus detalles (incluye solicitud origen)
   venta: {
     select: {

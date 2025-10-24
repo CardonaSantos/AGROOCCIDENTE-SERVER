@@ -400,7 +400,7 @@ export class MovimientoFinancieroService {
   }
 
   /**
-   *
+   * Servicio utilitario para crear movimientos financieros
    * @param rawDto DTO PARA CREAR UN MOVIMIENTO FINANCIERO
    * @param opts Transaccion o permitir turno ajeno
    * @returns

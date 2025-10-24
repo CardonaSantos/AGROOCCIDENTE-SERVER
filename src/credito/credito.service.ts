@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   HttpException,
   Injectable,
   InternalServerErrorException,
@@ -11,6 +12,7 @@ import { Prisma } from '@prisma/client';
 import { CreditoQuery } from './query/query';
 import { SelectCreditos } from './select/select-creditosResponse';
 import { normalizerCreditoRegist } from './common/normalizadorCredito';
+import { simpleCreditNormalizer } from './common/simpleNormalizacer';
 
 @Injectable()
 export class CreditoService {
@@ -182,6 +184,8 @@ export class CreditoService {
         }),
       ]);
 
+      this.logger.log('Los registros de productos son: ', creditos);
+
       const data = normalizerCreditoRegist(creditos);
 
       return {
@@ -201,6 +205,42 @@ export class CreditoService {
       throw new InternalServerErrorException(
         'Fatal error: Error inesperado en módulo crédito',
       );
+    }
+  }
+
+  async getOneCredito(creditId: number) {
+    try {
+      if (!creditId) throw new BadRequestException('Id de crédito no válido');
+
+      const credit = await this.prisma.ventaCuota.findMany({
+        where: { id: creditId },
+        select: SelectCreditos,
+      });
+
+      const creditNormalizado = normalizerCreditoRegist(credit);
+      const creditoNormalizado = creditNormalizado.shift();
+      return creditoNormalizado;
+    } catch (error) {
+      this.logger.error('Error al conseguir registro de crédito', error?.stack);
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException('Fatal errror: Error inesperado');
+    }
+  }
+
+  async getSimpleCredits() {
+    try {
+      const credits = await this.prisma.ventaCuota.findMany({
+        select: SelectCreditos,
+        orderBy: {
+          creadoEn: 'desc',
+        },
+      });
+      const formatteds = simpleCreditNormalizer(credits);
+      return formatteds;
+    } catch (error) {
+      this.logger.error('Error en módulo de credito-get: ', error?.stack);
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException('Fatal Error: Error inesperado');
     }
   }
 }

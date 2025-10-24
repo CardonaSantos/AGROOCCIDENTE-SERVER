@@ -195,31 +195,57 @@ export function normalizerCreditoRegist(
               }
             : null,
           lineas: (c.venta.productos ?? []).map<NormLineaVenta>((vp) => {
-            const p = vp.producto || undefined;
-            const pr = vp.presentacion || undefined;
+            // Relaciones (pueden venir null según tu SELECT)
+            const p = vp.producto ?? undefined;
+            const pr = vp.presentacion ?? undefined;
 
-            const isPresentacion = !!pr?.id;
-            const type = isPresentacion ? 'PRESENTACION' : 'PRODUCTO';
-            const source = isPresentacion ? 'presentacion' : 'producto';
-            const uid = isPresentacion
-              ? `presentacion-${pr!.id}`
-              : `producto-${p?.id ?? vp.id}`;
+            // Snapshots/fallbacks (ajusta los nombres si en tu schema difieren)
+            const nombrePrSnap = (vp as any).presentacionNombreSnapshot ?? null;
+            const nombreProdSnap = (vp as any).nombreProductoSnapshot ?? null;
+            const codigoBarrasSnap = (vp as any).codigoBarrasSnapshot ?? null;
+            const codigoProdSnap = (vp as any).codigoProductoSnapshot ?? null;
 
-            // nombre: si hay presentacion, usar su nombre; si no, usar producto
-            const nombre = isPresentacion
-              ? (pr!.nombre ?? p?.nombre ?? 'Ítem')
-              : (p?.nombre ?? 'Ítem');
+            // ¿Fue una presentación? (no dependas solo de la relación)
+            const wasPresentacion =
+              !!pr?.id ||
+              !!(vp as any).presentacionId ||
+              !!codigoBarrasSnap ||
+              !!nombrePrSnap;
 
-            // códigos según el tipo
-            const codigoProducto = isPresentacion
-              ? (p?.codigoProducto ?? null)
-              : (p?.codigoProducto ?? null);
-            const codigoBarras = isPresentacion
-              ? (pr!.codigoBarras ?? null)
+            // Texto de nombre unificado (lo que quieres: si hay PR, usa PR; si no, PROD)
+            const nombreFromPr = pr?.nombre ?? nombrePrSnap ?? null;
+            const nombreFromProd = p?.nombre ?? nombreProdSnap ?? null;
+            const nombre = wasPresentacion
+              ? (nombreFromPr ?? nombreFromProd ?? 'Ítem')
+              : (nombreFromProd ?? nombreFromPr ?? 'Ítem');
+
+            // IDs unificados
+            const productoId =
+              pr?.producto?.id ?? p?.id ?? (vp as any).productoId ?? undefined;
+
+            const presentacionId = wasPresentacion
+              ? (pr?.id ?? (vp as any).presentacionId ?? undefined)
+              : undefined;
+
+            // Código(s)
+            const codigoProducto = p?.codigoProducto ?? codigoProdSnap ?? null;
+            const codigoBarras = wasPresentacion
+              ? (pr?.codigoBarras ?? codigoBarrasSnap ?? null)
               : null;
 
-            // imagen: la más segura suele ser la del producto
-            const imagen = p?.imagenesProducto?.[0]?.url ?? null;
+            // Fuente/tipo (solo metadatos; tu UI puede ignorarlos si quiere tratarlos “como producto”)
+            const type: 'PRESENTACION' | 'PRODUCTO' = wasPresentacion
+              ? 'PRESENTACION'
+              : 'PRODUCTO';
+            const source = wasPresentacion ? 'presentacion' : 'producto';
+
+            // UID estable (si vino por snapshot sin id, marca 'snap' para no colisionar)
+            const uid = wasPresentacion
+              ? `presentacion-${presentacionId ?? 'snap'}`
+              : `producto-${productoId ?? vp.id}`;
+
+            // Imagen: prioriza la del producto (suele ser la estable)
+            const imagen = p?.imagenesProducto?.[0]?.url;
 
             return {
               id: vp.id,
@@ -231,21 +257,19 @@ export function normalizerCreditoRegist(
                 source,
                 uid,
 
-                productoId: isPresentacion
-                  ? (pr!.producto?.id ?? p?.id)
-                  : p?.id,
-                presentacionId: isPresentacion ? pr!.id : undefined,
-
-                nombreProducto: p?.nombre ?? null,
-                nombrePresentacion: pr?.nombre ?? null,
-
+                productoId,
+                presentacionId,
+                // El nombre “único” que pediste
                 nombre,
+                // Códigos correctos según el tipo
                 codigoProducto,
                 codigoBarras,
-                imagen,
+
+                imagen: imagen,
               },
             };
           }),
+
           solicitudOrigen: c.venta.solicitudCredito
             ? {
                 id: c.venta.solicitudCredito.id,

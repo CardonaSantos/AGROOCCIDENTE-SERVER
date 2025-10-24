@@ -1,4 +1,12 @@
-import { Controller, Get, Post, Body, Patch, Param, Delete } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Patch,
+  Param,
+  Delete,
+} from '@nestjs/common';
 import { AbonoCuotaService } from './abono-cuota.service';
 import { CreateAbonoCuotaDto } from './dto/create-abono-cuota.dto';
 import { UpdateAbonoCuotaDto } from './dto/update-abono-cuota.dto';
@@ -13,22 +21,17 @@ export class AbonoCuotaController {
   }
 
   @Get()
-  findAll() {
-    return this.abonoCuotaService.findAll();
-  }
+  findAll() {}
 
   @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.abonoCuotaService.findOne(+id);
-  }
+  findOne(@Param('id') id: string) {}
 
   @Patch(':id')
-  update(@Param('id') id: string, @Body() updateAbonoCuotaDto: UpdateAbonoCuotaDto) {
-    return this.abonoCuotaService.update(+id, updateAbonoCuotaDto);
-  }
+  update(
+    @Param('id') id: string,
+    @Body() updateAbonoCuotaDto: UpdateAbonoCuotaDto,
+  ) {}
 
   @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.abonoCuotaService.remove(+id);
-  }
+  remove(@Param('id') id: string) {}
 }

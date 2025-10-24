@@ -25,11 +25,23 @@ export class CategoriaController {
   async findAll() {
     return await this.categoriaService.findAll();
   }
+  //------>
+  @Get('all-cats-with-counts')
+  getAllCats() {
+    return this.categoriaService.findAllWithCounts();
+  }
+
+  @Get('get-one-cat/:id')
+  getOne(@Param('id', ParseIntPipe) id: number) {
+    return this.categoriaService.findOneWithCount(id);
+  }
 
   @Get(':id')
   async findOne(@Param('id', ParseIntPipe) id: number) {
     return await this.categoriaService.findOne(id);
   }
+
+  //------>
 
   @Patch('/edit-category/:id')
   async update(

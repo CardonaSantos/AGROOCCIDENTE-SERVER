@@ -1,26 +1,31 @@
-import { Injectable } from '@nestjs/common';
+import {
+  HttpException,
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+} from '@nestjs/common';
 import { CreateAbonoCuotaDto } from './dto/create-abono-cuota.dto';
 import { UpdateAbonoCuotaDto } from './dto/update-abono-cuota.dto';
+import { PrismaService } from 'src/prisma/prisma.service';
 
 @Injectable()
 export class AbonoCuotaService {
-  create(createAbonoCuotaDto: CreateAbonoCuotaDto) {
-    return 'This action adds a new abonoCuota';
-  }
+  private readonly logger = new Logger(AbonoCuotaService.name);
+  constructor(private readonly prisma: PrismaService) {}
 
-  findAll() {
-    return `This action returns all abonoCuota`;
-  }
+  create(dto: CreateAbonoCuotaDto) {
+    this.logger.log(
+      `DTO recibido en abono cuota:\n${JSON.stringify(dto, null, 2)}`,
+    );
 
-  findOne(id: number) {
-    return `This action returns a #${id} abonoCuota`;
-  }
-
-  update(id: number, updateAbonoCuotaDto: UpdateAbonoCuotaDto) {
-    return `This action updates a #${id} abonoCuota`;
-  }
-
-  remove(id: number) {
-    return `This action removes a #${id} abonoCuota`;
+    try {
+      // const cuotaId = await this.prisma.abon
+    } catch (error) {
+      this.logger.error('Error en módulo abono cuotas: ', error?.stack);
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException(
+        'Fatal error: Error inesperado en módulo abonos',
+      );
+    }
   }
 }
