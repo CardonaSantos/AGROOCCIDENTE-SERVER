@@ -1,4 +1,3 @@
-import { TipoEmpaque } from '@prisma/client';
 import {
   ArrayNotEmpty,
   IsArray,
@@ -18,11 +17,6 @@ export class newQueryDTO {
   @IsOptional()
   @Transform(emptyToUndefined)
   nombreItem?: string;
-
-  @IsEnum(TipoEmpaque)
-  @IsOptional()
-  @Transform(emptyToUndefined)
-  tipoEmpaque?: TipoEmpaque;
 
   @IsString()
   @IsOptional()
@@ -67,4 +61,6 @@ export class newQueryDTO {
   @IsNumber()
   @Transform(({ value }) => (value === '' ? undefined : Number(value)))
   page?: number;
+
+  q?: string;
 }

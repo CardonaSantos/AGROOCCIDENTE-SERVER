@@ -1,4 +1,12 @@
-import { Controller, Get, Post, Body, Patch, Param, Delete } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Patch,
+  Param,
+  Delete,
+} from '@nestjs/common';
 import { CreditoCuotaService } from './credito-cuota.service';
 import { CreateCreditoCuotaDto } from './dto/create-credito-cuota.dto';
 import { UpdateCreditoCuotaDto } from './dto/update-credito-cuota.dto';
@@ -13,17 +21,19 @@ export class CreditoCuotaController {
   }
 
   @Get()
-  findAll() {
-    return this.creditoCuotaService.findAll();
+  async findActivos() {
+    return this.creditoCuotaService.findActivosConCuotasPendientes();
   }
-
   @Get(':id')
   findOne(@Param('id') id: string) {
     return this.creditoCuotaService.findOne(+id);
   }
 
   @Patch(':id')
-  update(@Param('id') id: string, @Body() updateCreditoCuotaDto: UpdateCreditoCuotaDto) {
+  update(
+    @Param('id') id: string,
+    @Body() updateCreditoCuotaDto: UpdateCreditoCuotaDto,
+  ) {
     return this.creditoCuotaService.update(+id, updateCreditoCuotaDto);
   }
 

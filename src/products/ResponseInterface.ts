@@ -1,4 +1,4 @@
-import { RolPrecio, TipoEmpaque, TipoPrecio } from '@prisma/client';
+import { RolPrecio, TipoPrecio } from '@prisma/client';
 
 export interface ProductoInventarioResponse {
   id: number;
@@ -6,7 +6,7 @@ export interface ProductoInventarioResponse {
   precioCosto: string;
   codigoProducto: string;
   descripcion: string;
-  tipoPresentacion?: TipoEmpaque;
+  // tipoPresentacion?: TipoEmpaque;
   precios: PrecioProductoNormalized[];
   stocks: StocksProducto[];
   stocksBySucursal: StocksBySucursal;

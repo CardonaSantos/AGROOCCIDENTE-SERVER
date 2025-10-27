@@ -71,6 +71,7 @@ export const presentacionSelect = {
   },
   producto: {
     select: {
+      id: true,
       imagenesProducto: {
         select: {
           url: true,

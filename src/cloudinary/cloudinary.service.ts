@@ -1,6 +1,4 @@
 import { Injectable } from '@nestjs/common';
-import { CreateCloudinaryDto } from './dto/create-cloudinary.dto';
-import { UpdateCloudinaryDto } from './dto/update-cloudinary.dto';
 import { v2 as cloudinary } from 'cloudinary';
 import { PrismaService } from 'src/prisma/prisma.service';
 
@@ -67,13 +65,5 @@ export class CloudinaryService {
         resolve();
       });
     });
-
-    //     async subirImagenBase64(imageDataUri: string): Promise<CloudinaryUploadResult> {
-    //   const result = await cloudinary.uploader.upload(imageDataUri, {
-    //     folder: 'AGROSERVICIO-PRODUCTOS',
-    //     resource_type: 'image',
-    //   });
-    //   return { url: result.secure_url, public_id: result.public_id };
-    // }
   }
 }

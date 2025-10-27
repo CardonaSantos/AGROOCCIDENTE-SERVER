@@ -6,6 +6,7 @@ import {
   InternalServerErrorException,
   Logger,
   MethodNotAllowedException,
+  NotFoundException,
 } from '@nestjs/common';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
@@ -13,7 +14,7 @@ import { PrismaService } from 'src/prisma/prisma.service';
 import { CreateNewProductDto } from './dto/create-productNew.dto';
 import { MinimunStockAlertService } from 'src/minimun-stock-alert/minimun-stock-alert.service';
 import { CloudinaryService } from 'src/cloudinary/cloudinary.service';
-import { Prisma, RolPrecio } from '@prisma/client';
+import { EstadoPrecio, Prisma, RolPrecio, TipoPrecio } from '@prisma/client';
 
 import { PresentacionProductoService } from 'src/presentacion-producto/presentacion-producto.service';
 import { ProductoApi } from './dto/interfacesPromise';
@@ -39,7 +40,7 @@ import * as isSameOrAfter from 'dayjs/plugin/isSameOrAfter';
 import * as isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
 import { newQueryDTO } from './query/newQuery';
 import { verifyProps } from 'src/utils/verifyPropsFromDTO';
-import { buildSearchForProducto } from './HELPERS';
+import { buildSearchForPresentacion, buildSearchForProducto } from './HELPERS';
 import { itemsBase } from './seed/utils';
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -50,6 +51,8 @@ dayjs.locale('es');
 const toDecimal = (value: string | number) => {
   return new Prisma.Decimal(value);
 };
+const INS = 'insensitive' as const;
+
 //HELPÉ
 @Injectable()
 export class ProductsService {
@@ -61,9 +64,11 @@ export class ProductsService {
     private readonly cloudinaryService: CloudinaryService,
     private readonly presentacionPrducto: PresentacionProductoService,
   ) {}
+  private dec = (v: any): string => (v == null ? '0' : String(v));
 
   //AJUSTAR CREACION DE IMAGENES
   // products.service.ts (solo el método create)
+  // products.service.ts
   async create(
     dto: CreateNewProductDto,
     imagenes: Express.Multer.File[],
@@ -81,6 +86,8 @@ export class ProductsService {
         precioCostoActual,
         presentaciones,
         stockMinimo,
+        // ✅ NUEVO
+        tipoPresentacionId,
       } = dto;
 
       this.logger.log(
@@ -88,12 +95,20 @@ export class ProductsService {
       );
 
       return await this.prisma.$transaction(async (tx) => {
-        // OJO: en schema es Float?, así que parsea a number
+        // ✅ (opcional pero recomendado) Pre-chequeo de duplicado de código
+        const dup = await tx.producto.findUnique({ where: { codigoProducto } });
+        if (dup) {
+          throw new BadRequestException(
+            `Ya existe un producto con código "${codigoProducto}"`,
+          );
+        }
+
         const costoActualNumber =
           precioCostoActual != null && String(precioCostoActual).trim() !== ''
             ? Number(precioCostoActual)
             : null;
 
+        // ✅ Vincular TipoPresentacion al PRODUCTO
         const newProduct = await tx.producto.create({
           data: {
             precioCostoActual: costoActualNumber,
@@ -104,19 +119,22 @@ export class ProductsService {
             categorias: {
               connect: categorias?.map((id) => ({ id })) ?? [],
             },
+            ...(tipoPresentacionId
+              ? { tipoPresentacion: { connect: { id: tipoPresentacionId } } }
+              : {}), // o { tipoPresentacionId } directamente
           },
         });
 
         // Precios a nivel producto
-        const preciosCreados = await Promise.all(
+        await Promise.all(
           (precioVenta ?? []).map((precio) =>
             tx.precioProducto.create({
               data: {
                 productoId: newProduct.id,
-                precio: precio.precio, // string OK (Decimal)
+                precio: precio.precio,
                 estado: 'APROBADO',
                 tipo: 'ESTANDAR',
-                creadoPorId: creadoPorId,
+                creadoPorId,
                 fechaCreacion: new Date(),
                 orden: precio.orden,
                 rol: precio.rol,
@@ -125,13 +143,10 @@ export class ProductsService {
           ),
         );
 
-        // Stock mínimo de producto (1:1)
+        // Stock mínimo de producto
         if (stockMinimo != null) {
           await tx.stockThreshold.create({
-            data: {
-              productoId: newProduct.id,
-              stockMinimo,
-            },
+            data: { productoId: newProduct.id, stockMinimo },
           });
         }
 
@@ -146,7 +161,6 @@ export class ProductsService {
           for (let idx = 0; idx < uploads.length; idx++) {
             const r = uploads[idx];
             const file = imagenes[idx];
-
             if (r.status === 'fulfilled') {
               const { url, public_id } = r.value;
               await this.vincularProductoImagen(
@@ -164,6 +178,7 @@ export class ProductsService {
           this.logger.debug('No hay imágenes de producto para subir/crear');
         }
 
+        // ✅ Presentaciones (con tipoPresentacionId y categoriaIds)
         const createdPresentations = await this.presentacionPrducto.create(
           tx,
           presentaciones ?? [],
@@ -174,7 +189,6 @@ export class ProductsService {
 
         return {
           newProduct,
-          preciosCreados,
           presentaciones: createdPresentations,
         };
       });
@@ -285,7 +299,7 @@ export class ProductsService {
           nombre: pres.nombre,
           // sku: pres.sku,
           codigoBarras: pres.codigoBarras,
-          tipoPresentacion: pres.tipoPresentacion,
+          // tipoPresentacion: pres.tipoPresentacion,
           precios: pres.precios.map((pp) => ({
             id: pp.id,
             precio: pp.precio,
@@ -327,6 +341,12 @@ export class ProductsService {
 
       this.asignePropsWhereInput(dto, whereProducto);
       this.asignePropsWhereInputPresentation(dto, wherePresentacion);
+      this.logger.debug(
+        'WHERE Producto => ' + JSON.stringify(whereProducto, null, 2),
+      );
+      this.logger.debug(
+        'WHERE Presentación => ' + JSON.stringify(wherePresentacion, null, 2),
+      );
 
       // Para paginar el "mix" haremos:
       const [totalProducts, totalPresentations] = await Promise.all([
@@ -407,37 +427,17 @@ export class ProductsService {
   }
 
   asignePropsWhereInput(dto: newQueryDTO, where: Prisma.ProductoWhereInput) {
-    const {
-      cats,
-      codigoItem,
-      codigoProveedor,
-      priceRange,
-      nombreItem,
-      sucursalId,
-      tipoEmpaque, // pendiente de migración
-    } = dto;
+    const { cats, codigoItem, codigoProveedor, priceRange, nombreItem } = dto;
 
     if (!dto) throw new BadRequestException('Datos inválidos');
 
-    // 1) filtros existentes
+    // ---- 0) Derivar q unificada desde un solo input ----
+    const qRaw = (dto as any).q ?? nombreItem ?? codigoItem ?? '';
+    const hasUnifiedQ = !!qRaw?.trim();
+
+    // ---- 1) Filtros “ortogonales” que no chocan con q ----
     if (Array.isArray(cats) && cats.length > 0) {
       where.categorias = { some: { id: { in: cats } } };
-    }
-
-    if (codigoItem) {
-      // si el front todavía manda codigoItem, mantenlo
-      where.codigoProducto = { contains: codigoItem, mode: 'insensitive' };
-    }
-
-    if (codigoProveedor) {
-      where.codigoProveedor = {
-        contains: codigoProveedor,
-        mode: 'insensitive',
-      };
-    }
-
-    if (nombreItem) {
-      where.nombre = { contains: nombreItem, mode: 'insensitive' };
     }
 
     if (priceRange != null) {
@@ -453,22 +453,33 @@ export class ProductsService {
       }
     }
 
-    const toAndArray = (
+    // ⚠️ 2) Si estoy usando búsqueda unificada, NO dupliques filtros por campo
+    if (!hasUnifiedQ) {
+      if (codigoItem) {
+        where.codigoProducto = { contains: codigoItem, mode: INS };
+      }
+      if (nombreItem) {
+        where.nombre = { contains: nombreItem, mode: INS };
+      }
+      if (codigoProveedor) {
+        where.codigoProveedor = { contains: codigoProveedor, mode: INS };
+      }
+    } else {
+      // Si quieres permitir además un filtro explícito y separado por proveedor (de otro control),
+      // déjalo aquí (solo si viene por un campo dedicado distinto al input unificado):
+      if (dto.codigoProveedor && dto.q) {
+        // opcional: moverlo a OR con el builder si así lo prefieres
+      }
+    }
+
+    // ---- 3) BÚSQUEDA UNIFICADA (tokens + heurística código) ----
+    const toAndArr = (
       x?: Prisma.ProductoWhereInput | Prisma.ProductoWhereInput[],
-    ): Prisma.ProductoWhereInput[] => (Array.isArray(x) ? x : x ? [x] : []);
+    ) => (Array.isArray(x) ? x : x ? [x] : []);
 
-    const toPresentacionAndArray = (
-      x?:
-        | Prisma.ProductoPresentacionWhereInput
-        | Prisma.ProductoPresentacionWhereInput[],
-    ): Prisma.ProductoPresentacionWhereInput[] =>
-      Array.isArray(x) ? x : x ? [x] : [];
-
-    // 2) BUSQUEDA UNIFICADA (q) — fallback al único input
-    const q = (dto as any).q ?? dto.nombreItem ?? dto.codigoItem ?? '';
-    const textSearch = buildSearchForProducto(q);
+    const textSearch = buildSearchForProducto(qRaw);
     if (textSearch) {
-      where.AND = [...toAndArray(where.AND), textSearch];
+      where.AND = [...toAndArr(where.AND), textSearch];
     }
 
     return where;
@@ -478,37 +489,17 @@ export class ProductsService {
     dto: newQueryDTO,
     where: Prisma.ProductoPresentacionWhereInput,
   ) {
-    const {
-      cats,
-      codigoItem,
-      codigoProveedor,
-      priceRange,
-      nombreItem,
-      sucursalId,
-      tipoEmpaque,
-    } = dto;
+    const { cats, codigoItem, codigoProveedor, priceRange, nombreItem } = dto;
 
     if (!dto) throw new BadRequestException('Datos inválidos');
 
-    if (codigoItem) {
-      where.codigoBarras = { contains: codigoItem, mode: 'insensitive' };
-    }
+    // ---- 0) q unificada ----
+    const qRaw = (dto as any).q ?? nombreItem ?? codigoItem ?? '';
+    const hasUnifiedQ = !!qRaw?.trim();
 
-    if (nombreItem) {
-      where.nombre = { contains: nombreItem, mode: 'insensitive' };
-    }
-
+    // ---- 1) Filtros ortogonales ----
     if (Array.isArray(cats) && cats.length > 0) {
       where.producto = { is: { categorias: { some: { id: { in: cats } } } } };
-    }
-
-    if (codigoProveedor) {
-      where.producto = {
-        is: {
-          ...(where.producto?.is ?? {}),
-          codigoProveedor: { contains: codigoProveedor, mode: 'insensitive' },
-        },
-      };
     }
 
     if (priceRange != null) {
@@ -523,7 +514,37 @@ export class ProductsService {
         where.precios = { some: { precio: { equals: priceRange } } };
       }
     }
-    // tipoEmpaque: cuando migres, filtra aquí
+
+    // ⚠️ 2) Evitar doble filtrado si hay q unificada
+    if (!hasUnifiedQ) {
+      if (codigoItem) {
+        where.codigoBarras = { contains: codigoItem, mode: INS };
+      }
+      if (nombreItem) {
+        where.nombre = { contains: nombreItem, mode: INS };
+      }
+      if (codigoProveedor) {
+        where.producto = {
+          is: {
+            ...(where.producto?.is ?? {}),
+            codigoProveedor: { contains: codigoProveedor, mode: INS },
+          },
+        };
+      }
+    }
+
+    // ---- 3) BÚSQUEDA UNIFICADA también en Presentación ----
+    const toAndArr = (
+      x?:
+        | Prisma.ProductoPresentacionWhereInput
+        | Prisma.ProductoPresentacionWhereInput[],
+    ) => (Array.isArray(x) ? x : x ? [x] : []);
+
+    const textSearchPres = buildSearchForPresentacion(qRaw);
+    if (textSearchPres) {
+      where.AND = [...toAndArr(where.AND), textSearchPres];
+    }
+
     return where;
   }
 
@@ -719,150 +740,6 @@ export class ProductsService {
     } catch (error) {
       console.log(error);
       throw new InternalServerErrorException('Error al encontrar el producto');
-    }
-  }
-
-  async update(id: number, updateProductDto: UpdateProductDto) {
-    console.log(
-      'Actualizando producto con ID:',
-      id,
-      'con datos:',
-      updateProductDto,
-    );
-
-    const productoAnterior = await this.prisma.producto.findUnique({
-      where: { id },
-      include: { stockThreshold: true },
-    });
-
-    try {
-      // 2) Abrimos la transacción
-      const productoActualizado = await this.prisma.$transaction(async (tx) => {
-        // 2.1) Actualizar datos básicos y categorías
-        const productoUpdate = await tx.producto.update({
-          where: { id },
-          data: {
-            codigoProducto: updateProductDto.codigoProducto,
-            codigoProveedor: updateProductDto.codigoProveedor,
-            nombre: updateProductDto.nombre,
-            descripcion: updateProductDto.descripcion,
-            precioCostoActual: Number(updateProductDto.precioCostoActual),
-            categorias: {
-              set: [],
-              connect:
-                updateProductDto.categorias?.map((cid) => ({ id: cid })) || [],
-            },
-          },
-          include: {
-            categorias: true,
-            stockThreshold: true,
-          },
-        });
-
-        // 2.2) Upsert de stockThreshold
-        if (updateProductDto.stockMinimo !== undefined) {
-          await tx.stockThreshold.upsert({
-            where: { productoId: id },
-            update: { stockMinimo: updateProductDto.stockMinimo },
-            create: {
-              producto: { connect: { id } },
-              stockMinimo: updateProductDto.stockMinimo,
-            },
-          });
-        }
-
-        // 2.3) Update / create de precios
-        for (const price of updateProductDto.precios || []) {
-          if (price.id) {
-            await tx.precioProducto.update({
-              where: { id: price.id },
-              data: {
-                precio: price.precio,
-                rol: price.rol,
-                orden: price.orden,
-              },
-            });
-          } else {
-            await tx.precioProducto.create({
-              data: {
-                estado: 'APROBADO',
-                precio: price.precio,
-                creadoPorId: updateProductDto.usuarioId,
-                productoId: productoUpdate.id,
-                tipo: 'ESTANDAR',
-                orden: price.orden,
-                rol: price.rol,
-              },
-            });
-          }
-        }
-
-        // 2.4) Historial de cambio de precio de costo
-        if (
-          productoAnterior &&
-          Number(productoAnterior.precioCostoActual) !==
-            Number(productoUpdate.precioCostoActual)
-        ) {
-          const newRegistroCambioPrecio = await tx.historialPrecioCosto.create({
-            data: {
-              motivoCambio: updateProductDto.motivoCambio,
-              sucursal: {
-                connect: {
-                  id: updateProductDto.sucursalId,
-                },
-              },
-              producto: {
-                connect: {
-                  id: productoAnterior.id,
-                },
-              },
-              precioCostoAnterior: Number(productoAnterior.precioCostoActual),
-              precioCostoNuevo: Number(productoUpdate.precioCostoActual),
-              modificadoPor: {
-                connect: {
-                  id: updateProductDto.modificadoPorId,
-                },
-              },
-            },
-          });
-
-          this.logger.log(
-            'El registro de cambio de precio es: ',
-            newRegistroCambioPrecio,
-          );
-        }
-
-        // 2.5) Subida y vinculación de imágenes
-        // if (updateProductDto.imagenes?.length) {
-        //   const promesas = updateProductDto.imagenes.map((base64) =>
-        //     this.cloudinaryService.subirImagenFile(base64),
-        //   );
-        //   const resultados = await Promise.allSettled(promesas);
-
-        //   for (let idx = 0; idx < resultados.length; idx++) {
-        //     const res = resultados[idx];
-        //     if (res.status === 'fulfilled') {
-        //       const { url, public_id } = res.value;
-        //       // Usamos tx para la vinculación
-        //       await this.vincularProductoImagen(
-        //         tx,
-        //         productoUpdate.id,
-        //         url,
-        //         public_id,
-        //       );
-        //     } else {
-        //       console.error(`Error subiendo imagen [${idx}]:`, res.reason);
-        //     }
-        //   }
-        // }
-
-        return productoUpdate;
-      });
-
-      return productoActualizado;
-    } catch (error) {
-      console.error(error);
-      throw new InternalServerErrorException('Error al actualizar el producto');
     }
   }
 
@@ -1067,7 +944,7 @@ export class ProductsService {
           nombre: pres.nombre,
           // sku: pres.sku,
           codigoBarras: pres.codigoBarras,
-          tipoPresentacion: pres.tipoPresentacion,
+          // tipoPresentacion: pres.tipoPresentacion,
           precios: pres.precios.map((pr) => ({
             id: pr.id,
             precio: pr.precio.toString(),
@@ -1095,91 +972,92 @@ export class ProductsService {
       const {
         precio,
         sucursalId,
-        tipoPresentacion,
         categorias,
         codigoProducto,
         fechaVencimiento,
         productoNombre,
         limit,
         page,
+        q,
       } = dto;
       this.logger.log('nuevo para inventariado');
-
       const skip = (page - 1) * limit;
 
       const where: Prisma.ProductoWhereInput = {};
       const wherePresentaciones: Prisma.ProductoPresentacionWhereInput = {};
-      // WHERE DINAMICO DE PRODUCTO
-      if (productoNombre) {
-        where.nombre = { contains: productoNombre, mode: 'insensitive' };
-      }
 
-      if (codigoProducto) {
-        where.codigoProducto = { equals: codigoProducto, mode: 'insensitive' };
-      }
+      // --- q unificada (fallback a campos legacy) ---
+      const qRaw = (q ?? productoNombre ?? codigoProducto ?? '').trim();
+      const hasUnifiedQ = !!qRaw;
 
+      // ---- Filtros ORTOGONALES (se conservan) ----
       if (categorias && categorias.length > 0) {
-        where.categorias = {
-          some: {
-            id: { in: categorias },
+        where.categorias = { some: { id: { in: categorias } } };
+        wherePresentaciones.producto = {
+          is: {
+            ...(wherePresentaciones.producto?.is ?? {}),
+            categorias: { some: { id: { in: categorias } } },
           },
         };
       }
 
       if (fechaVencimiento) {
-        where.stock = {
-          some: {
-            fechaVencimiento: fechaVencimiento,
-          },
-        };
-      }
-
-      if (precio) {
-        where.precios = {
-          some: {
-            precio: { equals: precio },
-          },
-        };
-      }
-
-      // WHERE DINAMICO DE PRESENTACIONES PRODUCTOS
-      if (productoNombre) {
-        wherePresentaciones.nombre = {
-          contains: productoNombre,
-          mode: 'insensitive',
-        };
-      }
-
-      if (codigoProducto) {
-        wherePresentaciones.codigoBarras = {
-          contains: codigoProducto,
-          mode: 'insensitive',
-        };
-      }
-
-      if (tipoPresentacion) {
-        wherePresentaciones.tipoPresentacion = {
-          in: tipoPresentacion,
-        };
-      }
-
-      if (precio) {
-        wherePresentaciones.precios = {
-          some: {
-            precio: { equals: precio },
-          },
-        };
-      }
-
-      if (fechaVencimiento) {
+        // ojo: esto exige que exista stock con esa fecha
+        where.stock = { some: { fechaVencimiento: fechaVencimiento as any } };
         wherePresentaciones.stockPresentaciones = {
-          some: {
-            fechaVencimiento: {
-              equals: fechaVencimiento,
-            },
-          },
+          some: { fechaVencimiento: { equals: fechaVencimiento as any } },
         };
       }
+
+      if (precio) {
+        where.precios = { some: { precio: { equals: precio as any } } };
+        wherePresentaciones.precios = {
+          some: { precio: { equals: precio as any } },
+        };
+      }
+
+      // ---- Evita doble filtro por nombre/código cuando usamos q ----
+      if (!hasUnifiedQ) {
+        if (productoNombre) {
+          where.nombre = { contains: productoNombre, mode: 'insensitive' };
+          wherePresentaciones.nombre = {
+            contains: productoNombre,
+            mode: 'insensitive',
+          };
+        }
+        if (codigoProducto) {
+          where.codigoProducto = {
+            equals: codigoProducto,
+            mode: 'insensitive',
+          };
+          wherePresentaciones.codigoBarras = {
+            contains: codigoProducto,
+            mode: 'insensitive',
+          };
+        }
+      }
+
+      // ---- Aplica búsqueda unificada (igual que en POS) ----
+      const addAnd = <T extends { AND?: any }>(dst: T, clause?: any) => {
+        if (!clause) return;
+        const current = dst.AND;
+        dst.AND = Array.isArray(current)
+          ? [...current, clause]
+          : current
+            ? [current, clause]
+            : [clause];
+      };
+
+      addAnd(where, buildSearchForProducto(qRaw));
+      addAnd(wherePresentaciones, buildSearchForPresentacion(qRaw));
+
+      this.logger.debug(
+        'INV WHERE Producto => ' + JSON.stringify(where, null, 2),
+      );
+      this.logger.debug(
+        'INV WHERE Presentación => ' +
+          JSON.stringify(wherePresentaciones, null, 2),
+      );
 
       const productoSelectFor = (
         sucursalId?: number,
@@ -1334,6 +1212,8 @@ export class ProductsService {
         stocksBySucursal: stocksBySucursal,
         image: p?.imagenesProducto[0]?.url,
         images: p?.imagenesProducto,
+        type: 'PRODUCTO',
+        productoId: p.id,
       };
     });
   }
@@ -1400,6 +1280,8 @@ export class ProductsService {
         stocksBySucursal,
         image,
         images, // mantén arreglo completo para el front; caerá en []
+        type: 'PRESENTACION',
+        productoId: p.producto.id,
       };
     });
   }
@@ -1458,5 +1340,551 @@ export class ProductsService {
     };
 
     return summary;
+  }
+
+  //SERVICIOS DE EDICION DE PRODUCTO - GET Y PATCH
+  async getProductToEdit(productId: number) {
+    try {
+      if (!productId) throw new BadRequestException('Id de producto no válido');
+      const product = await this.prisma.producto.findUnique({
+        where: { id: productId },
+      });
+    } catch (error) {
+      this.logger.error(
+        'Error en módulo de productos-get edición: ',
+        error?.stack,
+      );
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException('Fatal error: Error inesperado');
+    }
+  }
+
+  //EDICION Y GET DE PRODUCTO
+  async getProductDetail(id: number) {
+    const p = await this.prisma.producto.findUnique({
+      where: { id },
+      include: {
+        categorias: true,
+        tipoPresentacion: true,
+        imagenesProducto: true,
+        precios: { orderBy: { orden: 'asc' } },
+        stockThreshold: {
+          select: {
+            stockMinimo: true,
+          },
+        },
+        presentaciones: {
+          include: {
+            categorias: true,
+            tipoPresentacion: true,
+            imagenesPresentacion: true,
+            precios: { orderBy: { orden: 'asc' } },
+            stockThresholdPresentacion: {
+              select: {
+                stockMinimo: true,
+              },
+            },
+          },
+          orderBy: { id: 'asc' },
+        },
+      },
+    });
+
+    if (!p) throw new NotFoundException('Producto no encontrado');
+
+    const data = {
+      id: p.id,
+      nombre: p.nombre,
+      codigoProducto: p.codigoProducto,
+      codigoProveedor: p.codigoProveedor,
+      descripcion: p.descripcion,
+
+      // mejor como número para el input
+      precioCostoActual: Number(p.precioCostoActual ?? 0),
+
+      // 🔹 nuevo: expón stockMinimo de producto
+      stockMinimo: p.stockThreshold?.stockMinimo ?? 0,
+
+      categorias: p.categorias.map(({ id, nombre }) => ({ id, nombre })),
+      tipoPresentacionId: p.tipoPresentacionId,
+      tipoPresentacion: p.tipoPresentacion && {
+        id: p.tipoPresentacion.id,
+        nombre: p.tipoPresentacion.nombre,
+      },
+
+      imagenesProducto: p.imagenesProducto.map((i) => ({
+        id: i.id,
+        url: i.url,
+        public_id: i.public_id,
+        name: i.altTexto ?? null,
+      })),
+
+      precios: p.precios.map((x) => ({
+        rol: x.rol,
+        orden: x.orden,
+        precio: this.dec(x.precio), // string ok para el UI
+      })),
+
+      presentaciones: p.presentaciones.map((sp) => ({
+        id: sp.id,
+        nombre: sp.nombre,
+        codigoBarras: sp.codigoBarras,
+        tipoPresentacionId: sp.tipoPresentacionId,
+        tipoPresentacion: sp.tipoPresentacion && {
+          id: sp.tipoPresentacion.id,
+          nombre: sp.tipoPresentacion.nombre,
+        },
+        costoReferencialPresentacion: this.dec(sp.costoReferencialPresentacion),
+        descripcion: sp.descripcion,
+
+        // 🔧 null-safe
+        stockMinimo: sp.stockThresholdPresentacion?.stockMinimo ?? 0,
+
+        precios: sp.precios.map((px) => ({
+          rol: px.rol,
+          orden: px.orden,
+          precio: this.dec(px.precio),
+        })),
+        esDefault: !!sp.esDefault,
+        imagenesPresentacion: sp.imagenesPresentacion.map((i) => ({
+          id: i.id,
+          url: i.url,
+          public_id: i.public_id,
+          name: i.altTexto ?? null,
+        })),
+        activo: !!sp.activo,
+        categorias: sp.categorias.map(({ id, nombre }) => ({ id, nombre })),
+      })),
+    };
+    this.logger.log(
+      `La data a retornar al formulario de edicion de producto es:\n${JSON.stringify(data, null, 2)}`,
+    );
+
+    return data;
+  }
+
+  // Sube y guarda imágenes de PRODUCTO en Cloudinary y luego en Prisma.
+  // Si el insert en la DB fallara, elimina en Cloudinary lo que ya subiste (compensación).
+  // ================== HELPERS IMÁGENES ==================
+
+  /** Sube imágenes de PRODUCTO a Cloudinary y las persiste en Prisma.
+   * Si el insert falla, borra en Cloudinary (compensación). */
+  private async uploadAndSaveProductImages(
+    tx: Prisma.TransactionClient,
+    productoId: number,
+    files: Express.Multer.File[],
+  ) {
+    if (!files?.length) return;
+
+    const uploads = await Promise.allSettled(
+      files.map((file) => this.cloudinaryService.subirImagenFile(file)),
+    );
+
+    const ok = uploads
+      .map((r, i) => ({ r, file: files[i] }))
+      .filter(
+        (
+          x,
+        ): x is {
+          r: PromiseFulfilledResult<{ url: string; public_id: string }>;
+          file: Express.Multer.File;
+        } => x.r.status === 'fulfilled',
+      );
+
+    const fail = uploads
+      .map((r, i) => ({ r, file: files[i] }))
+      .filter(
+        (x): x is { r: PromiseRejectedResult; file: Express.Multer.File } =>
+          x.r.status === 'rejected',
+      );
+
+    if (fail.length) {
+      this.logger.warn(
+        `[uploadAndSaveProductImages] ${fail.length} upload(s) fallidos: ${fail
+          .map((f) => f.file.originalname)
+          .join(', ')}`,
+      );
+    }
+
+    if (!ok.length) return;
+
+    try {
+      await tx.imagenProducto.createMany({
+        data: ok.map(({ r, file }) => ({
+          productoId,
+          url: r.value.url,
+          public_id: r.value.public_id,
+          altTexto: file.originalname ?? null,
+        })),
+      });
+    } catch (e) {
+      // compensación
+      await Promise.allSettled(
+        ok.map(({ r }) =>
+          this.cloudinaryService.BorrarImagen(r.value.public_id),
+        ),
+      );
+      throw e;
+    }
+  }
+
+  /** Sube imágenes de PRESENTACIÓN a Cloudinary y las persiste en Prisma. */
+  private async uploadAndSavePresentationImages(
+    tx: Prisma.TransactionClient,
+    presentacionId: number,
+    files: Express.Multer.File[],
+  ) {
+    if (!files?.length) return;
+
+    const uploads = await Promise.allSettled(
+      files.map((file) => this.cloudinaryService.subirImagenFile(file)),
+    );
+
+    const ok = uploads
+      .map((r, i) => ({ r, file: files[i] }))
+      .filter(
+        (
+          x,
+        ): x is {
+          r: PromiseFulfilledResult<{ url: string; public_id: string }>;
+          file: Express.Multer.File;
+        } => x.r.status === 'fulfilled',
+      );
+
+    const fail = uploads
+      .map((r, i) => ({ r, file: files[i] }))
+      .filter(
+        (x): x is { r: PromiseRejectedResult; file: Express.Multer.File } =>
+          x.r.status === 'rejected',
+      );
+
+    if (fail.length) {
+      this.logger.warn(
+        `[uploadAndSavePresentationImages] ${fail.length} upload(s) fallidos: ${fail
+          .map((f) => f.file.originalname)
+          .join(', ')}`,
+      );
+    }
+
+    if (!ok.length) return;
+
+    try {
+      await tx.imagenPresentacion.createMany({
+        data: ok.map(({ r, file }) => ({
+          presentacionId,
+          url: r.value.url,
+          public_id: r.value.public_id,
+          altTexto: file.originalname ?? null,
+          orden: 0,
+        })),
+      });
+    } catch (e) {
+      await Promise.allSettled(
+        ok.map(({ r }) =>
+          this.cloudinaryService.BorrarImagen(r.value.public_id),
+        ),
+      );
+      throw e;
+    }
+  }
+
+  // ================== UPDATE (DROP-IN) ==================
+
+  async update(
+    productId: number,
+    dto: {
+      nombre: string;
+      descripcion: string | null;
+      codigoProducto: string;
+      codigoProveedor: string | null;
+      stockMinimo: number | null;
+      precioCostoActual: string | null;
+      creadoPorId: number;
+      categorias: number[];
+      tipoPresentacionId: number | null;
+      precioVenta: { rol: RolPrecio; orden: number; precio: string }[];
+      presentaciones: Array<{
+        id: number | null;
+        nombre: string;
+        codigoBarras?: string;
+        esDefault: boolean;
+        tipoPresentacionId: number | null;
+        costoReferencialPresentacion: string | null;
+        descripcion: string | null;
+        stockMinimo: number | null;
+        categoriaIds: number[];
+        preciosPresentacion: {
+          rol: RolPrecio;
+          orden: number;
+          precio: string;
+        }[];
+        activo?: boolean;
+      }>;
+      deletedPresentationIds?: number[];
+      keepProductImageIds?: number[];
+      keepPresentationImageIds?: Record<number, number[]>;
+    },
+    productImages: Express.Multer.File[],
+    presImagesByIndex: Map<number, Express.Multer.File[]>,
+  ) {
+    this.logger.log(
+      `DTO recibido para editar producto y presentacion con sus props:\n${JSON.stringify(
+        dto,
+        null,
+        2,
+      )}`,
+    );
+
+    this.logger.debug(`[update] productImages=${productImages.length}`);
+    this.logger.debug(
+      `[update] presImages indexes: ${
+        Array.from(presImagesByIndex.keys()).join(', ') || '(none)'
+      }`,
+    );
+    for (const [i, list] of presImagesByIndex) {
+      this.logger.debug(
+        `  pres[${i}] files=${list.length} -> ${list
+          .map((f) => f.originalname)
+          .join(', ')}`,
+      );
+    }
+    const keepKeys =
+      dto.keepPresentationImageIds &&
+      Object.keys(dto.keepPresentationImageIds).join(', ');
+    this.logger.debug(
+      `[update] keepPresentationImageIds keys: ${keepKeys || '(none)'}`,
+    );
+
+    return this.prisma.$transaction(async (tx) => {
+      // 1) existencia
+      const exists = await tx.producto.findUnique({
+        where: { id: productId },
+        select: { id: true },
+      });
+      if (!exists) throw new NotFoundException('Producto no encontrado');
+
+      // 2) update producto base
+      await tx.producto.update({
+        where: { id: productId },
+        data: {
+          nombre: dto.nombre,
+          descripcion: dto.descripcion,
+          codigoProducto: dto.codigoProducto,
+          codigoProveedor: dto.codigoProveedor,
+          precioCostoActual: dto.precioCostoActual
+            ? Number(dto.precioCostoActual)
+            : null,
+          tipoPresentacionId: dto.tipoPresentacionId,
+          categorias: { set: dto.categorias.map((id) => ({ id })) },
+        },
+      });
+
+      // 3) stockThreshold producto
+      if (dto.stockMinimo === null) {
+        await tx.stockThreshold.deleteMany({
+          where: { productoId: productId },
+        });
+      } else {
+        const current = await tx.stockThreshold.findFirst({
+          where: { productoId: productId },
+        });
+        if (current) {
+          await tx.stockThreshold.update({
+            where: { id: current.id },
+            data: { stockMinimo: dto.stockMinimo },
+          });
+        } else {
+          await tx.stockThreshold.create({
+            data: { productoId: productId, stockMinimo: dto.stockMinimo },
+          });
+        }
+      }
+
+      // 4) precios del producto (replace)
+      await tx.precioProducto.deleteMany({ where: { productoId: productId } });
+      if (dto.precioVenta?.length) {
+        await tx.precioProducto.createMany({
+          data: dto.precioVenta.map((p) => ({
+            productoId: productId,
+            rol: p.rol,
+            orden: p.orden,
+            precio: new Prisma.Decimal(p.precio),
+            tipo: TipoPrecio.ESTANDAR,
+            estado: EstadoPrecio.APROBADO,
+          })),
+        });
+      }
+
+      // 5) imágenes del producto
+      // BORRAR solo si el front envía keepProductImageIds (si no, no tocamos nada)
+      if (Array.isArray(dto.keepProductImageIds)) {
+        const existing = await tx.imagenProducto.findMany({
+          where: { productoId: productId },
+          select: { id: true, public_id: true },
+        });
+        const keepSet = new Set(dto.keepProductImageIds);
+        const toDelete = existing.filter((x) => !keepSet.has(x.id));
+        if (toDelete.length) {
+          await Promise.allSettled(
+            toDelete
+              .filter((x) => !!x.public_id)
+              .map((x) => this.cloudinaryService.BorrarImagen(x.public_id!)),
+          );
+          await tx.imagenProducto.deleteMany({
+            where: { id: { in: toDelete.map((x) => x.id) } },
+          });
+        }
+      }
+      // subir nuevas imágenes de producto (si hay)
+      await this.uploadAndSaveProductImages(tx, productId, productImages);
+
+      // 6) presentaciones eliminadas (si llegan) — limpia Cloudinary y DB
+      if (dto.deletedPresentationIds?.length) {
+        const imgsToDelete = await tx.imagenPresentacion.findMany({
+          where: { presentacionId: { in: dto.deletedPresentationIds } },
+          select: { id: true, public_id: true },
+        });
+        if (imgsToDelete.length) {
+          await Promise.allSettled(
+            imgsToDelete
+              .filter((x) => !!x.public_id)
+              .map((x) => this.cloudinaryService.BorrarImagen(x.public_id!)),
+          );
+        }
+        await tx.productoPresentacion.deleteMany({
+          where: {
+            id: { in: dto.deletedPresentationIds },
+            productoId: productId,
+          },
+        });
+      }
+
+      // 7) upsert presentaciones + stock + precios + imágenes
+      const keepMap = dto.keepPresentationImageIds; // undefined => no borrar nada existente
+
+      for (let i = 0; i < (dto.presentaciones?.length ?? 0); i++) {
+        const p = dto.presentaciones[i];
+        let presId = p.id ?? null;
+
+        if (presId == null) {
+          // create
+          const created = await tx.productoPresentacion.create({
+            data: {
+              productoId: productId,
+              nombre: p.nombre,
+              codigoBarras: p.codigoBarras || null,
+              esDefault: p.esDefault,
+              tipoPresentacionId: p.tipoPresentacionId,
+              costoReferencialPresentacion: p.costoReferencialPresentacion
+                ? new Prisma.Decimal(p.costoReferencialPresentacion)
+                : null,
+              descripcion: p.descripcion,
+              activo: p.activo ?? true,
+              categorias: { connect: p.categoriaIds.map((id) => ({ id })) },
+            },
+            select: { id: true },
+          });
+          presId = created.id;
+        } else {
+          // update
+          await tx.productoPresentacion.update({
+            where: { id: presId, productoId: productId },
+            data: {
+              nombre: p.nombre,
+              codigoBarras: p.codigoBarras || null,
+              esDefault: p.esDefault,
+              tipoPresentacionId: p.tipoPresentacionId,
+              costoReferencialPresentacion: p.costoReferencialPresentacion
+                ? new Prisma.Decimal(p.costoReferencialPresentacion)
+                : null,
+              descripcion: p.descripcion,
+              activo: p.activo ?? true,
+              categorias: { set: p.categoriaIds.map((id) => ({ id })) },
+            },
+          });
+        }
+
+        // stockThresholdPresentacion
+        if (p.stockMinimo === null) {
+          await tx.stockThresholdPresentacion.deleteMany({
+            where: { presentacionId: presId },
+          });
+        } else {
+          const cur = await tx.stockThresholdPresentacion.findFirst({
+            where: { presentacionId: presId },
+          });
+          if (cur) {
+            await tx.stockThresholdPresentacion.update({
+              where: { id: cur.id },
+              data: { stockMinimo: p.stockMinimo },
+            });
+          } else {
+            await tx.stockThresholdPresentacion.create({
+              data: { presentacionId: presId, stockMinimo: p.stockMinimo },
+            });
+          }
+        }
+
+        // precios de la presentación (replace)
+        await tx.precioProducto.deleteMany({
+          where: { presentacionId: presId },
+        });
+        if (p.preciosPresentacion?.length) {
+          await tx.precioProducto.createMany({
+            data: p.preciosPresentacion.map((pp) => ({
+              presentacionId: presId,
+              rol: pp.rol,
+              orden: pp.orden,
+              precio: new Prisma.Decimal(pp.precio),
+              tipo: TipoPrecio.ESTANDAR,
+              estado: EstadoPrecio.APROBADO,
+            })),
+          });
+        }
+
+        // imágenes de la presentación:
+        // BORRAR solo si el front envió una entrada para este presId
+        if (keepMap && Object.prototype.hasOwnProperty.call(keepMap, presId)) {
+          const keepForThis = keepMap[presId] || []; // [] => borra todas
+          const existingImgs = await tx.imagenPresentacion.findMany({
+            where: { presentacionId: presId },
+            select: { id: true, public_id: true },
+          });
+          const keepSetPres = new Set(keepForThis);
+          const del = existingImgs.filter((img) => !keepSetPres.has(img.id));
+          if (del.length) {
+            await Promise.allSettled(
+              del
+                .filter((x) => !!x.public_id)
+                .map((x) => this.cloudinaryService.BorrarImagen(x.public_id!)),
+            );
+            await tx.imagenPresentacion.deleteMany({
+              where: { id: { in: del.map((x) => x.id) } },
+            });
+          }
+        }
+
+        // subir nuevas imágenes de esta presentación (por índice i)
+        const newFiles = presImagesByIndex.get(i) ?? [];
+        await this.uploadAndSavePresentationImages(tx, presId, newFiles);
+      }
+
+      // 8) asegurar una sola default
+      const defaults = await tx.productoPresentacion.count({
+        where: { productoId: productId, esDefault: true },
+      });
+      if (defaults > 1) {
+        const firstDefault = await tx.productoPresentacion.findFirst({
+          where: { productoId: productId, esDefault: true },
+          orderBy: { id: 'asc' },
+        });
+        await tx.productoPresentacion.updateMany({
+          where: { productoId: productId, id: { not: firstDefault?.id } },
+          data: { esDefault: false },
+        });
+      }
+
+      return { ok: true, id: productId };
+    });
   }
 }

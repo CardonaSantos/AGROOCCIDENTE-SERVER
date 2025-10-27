@@ -73,6 +73,7 @@ import { CreditoModule } from './credito/credito.module';
 import { CreditoAutorizationModule } from './credito-autorization/credito-autorization.module';
 import { CreditoCuotaModule } from './credito-cuota/credito-cuota.module';
 import { AbonoCuotaModule } from './abono-cuota/abono-cuota.module';
+import { TipoPresentacionModule } from './tipo-presentacion/tipo-presentacion.module';
 
 @Module({
   imports: [
@@ -148,6 +149,7 @@ import { AbonoCuotaModule } from './abono-cuota/abono-cuota.module';
     CreditoAutorizationModule,
     CreditoCuotaModule,
     AbonoCuotaModule,
+    TipoPresentacionModule,
   ],
   controllers: [AppController],
   providers: [AppService, CloudinaryProvider, SaldosServiceService],

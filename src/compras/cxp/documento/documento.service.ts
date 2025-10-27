@@ -165,11 +165,6 @@ export class DocumentoService {
       }
 
       // Si registrarPagoEngancheAhora => metodoPago obligatorio
-      if (dto.registrarPagoEngancheAhora && !dto.metodoPago) {
-        throw new BadRequestException(
-          'Debes enviar metodoPago para registrar el pago del enganche.',
-        );
-      }
 
       const today = dayjs().tz(TZGT).format('YYYY');
 

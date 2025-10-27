@@ -1,5 +1,3 @@
-import { TipoEmpaque } from '@prisma/client';
-
 export type RequisitionProductCandidate = {
   productoId: number;
   nombre: string;
@@ -19,7 +17,7 @@ export type RequisitionProductCandidate = {
   presentaciones: Array<{
     id: number;
     nombre: string;
-    tipoPresentacion: TipoEmpaque;
+    // tipoPresentacion: TipoEmpaque;
     factorUnidadBase: string; // Decimal string
     costoReferencialPresentacion: string | null;
     sku: string | null;

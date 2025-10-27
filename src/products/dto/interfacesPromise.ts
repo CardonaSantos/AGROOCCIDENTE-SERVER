@@ -10,7 +10,7 @@ export type PresentacionApi = {
   nombre: string;
   // sku?: string | null;
   codigoBarras?: string | null;
-  tipoPresentacion: string;
+  // tipoPresentacion: string;
   precios: PrecioApi[];
   stockPresentaciones: { id: number; cantidad?: number | null }[];
 };

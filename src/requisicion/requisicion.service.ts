@@ -23,7 +23,7 @@ import * as utc from 'dayjs/plugin/utc';
 import * as timezone from 'dayjs/plugin/timezone';
 import * as isSameOrAfter from 'dayjs/plugin/isSameOrAfter';
 import * as isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
-import { Prisma, TipoEmpaque } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { RequisitionProductCandidate } from './interfaces/requisicionProductCandidate';
 import { GetV2Args, PagedResponse } from './interfaces/newInterfacesPaginacion';
 import { RequisicionLineasDTO } from './interfaces/requiscionWithPresentaciones';
@@ -330,7 +330,7 @@ export class RequisicionService {
         return {
           id: pp.id,
           nombre: pp.nombre,
-          tipoPresentacion: pp.tipoPresentacion as TipoEmpaque,
+          // tipoPresentacion: pp.tipoPresentacion as TipoEmpaque,
           costoReferencialPresentacion:
             pp.costoReferencialPresentacion != null
               ? D(pp.costoReferencialPresentacion).toString()

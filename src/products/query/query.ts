@@ -7,7 +7,6 @@ import {
   IsString,
 } from 'class-validator';
 import { Type } from 'class-transformer';
-import { TipoEmpaque } from '@prisma/client';
 
 export class QueryParamsInventariado {
   @Type(() => Number) // asegura casteo
@@ -27,11 +26,6 @@ export class QueryParamsInventariado {
   @IsString()
   fechaVencimiento?: string;
 
-  @IsArray()
-  @IsOptional()
-  @IsEnum(TipoEmpaque, { each: true })
-  tipoPresentacion: TipoEmpaque[];
-
   @IsNumber()
   @IsOptional()
   precio?: number; //precio venta
@@ -50,4 +44,6 @@ export class QueryParamsInventariado {
   @IsInt()
   @Type(() => Number)
   limit: number = 10;
+
+  q?: string; // <- NUEVO (opcional)
 }

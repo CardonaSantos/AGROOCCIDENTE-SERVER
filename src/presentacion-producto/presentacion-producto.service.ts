@@ -20,44 +20,56 @@ export class PresentacionProductoService {
 
     private readonly cloudinary: CloudinaryService,
   ) {}
+  private dec = (v: any): string => (v == null ? '0' : String(v));
+
   /**
    * Crea presentaciones (con imágenes, stock mínimo y precios) para un producto.
    * La relación entre archivos y presentaciones se hace por el índice del array:
    *  - fieldname esperado: presentaciones[<idx>].images
    */
+  // presentacion-producto.service.ts
   async create(
     tx: Prisma.TransactionClient,
     presentaciones: PresentacionCreateDto[],
     productoId: number,
     presImages: Map<number, Express.Multer.File[]> = new Map(),
-    creadoPorId?: number, // opcional (si quieres propagar quién creó los precios)
+    creadoPorId?: number,
   ) {
-    if (!Array.isArray(presentaciones) || presentaciones.length === 0) {
+    if (!Array.isArray(presentaciones) || presentaciones.length === 0)
       return [];
-    }
 
-    // Asegurar que el producto existe
     const prod = await tx.producto.findUnique({ where: { id: productoId } });
     if (!prod) throw new NotFoundException('Producto no encontrado');
 
     const results = [];
 
-    // Iteramos por índice para asociar imágenes por "presentaciones[<idx>].images"
     for (let i = 0; i < presentaciones.length; i++) {
       const p = presentaciones[i];
 
-      // Duplicado por nombre (ya existe unique [productoId, nombre], esto evita error 500 y da 400)
+      // (opcional) evitar duplicado por nombre
       const exists = await tx.productoPresentacion.findFirst({
         where: { productoId, nombre: p.nombre },
         select: { id: true },
       });
       if (exists) {
         throw new BadRequestException(
-          `Ya existe una presentación con nombre "${p.nombre}"`,
+          `Ya existe una presentación "${p.nombre}"`,
         );
       }
 
-      // Si esta viene como default, apaga el resto
+      // (opcional) validar duplicado de código de barras si viene
+      if (p.codigoBarras) {
+        const dupBar = await tx.productoPresentacion.findFirst({
+          where: { codigoBarras: p.codigoBarras },
+          select: { id: true },
+        });
+        if (dupBar) {
+          throw new BadRequestException(
+            `Ya existe una presentación con código de barras "${p.codigoBarras}"`,
+          );
+        }
+      }
+
       if (p.esDefault) {
         await tx.productoPresentacion.updateMany({
           where: { productoId, esDefault: true },
@@ -65,28 +77,40 @@ export class PresentacionProductoService {
         });
       }
 
-      // Parse del costo referencial (opcional en schema, requerido en DTO con patrón)
       const costoRef =
         p.costoReferencialPresentacion != null &&
         String(p.costoReferencialPresentacion).trim() !== ''
           ? new Prisma.Decimal(p.costoReferencialPresentacion)
           : null;
 
-      // Crear la presentación
+      // ✅ Crear presentación + relaciones nuevas
       const nuevaPresentacion = await tx.productoPresentacion.create({
         data: {
-          productoId,
           nombre: p.nombre,
           descripcion: p.descripcion || null,
           codigoBarras: p.codigoBarras || null,
           esDefault: !!p.esDefault,
           activo: true,
-          tipoPresentacion: p.tipoPresentacion,
           costoReferencialPresentacion: costoRef,
+
+          // ✅ TipoPresentacion (nullable)
+          ...(p.tipoPresentacionId
+            ? { tipoPresentacion: { connect: { id: p.tipoPresentacionId } } }
+            : {}),
+
+          // ✅ Categorías (M:N)
+          ...(p.categoriaIds?.length
+            ? { categorias: { connect: p.categoriaIds.map((id) => ({ id })) } }
+            : {}),
+          producto: {
+            connect: {
+              id: productoId,
+            },
+          },
         },
       });
 
-      // Stock mínimo de la presentación (1:1)
+      // Stock mínimo 1:1
       if (p.stockMinimo != null && Number.isFinite(p.stockMinimo)) {
         await tx.stockThresholdPresentacion.create({
           data: {
@@ -96,7 +120,7 @@ export class PresentacionProductoService {
         });
       }
 
-      // Precios de la presentación
+      // Precios por presentación
       if (
         Array.isArray(p.preciosPresentacion) &&
         p.preciosPresentacion.length
@@ -108,11 +132,10 @@ export class PresentacionProductoService {
               `El precio en la presentación "${p.nombre}" debe ser > 0`,
             );
           }
-
           await tx.precioProducto.create({
             data: {
               presentacionId: nuevaPresentacion.id,
-              precio: precio.precio, // Prisma Decimal acepta string
+              precio: precio.precio,
               estado: 'APROBADO',
               tipo: 'ESTANDAR',
               orden: precio.orden,
@@ -124,18 +147,16 @@ export class PresentacionProductoService {
         }
       }
 
-      // Imágenes por presentación (si las mandaron)
+      // Imágenes por presentación
       const files = presImages.get(i) ?? [];
       if (files.length) {
         const uploads = await Promise.allSettled(
           files.map((f) => this.cloudinary.subirImagenFile(f)),
         );
-
         let orden = 0;
         for (let idx = 0; idx < uploads.length; idx++) {
           const r = uploads[idx];
           const file = files[idx];
-
           if (r.status === 'fulfilled') {
             const { url, public_id } = r.value;
             await tx.imagenPresentacion.create({
@@ -152,22 +173,23 @@ export class PresentacionProductoService {
               `Error subiendo imagen de presentación [${i}] idx=${idx}:`,
               r.reason,
             );
-            // seguimos con las demás sin romper toda la creación
           }
         }
       }
 
-      // Recuperar la presentación con relaciones útiles para devolver
       const createdWithRels = await tx.productoPresentacion.findUnique({
         where: { id: nuevaPresentacion.id },
         include: {
           stockThresholdPresentacion: true,
           imagenesPresentacion: true,
           precios: true,
+          // (opcional) agrega relaciones si deseas devolverlas
+          tipoPresentacion: true,
+          categorias: true,
         },
       });
 
-      results.push(createdWithRels);
+      results.push(createdWithRels!);
     }
 
     return results;
@@ -213,5 +235,62 @@ export class PresentacionProductoService {
         producto: { select: { id: true, nombre: true, unidadBase: true } },
       },
     });
+  }
+
+  //NUEVOS
+
+  async getPresentationDetail(id: number) {
+    const sp = await this.prisma.productoPresentacion.findUnique({
+      where: { id },
+      include: {
+        producto: { select: { id: true } },
+        categorias: true,
+        tipoPresentacion: true,
+        imagenesPresentacion: true,
+        precios: { orderBy: { orden: 'asc' } },
+        stockThresholdPresentacion: {
+          select: {
+            stockMinimo: true,
+          },
+        },
+      },
+    });
+    if (!sp) throw new NotFoundException('Presentación no encontrada');
+
+    const data = {
+      id: sp.id,
+      productoId: sp.producto?.id ?? 0,
+      nombre: sp.nombre,
+      codigoBarras: sp.codigoBarras,
+      tipoPresentacionId: sp.tipoPresentacionId,
+      tipoPresentacion: sp.tipoPresentacion && {
+        id: sp.tipoPresentacion.id,
+        nombre: sp.tipoPresentacion.nombre,
+      },
+      costoReferencialPresentacion: this.dec(sp.costoReferencialPresentacion),
+      descripcion: sp.descripcion,
+
+      // 🔧 null-safe
+      stockMinimo: sp.stockThresholdPresentacion?.stockMinimo ?? 0,
+
+      precios: sp.precios.map((px) => ({
+        rol: px.rol,
+        orden: px.orden,
+        precio: this.dec(px.precio),
+      })),
+      esDefault: !!sp.esDefault,
+      imagenesPresentacion: sp.imagenesPresentacion.map((i) => ({
+        id: i.id,
+        url: i.url,
+        public_id: i.public_id,
+        name: i.altTexto ?? null,
+      })),
+      activo: !!sp.activo,
+      categorias: sp.categorias.map(({ id, nombre }) => ({ id, nombre })),
+    };
+
+    this.logger.log(
+      `La data a retornar al formulario de edicion de producto es:\n${JSON.stringify(data, null, 2)}`,
+    );
   }
 }

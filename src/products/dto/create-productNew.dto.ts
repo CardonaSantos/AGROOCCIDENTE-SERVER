@@ -1,4 +1,4 @@
-import { RolPrecio, TipoEmpaque } from '@prisma/client';
+import { RolPrecio } from '@prisma/client';
 import {
   IsArray,
   IsBoolean,
@@ -66,9 +66,6 @@ export class PresentacionCreateDto {
   @Type(() => PrecioPresentacionDto)
   preciosPresentacion: PrecioPresentacionDto[];
 
-  @IsEnum(TipoEmpaque)
-  tipoPresentacion: TipoEmpaque;
-
   @IsString()
   @Matches(DECIMAL_RE, {
     message: 'costoReferencialPresentacion debe ser decimal positivo',
@@ -85,6 +82,17 @@ export class PresentacionCreateDto {
   @IsInt()
   @Min(0)
   stockMinimo?: number | null;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  tipoPresentacionId?: number | null; // ✅ para Presentación (nullable)
+
+  @IsOptional()
+  @IsArray()
+  @ArrayUnique()
+  @IsInt({ each: true })
+  categoriaIds?: number[]; // ✅ nuevo
 }
 
 // --------- DTO principal ---------
@@ -144,4 +152,9 @@ export class CreateNewProductDto {
   @ValidateNested({ each: true })
   @Type(() => PresentacionCreateDto)
   presentaciones?: PresentacionCreateDto[];
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  tipoPresentacionId?: number | null; // ✅ para Producto (nullable)
 }

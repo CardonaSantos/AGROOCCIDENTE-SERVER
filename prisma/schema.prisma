@@ -269,6 +269,9 @@ model Producto {
   stockPresentaciones      StockPresentacion[]              @relation("ProductoToStockPresentacion")
   recepcionesCompraLineas  CompraRecepcionLinea[]
 
+  tipoPresentacionId Int?
+  tipoPresentacion   TipoPresentacion? @relation(fields: [tipoPresentacionId], references: [id], onDelete: SetNull)
+
   solicitudesCreditoLineas SolicitudCreditoVentaLinea[] @relation("SolicitudCreditoLineaToProducto")
 }
 
@@ -297,8 +300,8 @@ model ProductoPresentacion {
   compraDetalles    CompraDetalle[]    @relation("CompraDetalleToPresentacion")
   pedidoLineas      PedidoLinea[]      @relation("PedidoLineaToPresentacion")
 
-  tipoPresentacion             TipoEmpaque @default(UNIDAD)
-  costoReferencialPresentacion Decimal?    @db.Decimal(12, 4)
+  // tipoPresentacion             TipoEmpaque @default(UNIDAD)
+  costoReferencialPresentacion Decimal? @db.Decimal(12, 4)
 
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
@@ -310,10 +313,32 @@ model ProductoPresentacion {
 
   solicitudesCreditoLineas SolicitudCreditoVentaLinea[] @relation("SolicitudCreditoLineaToPresentacion")
 
+  tipoPresentacionId Int?
+  tipoPresentacion   TipoPresentacion? @relation(fields: [tipoPresentacionId], references: [id], onDelete: SetNull)
+  categorias               Categoria[]                      @relation(name: "CategoriaToPresentacion")
+
   @@unique([productoId, nombre])
   @@index([productoId])
   // @@index([sku])
   @@index([codigoBarras])
+}
+
+model TipoPresentacion {
+  id             Int                    @id @default(autoincrement())
+  nombre         String                 @unique // p.ej. "BOTELLA", "CAJA", "BLISTER"
+  descripcion    String?
+  activo         Boolean                @default(true)
+  creadoEn       DateTime               @default(now())
+  actualizadoEn  DateTime               @updatedAt
+  // Relación inversa
+  presentaciones ProductoPresentacion[]
+  productos      Producto[]
+}
+model Categoria {
+  id        Int        @id @default(autoincrement())
+  nombre    String     @unique()
+  productos Producto[] @relation(name: "CategoriaToProducto")
+  presentaciones ProductoPresentacion[] @relation(name: "CategoriaToPresentacion")
 }
 
 model StockPresentacion {
@@ -350,11 +375,7 @@ model StockPresentacion {
   @@index([presentacionId, sucursalId])
 }
 
-model Categoria {
-  id        Int        @id @default(autoincrement())
-  nombre    String     @unique()
-  productos Producto[] @relation(name: "CategoriaToProducto")
-}
+
 
 model ImagenProducto {
   id         Int      @id @default(autoincrement())
@@ -420,8 +441,8 @@ model PrecioProducto {
   producto   Producto? @relation(fields: [productoId], references: [id], onDelete: Cascade)
 
   // NUEVO: si viene, el precio aplica a ESA presentación
-  presentacionId Int?
-  presentacion   ProductoPresentacion? @relation(fields: [presentacionId], references: [id], onDelete: Cascade)
+  presentacionId      Int?
+  presentacion        ProductoPresentacion?        @relation(fields: [presentacionId], references: [id], onDelete: Cascade)
   //para persistencia en lineas de credito auth
   lineasSeleccionadas SolicitudCreditoVentaLinea[] @relation("PrecioSeleccionadoEnSolicitudLinea")
 
@@ -1940,9 +1961,9 @@ model SolicitudCreditoVenta {
   cliente   Cliente? @relation("ClienteToSolicitudCreditoVenta", fields: [clienteId], references: [id], onDelete: SetNull)
 
   // Snapshot de datos del cliente final (si no está registrado)
-  nombreCliente    String?//no usamos de momento
-  telefonoCliente  String?//no usamos de momento
-  direccionCliente String?//no usamos de momento
+  nombreCliente    String? //no usamos de momento
+  telefonoCliente  String? //no usamos de momento
+  direccionCliente String? //no usamos de momento
 
   // Propuesta económica
   totalPropuesto          Float
@@ -1955,8 +1976,8 @@ model SolicitudCreditoVenta {
   fechaPrimeraCuota       DateTime?
 
   comentario    String?
-  garantiaMeses Int     @default(0)//no usamos de momento
-  testigos      Json?//no usamos de momento
+  garantiaMeses Int     @default(0) //no usamos de momento
+  testigos      Json? //no usamos de momento
 
   // Flujo de aprobación (mismo patrón que SolicitudPrecio)
   estado          EstadoSolicitud @default(PENDIENTE)
@@ -1977,7 +1998,6 @@ model SolicitudCreditoVenta {
   //lineas cuotas custom desde UI
   cuotasPropuestas SolicitudCreditoVentaCuota[] // <— NUEVA relación
 
-
   // Líneas e historial  
   lineas    SolicitudCreditoVentaLinea[]
   historial SolicitudCreditoVentaHistorial[]
@@ -1990,16 +2010,16 @@ model SolicitudCreditoVenta {
 }
 
 model SolicitudCreditoVentaCuota {
-  id           Int                      @id @default(autoincrement())
-  solicitudId  Int
-  solicitud    SolicitudCreditoVenta    @relation(fields: [solicitudId], references: [id], onDelete: Cascade)
+  id          Int                   @id @default(autoincrement())
+  solicitudId Int
+  solicitud   SolicitudCreditoVenta @relation(fields: [solicitudId], references: [id], onDelete: Cascade)
 
-  numero       Int                      // 0 = enganche si aplica
-  fecha        DateTime
-  monto        Float                    // monto total de esa cuota
-  etiqueta     TipoCuotaPropuesta       @default(NORMAL)
-  origen       OrigenCuotaPropuesta     @default(AUTO)
-  esManual     Boolean                  @default(false) // si la UI la editó
+  numero   Int // 0 = enganche si aplica
+  fecha    DateTime
+  monto    Float // monto total de esa cuota
+  etiqueta TipoCuotaPropuesta   @default(NORMAL)
+  origen   OrigenCuotaPropuesta @default(AUTO)
+  esManual Boolean              @default(false) // si la UI la editó
 
   // opcionales por si quieres mostrar desglose:
   montoCapital Float?
@@ -2011,7 +2031,6 @@ model SolicitudCreditoVentaCuota {
   @@unique([solicitudId, numero])
   @@index([solicitudId, fecha])
 }
-
 
 model SolicitudCreditoVentaLinea {
   id          Int                   @id @default(autoincrement())
@@ -2028,17 +2047,17 @@ model SolicitudCreditoVentaLinea {
   cantidad       Int
   precioUnitario Float // precio aplicado a la propuesta
 
-  precioSeleccionadoId   Int
-  precioSeleccionado     PrecioProducto @relation("PrecioSeleccionadoEnSolicitudLinea", fields: [precioSeleccionadoId], references: [id], onDelete: Restrict)
+  precioSeleccionadoId Int
+  precioSeleccionado   PrecioProducto @relation("PrecioSeleccionadoEnSolicitudLinea", fields: [precioSeleccionadoId], references: [id], onDelete: Restrict)
 
   precioListaRef Float? // opcional: precio de lista al momento (auditoría)
   descuento      Float? // opcional por línea
   subtotal       Float
 
   // Snapshots opcionales (por si luego cambian nombres/códigos)
-  nombreProductoSnapshot     String?//no usamos de momento
-  presentacionNombreSnapshot String?//no usamos de momento
-  codigoBarrasSnapshot       String?//no usamos de momento
+  nombreProductoSnapshot     String? //no usamos de momento
+  presentacionNombreSnapshot String? //no usamos de momento
+  codigoBarrasSnapshot       String? //no usamos de momento
 
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
