@@ -45,5 +45,11 @@ export class QueryParamsInventariado {
   @Type(() => Number)
   limit: number = 10;
 
+  //nuevo
+  @IsOptional()
+  @IsArray()
+  @IsInt({ each: true }) // cada item debe ser un entero
+  @Type(() => Number) // transforma query strings a number
+  tiposPresentacion: number[];
   q?: string; // <- NUEVO (opcional)
 }

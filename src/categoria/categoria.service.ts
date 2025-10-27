@@ -133,7 +133,7 @@ export class CategoriaService {
       select: {
         id: true,
         nombre: true,
-        _count: { select: { productos: true } }, // <-- relación
+        _count: { select: { productos: true, presentaciones: true } }, // <-- relación
       },
       orderBy: { id: 'asc' },
     });
@@ -141,7 +141,7 @@ export class CategoriaService {
     return cats.map((c) => ({
       id: c.id,
       nombre: c.nombre,
-      productosCount: c._count.productos,
+      productosCount: c._count.productos + c._count.presentaciones,
     }));
   }
 }

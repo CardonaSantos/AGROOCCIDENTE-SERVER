@@ -23,7 +23,12 @@ import * as isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
 import * as customParseFormat from 'dayjs/plugin/customParseFormat';
 import { TZGT } from 'src/utils/utils';
 import { selectCreditAutorization } from './helpers/select';
-import { MetodoPago, Prisma } from '@prisma/client';
+import {
+  AccionCredito,
+  MetodoPago,
+  Prisma,
+  TipoNotificacion,
+} from '@prisma/client';
 import { GetCreditoAutorizacionesDto } from './dto/get-credito-autorizaciones.dto';
 import { normalizeSolicitud } from './common/normalizerAutorizacionesResponse';
 import { LegacyGateway } from 'src/web-sockets/websocket.gateway';
@@ -34,6 +39,8 @@ import { cuotasPropuestas } from './dto/simple-interfaces';
 import { CreateAbonoCreditoDTO } from './dto/create-new-payment';
 import { MovimientoFinancieroService } from 'src/movimiento-financiero/movimiento-financiero.service';
 import { CreateMFUtility } from 'src/movimiento-financiero/utilities/createMFDto';
+import { RejectCreditoAuth } from './dto/reject-credito';
+import { NotificationService } from 'src/notification/notification.service';
 dayjs.extend(customParseFormat);
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -58,6 +65,7 @@ export class CreditoAutorizationService {
     private readonly ws: LegacyGateway,
     private readonly venta: VentaService,
     private readonly mf: MovimientoFinancieroService,
+    private readonly notifications: NotificationService,
   ) {}
   /**
    * CREACION DE REGISTRO DE AUTORIZACION 1er PASO
@@ -969,5 +977,55 @@ export class CreditoAutorizationService {
       await this.prisma.ventaCuota.deleteMany({});
       return this.prisma.solicitudCreditoVenta.deleteMany({});
     } catch (error) {}
+  }
+
+  //RECHAZAR CREDITO FROM AUTH
+  async rejectCredito(dto: RejectCreditoAuth) {
+    const { adminId, authId, sucursalId, motivoRechazo, comentario } = dto;
+    try {
+      this.logger.log(
+        `DTO recibido reject credito es:\n${JSON.stringify(dto, null, 2)}`,
+      );
+      return await this.prisma.$transaction(async (tx) => {
+        const [auth, admin, sucursal] = await Promise.all([
+          tx.solicitudCreditoVenta.findUnique({ where: { id: authId } }),
+          tx.usuario.findUnique({ where: { id: adminId } }),
+          tx.sucursal.findUnique({ where: { id: sucursalId } }),
+        ]);
+
+        if (!auth)
+          throw new BadRequestException('Solicitud de crédito no encontrada');
+        if (!admin)
+          throw new BadRequestException('Usuario administrador no válido');
+        if (!sucursal) throw new BadRequestException('Sucursal no válida');
+
+        const updated = await tx.solicitudCreditoVenta.update({
+          where: { id: auth.id },
+          data: {
+            estado: 'RECHAZADO',
+            comentario: comentario ?? `Rechazado por ${admin.nombre}`,
+            motivoRechazo: motivoRechazo,
+            fechaRespuesta: dayjs().tz(TZGT).toDate(),
+          },
+        });
+        await this.notifications.create(
+          'Su solicitud de crédito ha sido rechazada',
+          adminId,
+          [auth.solicitadoPorId], // receptor del crédito
+          TipoNotificacion.OTRO,
+          auth.id,
+        );
+        return {
+          message: `Solicitud de crédito #${auth.id} rechazada correctamente`,
+          solicitud: updated,
+        };
+      });
+    } catch (error) {
+      this.logger.error('Error en módulo crédito (rechazo): ', error?.stack);
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException(
+        'Fatal error: Error inesperado en rechazo de crédito',
+      );
+    }
   }
 }

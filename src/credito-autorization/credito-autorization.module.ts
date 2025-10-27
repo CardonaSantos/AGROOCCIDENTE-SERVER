@@ -6,6 +6,7 @@ import { GatewayModule } from 'src/web-sockets/websocket.module';
 import { VentaModule } from 'src/venta/venta.module';
 import { PrismaModule } from 'src/prisma/prisma.module';
 import { MovimientoFinancieroModule } from 'src/movimiento-financiero/movimiento-financiero.module';
+import { NotificationModule } from 'src/notification/notification.module';
 
 @Module({
   imports: [
@@ -13,6 +14,7 @@ import { MovimientoFinancieroModule } from 'src/movimiento-financiero/movimiento
     GatewayModule,
     VentaModule,
     MovimientoFinancieroModule,
+    NotificationModule,
   ],
   controllers: [CreditoAutorizationController],
   providers: [CreditoAutorizationService],

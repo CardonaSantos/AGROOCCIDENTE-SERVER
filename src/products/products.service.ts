@@ -348,7 +348,7 @@ export class ProductsService {
         'WHERE Presentación => ' + JSON.stringify(wherePresentacion, null, 2),
       );
 
-      // Para paginar el "mix" haremos:
+      // Para paginar el "mix" :
       const [totalProducts, totalPresentations] = await Promise.all([
         this.prisma.producto.count({ where: whereProducto }),
         this.prisma.productoPresentacion.count({ where: wherePresentacion }),
@@ -427,7 +427,14 @@ export class ProductsService {
   }
 
   asignePropsWhereInput(dto: newQueryDTO, where: Prisma.ProductoWhereInput) {
-    const { cats, codigoItem, codigoProveedor, priceRange, nombreItem } = dto;
+    const {
+      cats,
+      codigoItem,
+      codigoProveedor,
+      priceRange,
+      nombreItem,
+      tipoEmpaque,
+    } = dto;
 
     if (!dto) throw new BadRequestException('Datos inválidos');
 
@@ -436,8 +443,15 @@ export class ProductsService {
     const hasUnifiedQ = !!qRaw?.trim();
 
     // ---- 1) Filtros “ortogonales” que no chocan con q ----
+    //Que esté en categorias seleccionadas
     if (Array.isArray(cats) && cats.length > 0) {
       where.categorias = { some: { id: { in: cats } } };
+    }
+    //Que esté entre los tipos empaques seleccionados
+    if (Array.isArray(tipoEmpaque) && tipoEmpaque.length > 0) {
+      where.tipoPresentacion = {
+        id: { in: tipoEmpaque },
+      };
     }
 
     if (priceRange != null) {
@@ -489,7 +503,14 @@ export class ProductsService {
     dto: newQueryDTO,
     where: Prisma.ProductoPresentacionWhereInput,
   ) {
-    const { cats, codigoItem, codigoProveedor, priceRange, nombreItem } = dto;
+    const {
+      cats,
+      codigoItem,
+      codigoProveedor,
+      priceRange,
+      nombreItem,
+      tipoEmpaque,
+    } = dto;
 
     if (!dto) throw new BadRequestException('Datos inválidos');
 
@@ -500,6 +521,12 @@ export class ProductsService {
     // ---- 1) Filtros ortogonales ----
     if (Array.isArray(cats) && cats.length > 0) {
       where.producto = { is: { categorias: { some: { id: { in: cats } } } } };
+    }
+    //Que esté entre los tipos empaques seleccionados
+    if (Array.isArray(tipoEmpaque) && tipoEmpaque.length > 0) {
+      where.tipoPresentacion = {
+        id: { in: tipoEmpaque },
+      };
     }
 
     if (priceRange != null) {
@@ -978,11 +1005,14 @@ export class ProductsService {
         productoNombre,
         limit,
         page,
+        tiposPresentacion,
         q,
       } = dto;
       this.logger.log('nuevo para inventariado');
       const skip = (page - 1) * limit;
-
+      this.logger.log(
+        `DTO recibido para filtrado en inventariado es:\n${JSON.stringify(dto, null, 2)}`,
+      );
       const where: Prisma.ProductoWhereInput = {};
       const wherePresentaciones: Prisma.ProductoPresentacionWhereInput = {};
 
@@ -997,6 +1027,19 @@ export class ProductsService {
           is: {
             ...(wherePresentaciones.producto?.is ?? {}),
             categorias: { some: { id: { in: categorias } } },
+          },
+        };
+      }
+
+      if (tiposPresentacion && tiposPresentacion.length > 0) {
+        where.tipoPresentacion = {
+          id: {
+            in: tiposPresentacion,
+          },
+        };
+        wherePresentaciones.tipoPresentacion = {
+          id: {
+            in: tiposPresentacion,
           },
         };
       }
@@ -1700,8 +1743,16 @@ export class ProductsService {
         }
       }
 
-      // 4) precios del producto (replace)
-      await tx.precioProducto.deleteMany({ where: { productoId: productId } });
+      // 4) precios del producto (versionado)
+      await tx.precioProducto.updateMany({
+        where: {
+          productoId: productId,
+          estado: EstadoPrecio.APROBADO,
+          vigenteHasta: null,
+        },
+        data: { estado: EstadoPrecio.RECHAZADO, vigenteHasta: new Date() },
+      });
+
       if (dto.precioVenta?.length) {
         await tx.precioProducto.createMany({
           data: dto.precioVenta.map((p) => ({
@@ -1711,6 +1762,8 @@ export class ProductsService {
             precio: new Prisma.Decimal(p.precio),
             tipo: TipoPrecio.ESTANDAR,
             estado: EstadoPrecio.APROBADO,
+            vigenteDesde: new Date(),
+            vigenteHasta: null,
           })),
         });
       }
@@ -1826,9 +1879,15 @@ export class ProductsService {
         }
 
         // precios de la presentación (replace)
-        await tx.precioProducto.deleteMany({
-          where: { presentacionId: presId },
+        await tx.precioProducto.updateMany({
+          where: {
+            presentacionId: presId,
+            estado: EstadoPrecio.APROBADO,
+            vigenteHasta: null,
+          },
+          data: { estado: EstadoPrecio.RECHAZADO, vigenteHasta: new Date() },
         });
+
         if (p.preciosPresentacion?.length) {
           await tx.precioProducto.createMany({
             data: p.preciosPresentacion.map((pp) => ({
@@ -1838,6 +1897,8 @@ export class ProductsService {
               precio: new Prisma.Decimal(pp.precio),
               tipo: TipoPrecio.ESTANDAR,
               estado: EstadoPrecio.APROBADO,
+              vigenteDesde: new Date(),
+              vigenteHasta: null,
             })),
           });
         }

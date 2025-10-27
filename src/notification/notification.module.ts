@@ -7,5 +7,6 @@ import { LegacyGateway } from 'src/web-sockets/websocket.gateway';
 @Module({
   controllers: [NotificationController],
   providers: [NotificationService, PrismaService, LegacyGateway],
+  exports: [NotificationService],
 })
 export class NotificationModule {}

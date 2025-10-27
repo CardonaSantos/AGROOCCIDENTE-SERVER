@@ -61,6 +61,17 @@ export class newQueryDTO {
   @IsNumber()
   @Transform(({ value }) => (value === '' ? undefined : Number(value)))
   page?: number;
+  //nuevos
+  @Type(() => Number)
+  @IsArray()
+  @IsInt({ each: true })
+  @Transform(({ value }) => {
+    if (value === '' || value == null) return undefined;
+    if (Array.isArray(value)) return value.map((v) => Number(v));
+    return [Number(value)];
+  })
+  @IsOptional()
+  tipoEmpaque?: number[];
 
   q?: string;
 }

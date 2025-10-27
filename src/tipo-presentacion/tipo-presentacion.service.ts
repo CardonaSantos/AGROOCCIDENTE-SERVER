@@ -17,13 +17,27 @@ type TipoEntity = {
   activo: boolean;
   creadoEn: Date;
   actualizadoEn: Date;
+  productos?: number;
 };
 
-const serialize = (t: TipoEntity) => ({
+type TipoRowBase = Prisma.TipoPresentacionGetPayload<{}>;
+type TipoRowWithCount = Prisma.TipoPresentacionGetPayload<{
+  include: { _count: { select: { productos: true } } };
+}>;
+
+type TipoRowMaybeCount = TipoRowBase & {
+  _count?: {
+    productos?: number;
+    presentaciones?: number;
+  };
+};
+
+const serialize = (t: TipoRowMaybeCount) => ({
   id: t.id,
   nombre: t.nombre,
   descripcion: t.descripcion,
   activo: t.activo,
+  productos: (t._count?.productos ?? 0) + (t._count?.presentaciones ?? 0),
   fechas: {
     creadoISO: t.creadoEn.toISOString(),
     actualizadoISO: t.actualizadoEn.toISOString(),
@@ -77,6 +91,11 @@ export class TipoPresentacionService {
         orderBy: { creadoEn: 'desc' },
         skip: (page - 1) * limit,
         take: limit,
+        include: {
+          _count: {
+            select: { productos: true, presentaciones: true },
+          },
+        },
       }),
     ]);
 

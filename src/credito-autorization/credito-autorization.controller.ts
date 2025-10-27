@@ -14,6 +14,7 @@ import { CreditoAutorizationService } from './credito-autorization.service';
 import { CreateCreditoAutorizationDto } from './dto/create-credito-autorization.dto';
 import { GetCreditoAutorizacionesDto } from './dto/get-credito-autorizaciones.dto';
 import { AcceptCreditoDTO } from './dto/acept-credito-auth';
+import { RejectCreditoAuth } from './dto/reject-credito';
 
 @UsePipes(
   new ValidationPipe({
@@ -42,6 +43,11 @@ export class CreditoAutorizationController {
   @Post('create-credito-from-auth')
   aceptAuthCredit(@Body() dto: AcceptCreditoDTO) {
     return this.creditoAutorizationService.createCredito(dto);
+  }
+
+  @Patch('reject-credito-from-auth')
+  rejectAuthCredit(@Body() dto: RejectCreditoAuth) {
+    return this.creditoAutorizationService.rejectCredito(dto);
   }
 
   @Get()
