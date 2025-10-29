@@ -222,6 +222,8 @@ model Usuario {
   notificacionesEmitidas  Notificacion[]           @relation("NotiRemitente")
   // Opuesta a NotificacionesUsuarios.usuario
   notificacionesRecibidas NotificacionesUsuarios[]
+
+  ventasAnuladas Venta[] @relation(name: "AnuladoPor")
 }
 
 // ============================================================================
@@ -812,6 +814,13 @@ model Venta {
   tipoComprobante       TipoComprobante  @default(RECIBO)
 
   solicitudCredito SolicitudCreditoVenta? @relation("SolicitudCreditoVentaToVenta")
+
+  //FLAGS DE ANULACION
+  anulada               Boolean          @default(false)
+  fechaAnulacion        DateTime?
+  motivoAnulacion       String?
+  anuladaPorId          Int?
+  anuladaPor            Usuario?         @relation(name: "AnuladoPor",fields: [anuladaPorId], references: [id], onDelete: SetNull)
 
   @@unique([imei, id]) // Permite null en `imei` sin conflicto de unicidad 
 }

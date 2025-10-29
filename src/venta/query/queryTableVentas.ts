@@ -2,6 +2,7 @@
 import { MetodoPago, TipoComprobante } from '@prisma/client';
 import {
   IsArray,
+  IsBoolean,
   IsEnum,
   IsInt,
   IsNumber,
@@ -134,4 +135,11 @@ export class QueryVentasTable {
   @IsArray()
   @Transform(toArrayOfEnum<TipoComprobante>())
   tipoComprobante?: TipoComprobante[];
+
+  @IsBoolean()
+  @IsOptional()
+  isVendedor: boolean;
+
+  @IsInt()
+  usuarioId: number;
 }

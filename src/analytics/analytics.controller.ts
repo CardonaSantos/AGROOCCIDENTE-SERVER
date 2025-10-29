@@ -29,6 +29,13 @@ export class AnalyticsController {
     return this.analyticsService.getDashboardSummary(idSucursal);
   }
 
+  @Get('dashboard-summary/:userId')
+  async getVendedorDashboardData(
+    @Param('userId', ParseIntPipe) userId: number,
+  ) {
+    return this.analyticsService.getVendedorDashboardData(userId);
+  }
+
   @Get('/venta-dia/:idSucursal')
   async getVentasDiaII(@Param('idSucursal', ParseIntPipe) idSucursal: number) {
     const totalDeHoy = await this.analyticsService.getVentasDiaII(idSucursal);

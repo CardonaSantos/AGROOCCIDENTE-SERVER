@@ -392,11 +392,14 @@ export class ProductsService {
       ]);
 
       const productsArray = Array.isArray(products)
-        ? this.normalizerProductsInventario(products)
+        ? this.normalizerProductsInventario(products, dto.sucursalId)
         : [];
 
       const presentationsArray = Array.isArray(presentations)
-        ? this.normalizerProductPresentacionInventario(presentations)
+        ? this.normalizerProductPresentacionInventario(
+            presentations,
+            dto.sucursalId,
+          )
         : [];
 
       const mixed = [
@@ -434,6 +437,7 @@ export class ProductsService {
       priceRange,
       nombreItem,
       tipoEmpaque,
+      sucursalId,
     } = dto;
 
     if (!dto) throw new BadRequestException('Datos inválidos');
@@ -453,6 +457,7 @@ export class ProductsService {
         id: { in: tipoEmpaque },
       };
     }
+    //BUSCAR STOCK POR SUCURSAL
 
     if (priceRange != null) {
       if (Array.isArray(priceRange) && priceRange.length === 2) {
@@ -1198,9 +1203,9 @@ export class ProductsService {
 
   normalizerProductsInventario(
     arrayProductos: ProductoWithSelect[],
+    sucursalId?: number,
   ): ProductoInventarioResponse[] {
     return arrayProductos.map((p) => {
-      // precios
       const precios: PrecioProductoNormalized[] = (p.precios ?? []).map(
         (pr) => ({
           id: pr.id,
@@ -1211,8 +1216,8 @@ export class ProductsService {
         }),
       );
 
-      // stocks crudos
-      const stocks: StocksProducto[] = (p.stock ?? []).map((s) => ({
+      // TODOS los lotes
+      const stocksAll: StocksProducto[] = (p.stock ?? []).map((s) => ({
         id: s.id,
         cantidad: Number(s.cantidad ?? 0),
         fechaIngreso: s.fechaIngreso
@@ -1223,18 +1228,27 @@ export class ProductsService {
           : '',
       }));
 
-      //retorno un objeto con RECORD personalizado
+      // SOLO sucursal solicitada
+      const stocksSucursal: StocksProducto[] = (p.stock ?? [])
+        .filter((s) => (sucursalId ? s.sucursal?.id === sucursalId : true))
+        .map((s) => ({
+          id: s.id,
+          cantidad: Number(s.cantidad ?? 0),
+          fechaIngreso: s.fechaIngreso
+            ? dayjs(s.fechaIngreso).format('DD-MM-YYYY')
+            : '',
+          fechaVencimiento: s.fechaVencimiento
+            ? dayjs(s.fechaVencimiento).format('DD-MM-YYYY')
+            : '',
+        }));
+
+      // Agregado por sucursal (con TODOS los lotes)
       const dict = (p.stock ?? []).reduce<Record<string, StockPorSucursal>>(
         (acc, s) => {
-          const sucursalId = s.sucursal.id ?? 0;
-          const key = String(sucursalId);
+          const sid = s.sucursal?.id ?? 0; // 👈 renombrado
+          const key = String(sid);
           const nombre = s.sucursal?.nombre ?? key;
-          //existe? sino nuevo
-          const item = acc[key] ?? {
-            sucursalId: sucursalId,
-            nombre: nombre,
-            cantidad: 0,
-          };
+          const item = acc[key] ?? { sucursalId: sid, nombre, cantidad: 0 };
           item.cantidad += Number(s.cantidad ?? 0);
           acc[key] = item;
           return acc;
@@ -1249,10 +1263,11 @@ export class ProductsService {
         codigoProducto: p.codigoProducto ?? '',
         descripcion: p.descripcion ?? '',
         precioCosto:
-          p.precioCostoActual != null ? p.precioCostoActual.toString() : '0', // <- string
+          p.precioCostoActual != null ? p.precioCostoActual.toString() : '0',
         precios,
-        stocks,
-        stocksBySucursal: stocksBySucursal,
+        stocks: stocksSucursal, // 👈 solo la sucursal pedida
+        stocksAll, // 👈 NUEVA prop consistente
+        stocksBySucursal, // 👈 agregado con TODOS los lotes
         image: p?.imagenesProducto[0]?.url,
         images: p?.imagenesProducto,
         type: 'PRODUCTO',
@@ -1263,9 +1278,9 @@ export class ProductsService {
 
   normalizerProductPresentacionInventario(
     arrayProductos: PresentacionWithSelect[],
+    sucursalId?: number,
   ): ProductoInventarioResponse[] {
     return (arrayProductos ?? []).map((p) => {
-      // precios
       const precios: PrecioProductoNormalized[] = (p.precios ?? []).map(
         (pr) => ({
           id: pr.id,
@@ -1276,9 +1291,10 @@ export class ProductsService {
         }),
       );
 
-      // stocks crudos
       const stockPres = p.stockPresentaciones ?? [];
-      const stocks: StocksProducto[] = stockPres.map((s) => ({
+
+      // TODOS los lotes
+      const stocksAll: StocksProducto[] = stockPres.map((s) => ({
         id: s.id,
         cantidad: Number(s.cantidadPresentacion ?? 0),
         fechaIngreso: s.fechaIngreso
@@ -1289,13 +1305,26 @@ export class ProductsService {
           : '',
       }));
 
-      // stocks por sucursal (ojo con s.sucursal null)
+      // SOLO sucursal solicitada
+      const stocksSucursal: StocksProducto[] = stockPres
+        .filter((s) => (sucursalId ? s.sucursal?.id === sucursalId : true))
+        .map((s) => ({
+          id: s.id,
+          cantidad: Number(s.cantidadPresentacion ?? 0),
+          fechaIngreso: s.fechaIngreso
+            ? dayjs(s.fechaIngreso).format('DD-MM-YYYY')
+            : '',
+          fechaVencimiento: s.fechaVencimiento
+            ? dayjs(s.fechaVencimiento).format('DD-MM-YYYY')
+            : '',
+        }));
+
       const dict = stockPres.reduce<Record<string, StockPorSucursal>>(
         (acc, s) => {
-          const sucursalId = s.sucursal?.id ?? 0; // <- antes accedías sin "?"
-          const key = String(sucursalId);
+          const sid = s.sucursal?.id ?? 0;
+          const key = String(sid);
           const nombre = s.sucursal?.nombre ?? key;
-          const item = acc[key] ?? { sucursalId, nombre, cantidad: 0 };
+          const item = acc[key] ?? { sucursalId: sid, nombre, cantidad: 0 };
           item.cantidad += Number(s.cantidadPresentacion ?? 0);
           acc[key] = item;
           return acc;
@@ -1304,9 +1333,8 @@ export class ProductsService {
       );
       const stocksBySucursal: StocksBySucursal = Object.values(dict);
 
-      // imágenes (pueden no existir)
       const images = p.producto?.imagenesProducto ?? [];
-      const image = images[0]?.url ?? ''; // usa "" o una URL placeholder si tienes una
+      const image = images[0]?.url ?? '';
 
       return {
         id: p.id,
@@ -1319,10 +1347,11 @@ export class ProductsService {
             : '0',
         tipoPresentacion: p.tipoPresentacion ?? null,
         precios,
-        stocks,
-        stocksBySucursal,
+        stocks: stocksSucursal, // 👈 solo la sucursal pedida
+        stocksAll, // 👈 NUEVA prop consistente
+        stocksBySucursal, // 👈 agregado con TODOS los lotes
         image,
-        images, // mantén arreglo completo para el front; caerá en []
+        images,
         type: 'PRESENTACION',
         productoId: p.producto.id,
       };

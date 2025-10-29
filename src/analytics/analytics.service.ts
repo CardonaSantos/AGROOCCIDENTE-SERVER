@@ -1,7 +1,9 @@
 import {
   BadRequestException,
+  HttpException,
   Injectable,
   InternalServerErrorException,
+  Logger,
 } from '@nestjs/common';
 import { CreateAnalyticsDto } from './dto/create-analytics.dto';
 import { UpdateAnalyticsDto } from './dto/update-analytics.dto';
@@ -15,6 +17,7 @@ dayjs.extend(tz);
 
 @Injectable()
 export class AnalyticsService {
+  private readonly logger = new Logger(AnalyticsService.name);
   constructor(private readonly prisma: PrismaService) {}
 
   async getDashboardSummary(idSucursal: number) {
@@ -47,6 +50,15 @@ export class AnalyticsService {
     } catch (error) {
       console.error('Error en getDashboardSummary:', error);
       throw new InternalServerErrorException('No se pudo cargar el dashboard');
+    }
+  }
+
+  async getVendedorDashboardData(userId: number) {
+    try {
+    } catch (error) {
+      this.logger.error('error generado es: ', error);
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException('Fatal error: Error inesperado');
     }
   }
 

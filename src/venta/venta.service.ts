@@ -22,6 +22,19 @@ import { QueryVentasTable } from './query/queryTableVentas';
 import { normalizerVentas } from './helpers/normailizerVenta';
 import { normalizeVentaForPDF } from './helpers/venta-pdf.normalizer';
 // ===== Tipos auxiliares
+import * as dayjs from 'dayjs';
+import 'dayjs/locale/es';
+import * as utc from 'dayjs/plugin/utc';
+import * as timezone from 'dayjs/plugin/timezone';
+import * as isSameOrAfter from 'dayjs/plugin/isSameOrAfter';
+import * as isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
+import * as customParseFormat from 'dayjs/plugin/customParseFormat';
+dayjs.extend(customParseFormat);
+dayjs.extend(utc);
+dayjs.extend(timezone);
+dayjs.extend(isSameOrBefore);
+dayjs.extend(isSameOrAfter);
+dayjs.locale('es');
 
 type LineaProd = {
   productoId: number;
@@ -509,6 +522,8 @@ export class VentaService {
         cats,
         metodoPago,
         tipoComprobante,
+        isVendedor,
+        usuarioId,
       } = query;
 
       if (!sucursalId) {
@@ -516,21 +531,32 @@ export class VentaService {
       }
 
       this.logger.log(
-        `DTO recibido query ventas historial:\n${JSON.stringify(query, null, 2)}`,
+        `DTO recibido query ventas historial, M:Ventas ==>:\n${JSON.stringify(query, null, 2)}`,
       );
 
-      const AND: Prisma.VentaWhereInput[] = [{ sucursalId }];
+      const AND: Prisma.VentaWhereInput[] = [{ sucursalId, anulada: false }];
 
+      if (isVendedor) {
+        AND.push({
+          usuarioId: usuarioId,
+        });
+      }
       // rango de fechas
+      // rango de fechas (INCLUYENTE en días)
       if (fechaDesde || fechaHasta) {
+        const start = fechaDesde
+          ? dayjs(fechaDesde).startOf('day').toDate()
+          : undefined;
+
+        // end exclusivo: inicio del día siguiente
+        const endExclusive = fechaHasta
+          ? dayjs(fechaHasta).add(1, 'day').startOf('day').toDate()
+          : undefined;
+
         AND.push({
           fechaVenta: {
-            gte: fechaDesde
-              ? new Date(`${fechaDesde}T00:00:00.000Z`)
-              : undefined,
-            lte: fechaHasta
-              ? new Date(`${fechaHasta}T23:59:59.999Z`)
-              : undefined,
+            ...(start && { gte: start }),
+            ...(endExclusive && { lt: endExclusive }), // <--- lt, NO lte
           },
         });
       }

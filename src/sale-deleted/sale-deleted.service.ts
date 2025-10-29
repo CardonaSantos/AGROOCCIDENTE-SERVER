@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Injectable,
   InternalServerErrorException,
+  Logger,
   UnauthorizedException,
 } from '@nestjs/common';
 import { CreateSaleDeletedDto } from './dto/create-sale-deleted.dto';
@@ -9,9 +10,24 @@ import { UpdateSaleDeletedDto } from './dto/update-sale-deleted.dto';
 import { PrismaService } from 'src/prisma/prisma.service';
 import * as bcrypt from 'bcryptjs';
 import { HistorialStockTrackerService } from 'src/historial-stock-tracker/historial-stock-tracker.service';
-
+import * as dayjs from 'dayjs';
+import 'dayjs/locale/es';
+import * as utc from 'dayjs/plugin/utc';
+import * as timezone from 'dayjs/plugin/timezone';
+import * as isSameOrAfter from 'dayjs/plugin/isSameOrAfter';
+import * as isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
+import * as customParseFormat from 'dayjs/plugin/customParseFormat';
+import { TZGT } from 'src/utils/utils';
+dayjs.extend(customParseFormat);
+dayjs.extend(utc);
+dayjs.extend(timezone);
+dayjs.extend(isSameOrBefore);
+dayjs.extend(isSameOrAfter);
+dayjs.locale('es');
+//------>
 @Injectable()
 export class SaleDeletedService {
+  private readonly logger = new Logger(SaleDeletedService.name);
   constructor(
     private readonly prisma: PrismaService,
     private readonly tracker: HistorialStockTrackerService,
@@ -29,10 +45,20 @@ export class SaleDeletedService {
       ventaId,
     } = createSaleDeletedDto;
 
+    this.logger.log(
+      `DTO recibido para eliminación de venta:\n${JSON.stringify(
+        createSaleDeletedDto,
+        null,
+        2,
+      )}`,
+    );
+
     return this.prisma.$transaction(async (tx) => {
+      // === 1️⃣ VALIDAR ADMIN ===
       const usuarioAdmin = await tx.usuario.findUnique({
         where: { id: usuarioId },
       });
+
       if (
         !usuarioAdmin ||
         !(await bcrypt.compare(adminPassword, usuarioAdmin.contrasena))
@@ -42,7 +68,7 @@ export class SaleDeletedService {
         );
       }
 
-      // Crear venta eliminada
+      // === 2️⃣ CREAR REGISTRO DE VENTA ELIMINADA ===
       const clienteIdFinal = clienteId && clienteId > 0 ? clienteId : null;
       const ventaEliminada = await tx.ventaEliminada.create({
         data: {
@@ -54,84 +80,142 @@ export class SaleDeletedService {
         },
       });
 
-      if (!ventaEliminada || !ventaEliminada.id) {
+      if (!ventaEliminada?.id) {
         throw new InternalServerErrorException(
-          'No se pudo crear la venta eliminada',
+          'No se pudo crear venta eliminada',
         );
       }
 
-      // Vincular productos y preparar restauración de stock
+      // === 3️⃣ ANULAR LA VENTA ORIGINAL ===
+      await tx.venta.update({
+        where: { id: ventaId },
+        data: {
+          anulada: true,
+          anuladaPor: { connect: { id: usuarioId } },
+          fechaAnulacion: dayjs().tz(TZGT).toDate(),
+          motivoAnulacion: motivo,
+        },
+      });
+
+      // === 4️⃣ SEPARAR PRODUCTOS Y PRESENTACIONES ===
+      const productosSimples = productos.filter((p) => p.type === 'PRODUCTO');
+      const presentaciones = productos.filter((p) => p.type === 'PRESENTACION');
+      const presentacionIds = presentaciones
+        .map((p) => p.productoId)
+        .filter((id): id is number => !!id);
+
+      const presentacionesWithProdIds = await tx.productoPresentacion.findMany({
+        where: { id: { in: presentacionIds } },
+        include: { producto: true },
+      });
+
+      const presentacionesWithProduct = presentaciones.map((pres) => {
+        const dataDb = presentacionesWithProdIds.find(
+          (db) => db.id === pres.productoId,
+        );
+        if (!dataDb)
+          throw new BadRequestException(
+            `Presentación con id ${pres.productoId} no encontrada.`,
+          );
+
+        return {
+          presentacionId: dataDb.id,
+          productoId: dataDb.productoId,
+          cantidad: pres.cantidad,
+          precioVenta: pres.precioVenta,
+        };
+      });
+
+      // === 5️⃣ RESTAURAR STOCKS ===
       const productosParaTracker: any[] = [];
 
-      for (const prod of productos) {
-        if (!prod.productoId || prod.productoId <= 0) {
+      // 🔹 PRODUCTOS
+      for (const prod of productosSimples) {
+        if (!prod.productoId)
           throw new BadRequestException(
-            `Producto inválido: ID = ${prod.productoId}`,
+            `Producto inválido: ${prod.productoId}`,
           );
-        }
-        await tx.ventaEliminadaProducto.create({
-          data: {
-            ventaEliminadaId: ventaEliminada.id,
-            productoId: prod.productoId,
-            cantidad: prod.cantidad,
-            precioVenta: prod.precioVenta,
-          },
-        });
 
         const agg = await tx.stock.aggregate({
           _sum: { cantidad: true },
           where: { productoId: prod.productoId, sucursalId },
         });
         const cantidadAnterior = agg._sum.cantidad ?? 0;
-        const cantidadRestaurada = prod.cantidad;
 
-        // Restaurar stock al lote más antiguo o crear nuevo
         const lote = await tx.stock.findFirst({
           where: { productoId: prod.productoId, sucursalId },
           orderBy: { fechaIngreso: 'asc' },
         });
-        let stockRestaurado;
+
         if (lote) {
-          stockRestaurado = await tx.stock.update({
+          await tx.stock.update({
             where: { id: lote.id },
-            data: { cantidad: { increment: cantidadRestaurada } },
+            data: { cantidad: { increment: prod.cantidad } },
           });
         } else {
-          stockRestaurado = await tx.stock.create({
+          await tx.stock.create({
             data: {
               productoId: prod.productoId,
-              cantidad: cantidadRestaurada,
+              cantidad: prod.cantidad,
               costoTotal: 0,
               fechaIngreso: new Date(),
               precioCosto: 0,
-              sucursalId: sucursalId,
+              sucursalId,
             },
           });
         }
 
-        // Guarda cantidades para historial
         productosParaTracker.push({
+          tipo: 'PRODUCTO',
           productoId: prod.productoId,
           cantidadEliminada: prod.cantidad,
           cantidadAnterior,
-          cantidadNueva: cantidadAnterior + cantidadRestaurada,
+          cantidadNueva: cantidadAnterior + prod.cantidad,
         });
       }
 
-      // Eliminar la venta original
-      if (!ventaId) {
-        throw new BadRequestException('Error id de la venta no encontrado');
+      // 🔹 PRESENTACIONES
+      for (const pres of presentacionesWithProduct) {
+        const agg = await tx.stockPresentacion.aggregate({
+          _sum: { cantidadPresentacion: true },
+          where: { presentacionId: pres.presentacionId, sucursalId },
+        });
+        const cantidadAnterior = agg._sum.cantidadPresentacion ?? 0;
+
+        const lote = await tx.stockPresentacion.findFirst({
+          where: { presentacionId: pres.presentacionId, sucursalId },
+          orderBy: { fechaIngreso: 'asc' },
+        });
+
+        if (lote) {
+          await tx.stockPresentacion.update({
+            where: { id: lote.id },
+            data: { cantidadPresentacion: { increment: pres.cantidad } },
+          });
+        } else {
+          await tx.stockPresentacion.create({
+            data: {
+              productoId: pres.productoId,
+              presentacionId: pres.presentacionId,
+              cantidadRecibidaInicial: pres.cantidad,
+              cantidadPresentacion: pres.cantidad,
+              fechaIngreso: dayjs().tz(TZGT).toDate(),
+              sucursalId,
+            },
+          });
+        }
+
+        productosParaTracker.push({
+          tipo: 'PRESENTACION',
+          productoId: pres.productoId,
+          presentacionId: pres.presentacionId,
+          cantidadEliminada: pres.cantidad,
+          cantidadAnterior,
+          cantidadNueva: cantidadAnterior + pres.cantidad,
+        });
       }
-      await tx.venta.delete({ where: { id: ventaId } });
 
-      // await tx.sucursalSaldo.update({
-      //   where: { sucursalId },
-      //   data: {
-      //     saldoAcumulado: { decrement: totalVenta },
-      //     totalIngresos: { decrement: totalVenta },
-      //   },
-      // });
-
+      // === 6️⃣ TRACKER DE MOVIMIENTOS ===
       await this.tracker.trackerEliminacionVenta(
         tx,
         productosParaTracker,
