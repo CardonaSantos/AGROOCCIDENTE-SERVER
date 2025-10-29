@@ -21,6 +21,12 @@ export class MovimientosCajasController {
     private readonly movimientosCajasService: MovimientosCajasService,
   ) {}
 
+  /**
+   * PARA EL TABLE DE LA VISTA HISTORIALES, SUPER IMPORTANTE
+   * NOTA: LAS CATEGORIAS INFERIDAS ESTÁN MAL, CAMBIAR EL TIPO POR EL DATO REAL
+   * @param query QUERY SERCH
+   * @returns
+   */
   @Get()
   findAll(@Query() query: MovimientosQueryDto) {
     return this.movimientosCajasService.getMovimientosCaja(query);

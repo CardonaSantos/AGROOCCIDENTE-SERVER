@@ -60,6 +60,8 @@ export class MovimientosCajasService {
       return 'DEPOSITO_PROVEEDOR';
     if (m.clasificacion === 'GASTO_OPERATIVO') return 'GASTO_OPERATIVO';
     if (m.clasificacion === 'COSTO_VENTA') return 'COSTO_VENTA';
+    if (m.clasificacion === 'INGRESO') return 'INGRESO';
+
     return null;
   }
   private montoDesdeDeltas(m: any): number {

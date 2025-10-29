@@ -8,11 +8,22 @@ import * as dayjs from 'dayjs';
 import * as utc from 'dayjs/plugin/utc';
 import * as timezone from 'dayjs/plugin/timezone';
 import 'dayjs/locale/es-mx';
+import { differenceInCalendarDays } from 'date-fns';
 
 dayjs.extend(utc);
 dayjs.locale('es-mx');
 dayjs.extend(timezone);
-
+type NotifyVencimientoInput = {
+  stockId: number; // id del registro de stock/lote
+  productoId: number;
+  productoNombre: string;
+  sucursalId: number;
+  sucursalNombre?: string | null;
+  fechaVencimiento: Date;
+  cantidad?: number | null;
+  ubicacion?: string | null; // estante, bodega, etc. (si la tienes)
+  adminActorId?: number | null; // quien disparó el proceso (opcional)
+};
 //formato UTC
 // Función formatFecha corregida:
 const formatFecha = (fecha: Date): string =>
@@ -123,13 +134,22 @@ export class VencimientosService {
     });
     if (existe) return;
 
-    await this.notificationService.createOneNotification(
-      `El producto ${producto.nombre} vence el ${formatFecha(stock.fechaVencimiento)}`,
-      null,
-      adminId,
-      'VENCIMIENTO',
-      stock.id,
+    await this.notifyVencimientoProducto(
+      this.prisma,
+      this.notificationService,
+      {
+        stockId: stock.id,
+        productoId: producto.id,
+        productoNombre: producto.nombre,
+        sucursalId: stock.sucursalId, // asegúrate de tenerlo a mano
+        sucursalNombre: stock.sucursal?.nombre, // si lo tienes
+        fechaVencimiento: stock.fechaVencimiento,
+        cantidad: stock.cantidad ?? null,
+        ubicacion: stock.ubicacion ?? null, // si existe
+        adminActorId: null, // si alguien lanzó la revisión
+      },
     );
+
     console.log(`Notificación enviada a admin ${adminId}`);
   }
 
@@ -208,5 +228,93 @@ export class VencimientosService {
 
   remove(id: number) {
     return `This action removes a #${id} vencimiento`;
+  }
+
+  //NUEVO HELPER
+  // o usa dayjs si ya lo tienes
+
+  pickSeveridadPorVencimiento(
+    diasRestantes: number,
+  ): 'CRITICO' | 'ALERTA' | 'INFORMACION' {
+    if (diasRestantes <= 0) return 'CRITICO';
+    if (diasRestantes <= 7) return 'ALERTA';
+    return 'INFORMACION';
+  }
+
+  async notifyVencimientoProducto(
+    prisma: PrismaService,
+    notifications: NotificationService,
+    input: NotifyVencimientoInput,
+  ) {
+    const {
+      stockId,
+      productoId,
+      productoNombre,
+      sucursalId,
+      sucursalNombre,
+      fechaVencimiento,
+      cantidad,
+      ubicacion,
+      adminActorId,
+    } = input;
+
+    // 1) Destinatarios: admins de la sucursal
+    const admins = await prisma.usuario.findMany({
+      where: { rol: 'ADMIN', sucursalId, activo: true },
+      select: { id: true },
+    });
+    const userIds = admins.map((a) => a.id);
+    if (userIds.length === 0) return; // opcional: fallback a admins globales
+
+    // 2) Severidad por proximidad
+    const hoy = new Date();
+    const dias = differenceInCalendarDays(fechaVencimiento, hoy);
+    const severidad = this.pickSeveridadPorVencimiento(dias);
+
+    // 3) Mensajes y ruta
+    const fechaFmt = fechaVencimiento.toLocaleDateString('es-GT', {
+      year: 'numeric',
+      month: 'short',
+      day: '2-digit',
+    });
+    const titulo =
+      dias <= 0
+        ? 'Producto vencido'
+        : dias <= 7
+          ? 'Producto por vencer (≤ 7 días)'
+          : 'Producto por vencer (≤ 30 días)';
+    const mensaje =
+      dias <= 0
+        ? `El producto "${productoNombre}" está VENCIDO desde ${fechaFmt}.`
+        : `El producto "${productoNombre}" vence el ${fechaFmt} (faltan ${dias} día${dias === 1 ? '' : 's'}).`;
+
+    // Deep link al detalle del producto/lote (ajusta a tu routing real)
+    const route = `/inventario/producto/${productoId}?highlightStock=${stockId}`;
+
+    // 4) Crear y emitir una sola notificación para todos
+    await notifications.createForUsers({
+      userIds,
+      titulo,
+      mensaje,
+      categoria: 'INVENTARIO',
+      severidad, // INFORMACION | ALERTA | CRITICO
+      subtipo: 'EXPIRY', // estandarizamos subtipo
+      route,
+      actionLabel: 'Revisar lote',
+      referenciaTipo: 'Stock', // o 'Lote' si así lo nombras
+      referenciaId: stockId,
+      remitenteId: adminActorId ?? null, // si existe actor
+      sucursalId,
+      meta: {
+        stockId,
+        producto: { id: productoId, nombre: productoNombre },
+        sucursal: { id: sucursalId, nombre: sucursalNombre ?? null },
+        fechaVencimiento: fechaVencimiento.toISOString(),
+        diasRestantes: dias,
+        cantidad: cantidad ?? null,
+        ubicacion: ubicacion ?? null,
+      },
+      audiencia: 'USUARIOS',
+    });
   }
 }

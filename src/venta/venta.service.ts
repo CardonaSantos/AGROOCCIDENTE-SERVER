@@ -12,7 +12,7 @@ import { PrismaService } from 'src/prisma/prisma.service';
 import { ClientService } from 'src/client/client.service';
 import { NotificationService } from 'src/notification/notification.service';
 import { NotificationToEmit } from 'src/web-sockets/Types/NotificationTypeSocket';
-import { Prisma, TipoNotificacion } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { HistorialStockTrackerService } from 'src/historial-stock-tracker/historial-stock-tracker.service';
 import { CreateRequisicionRecepcionLineaDto } from 'src/recepcion-requisiciones/dto/requisicion-recepcion-create.dto';
 import { SoloIDProductos } from 'src/recepcion-requisiciones/dto/create-venta-tracker.dto';
@@ -21,8 +21,28 @@ import { SelectTypeVentas } from './select/selecSalesType';
 import { QueryVentasTable } from './query/queryTableVentas';
 import { normalizerVentas } from './helpers/normailizerVenta';
 import { normalizeVentaForPDF } from './helpers/venta-pdf.normalizer';
+// ===== Tipos auxiliares
+
+type LineaProd = {
+  productoId: number;
+  cantidad: number;
+  precioVenta: Prisma.Decimal;
+  tipoPrecio: string;
+  selectedPriceId: number;
+};
+
+type LineaPres = {
+  presentacionId: number;
+  productoId: number; // dueño de la presentación
+  cantidad: number;
+  precioVenta: Prisma.Decimal;
+  tipoPrecio: string;
+  selectedPriceId: number;
+};
+
 const toNumber4 = (v: number | Prisma.Decimal) =>
   typeof v === 'number' ? v : Number(v.toFixed(4));
+
 @Injectable()
 export class VentaService {
   //
@@ -80,28 +100,9 @@ export class VentaService {
         clienteConnect = { connect: { id: nuevo.id } };
       }
 
-      // ===== Tipos auxiliares
-      type LineaEntrada = (typeof productos)[number];
-
-      type LineaProd = {
-        productoId: number;
-        cantidad: number;
-        precioVenta: Prisma.Decimal;
-        tipoPrecio: string;
-        selectedPriceId: number;
-      };
-
-      type LineaPres = {
-        presentacionId: number;
-        productoId: number; // dueño de la presentación
-        cantidad: number;
-        precioVenta: Prisma.Decimal;
-        tipoPrecio: string;
-        selectedPriceId: number;
-      };
-
       const prodValidadas: LineaProd[] = [];
       const presValidadas: LineaPres[] = [];
+      type LineaEntrada = (typeof productos)[number];
 
       // ===== Validar cada línea contra el precio seleccionado
       for (const p of productos as LineaEntrada[]) {
@@ -307,22 +308,24 @@ export class VentaService {
             select: { nombre: true },
           });
           for (const uId of usuariosNotifIds) {
-            const existe = await tx.notificacion.findFirst({
-              where: {
-                referenciaId: th.id,
-                tipoNotificacion: 'STOCK_BAJO',
-                notificacionesUsuarios: { some: { usuarioId: uId } },
-              },
+            // const existe = await tx.notificacion.findFirst({
+            //   where: {
+            //     referenciaId: th.id,
+            //     tipoNotificacion: 'STOCK_BAJO',
+            //     notificacionesUsuarios: { some: { usuarioId: uId } },
+            //   },
+            // });
+            // if (existe) continue;
+            const userIds = await tx.usuario.findMany({ select: { id: true } });
+            const ids = userIds.map((u) => u.id);
+            await this.notifications.createForUsers({
+              titulo: `Stock Mínimo de ${info.nombre} Alcanzado`,
+              mensaje: `El producto ${info?.nombre ?? prodId} ha alcanzado stock mínimo (quedan ${stockGlobal} uds).`,
+              userIds: ids,
+              audiencia: 'GLOBAL',
+              categoria: 'INVENTARIO',
+              severidad: 'ALERTA',
             });
-            if (existe) continue;
-
-            await this.notifications.createOneNotification(
-              `El producto ${info?.nombre ?? prodId} ha alcanzado stock mínimo (quedan ${stockGlobal} uds).`,
-              usuarioId,
-              uId,
-              'STOCK_BAJO',
-              th.id,
-            );
           }
         }
       }
@@ -405,20 +408,43 @@ export class VentaService {
         );
       }
 
-      // ===== Pago + vincular a venta
-      const pago = await tx.pago.create({
-        data: {
-          metodoPago: metodoPago || 'CONTADO',
-          monto: Number(totalVenta),
-          venta: { connect: { id: venta.id } },
-        },
-      });
-      await tx.venta.update({
-        where: { id: venta.id },
-        data: { metodoPago: { connect: { id: pago.id } } },
-      });
+      // Pago + vincular a venta
+      if (metodoPago && metodoPago !== 'CREDITO') {
+        const pago = await tx.pago.create({
+          data: {
+            metodoPago,
+            monto: Number(totalVenta),
+            venta: { connect: { id: venta.id } },
+          },
+        });
+        await tx.venta.update({
+          where: { id: venta.id },
+          data: { metodoPago: { connect: { id: pago.id } } },
+        });
 
-      // ===== Caja
+        await this.cajaService.attachAndRecordSaleTx(
+          tx,
+          venta.id,
+          sucursalId,
+          usuarioId,
+          { exigirCajaSiEfectivo: true },
+        );
+      } else {
+        // Crédito: opcional, crear pago marcador 0 si tu UI lo espera
+        const pago0 = await tx.pago.create({
+          data: {
+            metodoPago: 'CREDITO',
+            monto: 0,
+            venta: { connect: { id: venta.id } },
+          },
+        });
+        await tx.venta.update({
+          where: { id: venta.id },
+          data: { metodoPago: { connect: { id: pago0.id } } },
+        });
+      }
+
+      //  Caja
       await this.cajaService.attachAndRecordSaleTx(
         tx,
         venta.id,

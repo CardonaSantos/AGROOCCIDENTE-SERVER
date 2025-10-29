@@ -411,6 +411,12 @@ export class MovimientoFinancieroService {
   ) {
     const run = async (tx: Tx) => {
       const dto = { ...rawDto };
+      const monto = Number(dto.monto);
+
+      if (!isFinite(monto) || monto <= 0) {
+        throw new BadRequestException('Monto debe ser mayor a 0.');
+      }
+
       // A) Normalizar metodoPago (solo si falta)
       if (!dto.metodoPago) {
         if (
@@ -430,6 +436,10 @@ export class MovimientoFinancieroService {
 
       const afectaCaja = Number(deltaCaja) !== 0;
       const afectaBanco = Number(deltaBanco) !== 0;
+      this.logger.debug(
+        `[MF] motivo=${dto.motivo} metodo=${dto.metodoPago} monto=${dto.monto} ` +
+          `=> deltaCaja=${deltaCaja} deltaBanco=${deltaBanco}`,
+      );
 
       if (!afectaCaja && !afectaBanco) {
         throw new BadRequestException(

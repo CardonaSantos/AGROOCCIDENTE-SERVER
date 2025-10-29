@@ -1263,39 +1263,39 @@ export class CajaService {
     });
     if (!venta) throw new NotFoundException('Venta no encontrada');
 
-    const metodo = venta.metodoPago?.metodoPago ?? 'CONTADO';
-    const esEfectivo = metodo === 'CONTADO';
+    const metodo = venta.metodoPago?.metodoPago ?? 'EFECTIVO'; // default más neutro
+    const esEfectivo = metodo === 'EFECTIVO' || metodo === 'CONTADO'; // ← tolera ambos
     const esCredito = metodo === 'CREDITO';
 
-    // 1) Turno del USUARIO en esa sucursal
-    const turno = await tx.registroCaja.findFirst({
-      where: {
-        sucursalId,
-        usuarioInicioId: usuarioId, // ← filtro por usuario
-        estado: 'ABIERTO',
-        fechaCierre: null,
-      },
-      orderBy: { fechaApertura: 'desc' },
-      select: { id: true },
-    });
-
-    if (esEfectivo && !turno) {
-      if (exigirCajaSiEfectivo) {
+    // 1) turno solo si vamos a tocar caja (efectivo)
+    let turno: { id: number } | null = null;
+    if (esEfectivo) {
+      turno = await tx.registroCaja.findFirst({
+        where: {
+          sucursalId,
+          usuarioInicioId: usuarioId, // ← filtro por usuario
+          estado: 'ABIERTO',
+          fechaCierre: null,
+        },
+        orderBy: { fechaApertura: 'desc' },
+        select: { id: true },
+      });
+      if (!turno && exigirCajaSiEfectivo) {
         throw new BadRequestException(
           'No tienes una caja abierta en esta sucursal para registrar la venta en efectivo.',
         );
       }
     }
 
-    // 2) (Meta) Linkear la venta al turno del usuario si existe (aunque no sea efectivo)
-    if (turno) {
+    // 2) En crédito NO linkees turno (evita que aparezca en arqueos)
+    if (!esCredito && turno) {
       await tx.venta.updateMany({
         where: { id: venta.id, registroCajaId: null },
         data: { registroCajaId: turno.id },
       });
     }
 
-    // 3) Movimiento financiero: una sola verdad contable
+    // 3) MF solo si NO es crédito y totalVenta > 0
     if (!esCredito && venta.totalVenta > 0) {
       await tx.movimientoFinanciero.create({
         data: {
@@ -1304,7 +1304,7 @@ export class CajaService {
           registroCajaId: esEfectivo ? (turno?.id ?? null) : null,
           clasificacion: 'INGRESO',
           motivo: 'VENTA',
-          metodoPago: metodo,
+          metodoPago: esEfectivo ? 'EFECTIVO' : 'TRANSFERENCIA', // ← usa el enum de MF
           deltaCaja: esEfectivo ? venta.totalVenta : 0,
           deltaBanco: esEfectivo ? 0 : venta.totalVenta,
           descripcion: `Venta #${venta.id}`,

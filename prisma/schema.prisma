@@ -161,9 +161,8 @@ model Usuario {
   PrecioProducto                    PrecioProducto[]
   solicitudesPrecio                 SolicitudPrecio[]                @relation("SolicitadoPor")
   solicitudesAprobadas              SolicitudPrecio[]                @relation("AprobadoPor")
-  notificacionesEnviadas            Notificacion[]                   @relation("Remitente")
-  notificacionesRecibidas           Notificacion[]                   @relation("Destinatario")
-  notificacionesUsuarios            NotificacionesUsuarios[] // Relación con tabla intermedia
+
+
   solicitudesEnviadas               SolicitudTransferenciaProducto[] @relation("UsuarioSolicitante")
   solicitudesAprobadasTransferencia SolicitudTransferenciaProducto[] @relation("AdministradorAprobador") // Renombrada para especificidad
   HistorialPrecioCosto              HistorialPrecioCosto[]
@@ -217,6 +216,12 @@ model Usuario {
 
   historialCredito VentaCuotaHistorial[] @relation("Usuario_HistorialCredito") // <— backref
   abonosCredito    AbonoCredito[]        @relation("Usuario_AbonosCredito") // <— backref
+  //NOTIFICACIONES
+  NotificationPreference NotificationPreference[]
+    // Opuesta a Notificacion.remitente ("NotiRemitente")
+  notificacionesEmitidas  Notificacion[]           @relation("NotiRemitente")
+  // Opuesta a NotificacionesUsuarios.usuario
+  notificacionesRecibidas NotificacionesUsuarios[]
 }
 
 // ============================================================================
@@ -1652,28 +1657,118 @@ model DepositoCobro {
 // ============================================================================
 
 model Notificacion {
-  id                     Int                      @id @default(autoincrement())
-  mensaje                String // Mensaje de la notificación
-  remitenteId            Int? // Usuario que envía la notificación (opcional)
-  remitente              Usuario?                 @relation("Remitente", fields: [remitenteId], references: [id])
-  tipoNotificacion       TipoNotificacion // Tipo de notificación (enum)
-  referenciaId           Int? // ID de referencia relacionado (por ejemplo, ID de solicitud o transferencia)
-  fechaCreacion          DateTime                 @default(now()) // Fecha de creación de la notificación
-  notificacionesUsuarios NotificacionesUsuarios[] // Relación con tabla intermedia
+  id              Int            @id @default(autoincrement())
+  // --- CONTENIDO ---
+  titulo          String?
+  mensaje         String
+  categoria       NotiCategory   @default(OTROS)
+  subtipo         String?        // libre: 'PRICE_REQUEST', 'CREDIT_AUTH_CREATED', 'LOW_STOCK', etc.
+  severidad       NotiSeverity   @default(INFORMACION)
 
-  Usuario Usuario[] @relation("Destinatario")
+  // --- CONTEXTO / REFERENCIAS ---
+  referenciaTipo  String?        // 'SolicitudPrecio', 'Transferencia', 'Credito', etc.
+  referenciaId    Int?
+  sucursalId      Int?           // para rastrear/filtrar por sucursal
+  // si manejas multi-empresa futuros: companyId Int?
+
+  // --- ACCIONES / UI ---
+  route           String?        // ej: '/dashboard/solicitudes/123'
+  actionLabel     String?        // ej: 'Ver detalle'
+  meta            Json?          // payload flexible (IDs, totales, etc.)
+
+  // --- EMISOR/AUDITORÍA ---
+  remitenteId     Int?
+  remitente       Usuario?       @relation("NotiRemitente", fields: [remitenteId], references: [id])
+
+  audiencia       NotiAudience   @default(USUARIOS) // intención (no rompe nada)
+
+  fechaCreacion   DateTime       @default(now())
+  visibleFrom     DateTime?
+  expiresAt       DateTime?
+  scheduledAt     DateTime?      // si algún día programes envíos diferidos
+
+  // Estado por usuario (join)
+  notificacionesUsuarios NotificacionesUsuarios[]
+
+  // ÍNDICES útiles
+  @@index([categoria, severidad, fechaCreacion])
+  @@index([sucursalId, fechaCreacion])
+  @@index([referenciaTipo, referenciaId])
+  @@index([fechaCreacion])
 }
 
 model NotificacionesUsuarios {
   id             Int          @id @default(autoincrement())
-  usuarioId      Int // Usuario que recibe la notificación
+  usuarioId      Int
   usuario        Usuario      @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
-  notificacionId Int // ID de la notificación
+  notificacionId Int
   notificacion   Notificacion @relation(fields: [notificacionId], references: [id], onDelete: Cascade)
-  leido          Boolean      @default(false) // Indica si la notificación fue leída
-  eliminado      Boolean      @default(false) // Indica si la notificación fue eliminada
-  leidoEn        DateTime? // Fecha en que se leyó
-  recibidoEn     DateTime     @default(now()) // Fecha en que se recibió la notificación
+
+  // Estado por usuario
+  leido          Boolean      @default(false)
+  leidoEn        DateTime?
+  eliminado      Boolean      @default(false) // oculto/dismiss
+  dismissedAt    DateTime?
+
+  // Ordenado por “recibido”
+  recibidoEn     DateTime     @default(now())
+
+  pinnedUntil    DateTime?    // opcional: fijar en top hasta X fecha
+
+  // Idempotencia y performance
+  @@unique([usuarioId, notificacionId])     // evita duplicados por carrera
+  @@index([usuarioId, eliminado, leido, recibidoEn])
+}
+
+// Preferencias por usuario
+model NotificationPreference {
+  id          Int          @id @default(autoincrement())
+  usuarioId   Int
+  usuario     Usuario      @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  categoria   NotiCategory
+  subtipo     String?      // si quieres granular, si no, null = toda la categoría
+  sucursalId  Int?         // preferencias por sucursal (opcional)
+
+  inApp       Boolean      @default(true)    // canal in-app
+  email       Boolean      @default(false)   // canal email (futuro)
+  push        Boolean      @default(false)   // push móvil (futuro)
+  minSeverity NotiSeverity @default(INFORMACION)    // umbral mínimo
+
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@unique([usuarioId, categoria, subtipo, sucursalId])
+}
+
+// Nuevos enums
+enum NotiCategory {
+  VENTAS          // Ventas / precios / POS
+  INVENTARIO      // Stock, vencimiento, transferencias
+  CREDITO         // Cuentas por cobrar (CxC)
+  CUENTAS_POR_PAGAR // CxP (antes "PAGABLES")
+  GARANTIA
+  REPARACIONES
+  COMPRAS
+  LOGISTICA
+  SISTEMA
+  SEGURIDAD
+  FACTURACION
+  OTROS
+}
+
+enum NotiSeverity {
+  INFORMACION
+  EXITO
+  ALERTA       // (Si prefieres "ADVERTENCIA", cámbialo aquí y en UI)
+  ERROR
+  CRITICO
+}
+
+enum NotiAudience {
+  USUARIOS   // notificaciones dirigidas a usuarios específicos (join table)
+  ROL        // intención a un rol (igual persistimos por usuario)
+  SUCURSAL   // intención a una sucursal (igual persistimos por usuario)
+  GLOBAL     // intención global/sistema (igual persistimos por usuario o lazy)
 }
 
 // ============================================================================

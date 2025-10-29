@@ -23,12 +23,7 @@ import * as isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
 import * as customParseFormat from 'dayjs/plugin/customParseFormat';
 import { TZGT } from 'src/utils/utils';
 import { selectCreditAutorization } from './helpers/select';
-import {
-  AccionCredito,
-  MetodoPago,
-  Prisma,
-  TipoNotificacion,
-} from '@prisma/client';
+import { AccionCredito, MetodoPago, Prisma } from '@prisma/client';
 import { GetCreditoAutorizacionesDto } from './dto/get-credito-autorizaciones.dto';
 import { normalizeSolicitud } from './common/normalizerAutorizacionesResponse';
 import { LegacyGateway } from 'src/web-sockets/websocket.gateway';
@@ -124,13 +119,12 @@ export class CreditoAutorizationService {
 
       // ===================== Transacción =====================
       const createdId = await this.prisma.$transaction(async (tx) => {
-        // ---- Cabecera
+        // Cabecera
         const autorization = await tx.solicitudCreditoVenta.create({
           data: {
             cliente: { connect: { id: dto.clienteId } },
             solicitadoPor: { connect: { id: dto.solicitadoPorId } },
             sucursal: { connect: { id: dto.sucursalId } },
-
             // Propuesta económica
             totalPropuesto: serverSum, // principal (suma lineas servidor)
             cuotaInicialPropuesta: cuotaInicialFinal, // ENGANCHE (de cuotas o por plan)
@@ -140,13 +134,10 @@ export class CreditoAutorizationService {
             planCuotaModo: dto.planCuotaModo,
             diasEntrePagos: dto.diasEntrePagos,
             fechaPrimeraCuota: primeraCuotaDate,
-
             // Flujo
             comentario: dto.comentario || null,
             estado: 'PENDIENTE',
-
             // Si quieres guardar la suma de cuotas con interés (opcional):
-            // montoTotalConInteres: sumaCuotas,
           },
         });
 
@@ -164,7 +155,7 @@ export class CreditoAutorizationService {
           createdLines,
         );
 
-        // ---- NUEVO: Cuotas propuestas
+        // Cuotas propuestas
         const createdCuotas = await Promise.all(
           cuotas.map((c) =>
             tx.solicitudCreditoVentaCuota.create({
@@ -173,8 +164,8 @@ export class CreditoAutorizationService {
                 numero: c.numero,
                 fecha: c.fecha, // Date
                 monto: c.monto,
-                etiqueta: c.etiqueta as any, // 'ENGANCHE' | 'NORMAL'
-                origen: c.origen as any, // 'AUTO' | 'MANUAL'
+                etiqueta: c.etiqueta,
+                origen: c.origen, // 'AUTO' | 'MANUAL'
                 esManual: c.esManual,
                 montoCapital: c.montoCapital ?? null,
                 montoInteres: c.montoInteres ?? null,
@@ -204,7 +195,7 @@ export class CreditoAutorizationService {
           historial,
         );
 
-        // ---- Retornar entidad con relaciones (incluye cuotasPropuestas)
+        // Retornar entidad con relaciones
         const full = await tx.solicitudCreditoVenta.findUnique({
           where: { id: autorization.id },
           include: {
@@ -231,7 +222,46 @@ export class CreditoAutorizationService {
       if (!rec) throw new Error('Re-fetch falló');
       const item = normalizeSolicitud(rec);
       this.ws.emitCreditAuthorizationCreated(item);
-      // ===================== Respuesta final =====================
+      //NOTIFICACION
+      // === 1) Notificación para admins de la sucursal ===
+      const adminsSucursal = await this.prisma.usuario.findMany({
+        where: { rol: 'ADMIN', sucursalId: dto.sucursalId, activo: true },
+        select: { id: true },
+      });
+      let userIds = adminsSucursal.map((a) => a.id);
+
+      // Fallback a admins globales (por si la sucursal no tiene)
+      if (userIds.length === 0) {
+        const adminsGlobal = await this.prisma.usuario.findMany({
+          where: { rol: 'ADMIN', activo: true },
+          select: { id: true },
+        });
+        userIds = adminsGlobal.map((a) => a.id);
+      }
+
+      // Crea la notificación (persistencia + WS 'noti:new' por usuario)
+      await this.notifications.createForUsers({
+        userIds,
+        titulo: 'Nueva autorización de crédito',
+        mensaje: `Se creó una autorización para ${item.cliente?.nombre ?? 'cliente'} por Q${item.economico?.totalPropuesto ?? 0}.`,
+        categoria: 'CREDITO',
+        severidad: 'INFORMACION',
+        subtipo: 'CREDIT_AUTH_CREATED',
+        route: `/creditos/autorizaciones/${item.id}`, // ajusta a tu ruta real
+        referenciaTipo: 'SolicitudCreditoVenta',
+        referenciaId: item.id,
+        remitenteId: dto.solicitadoPorId,
+        sucursalId: dto.sucursalId,
+        audiencia: 'USUARIOS',
+        meta: {
+          solicitudId: item.id,
+          totalPropuesto: item.economico?.totalPropuesto ?? 0,
+          cliente: { id: item.cliente?.id, nombre: item.cliente?.nombre },
+          sucursal: { id: dto.sucursalId },
+        },
+      });
+
+      // Respuesta final
       this.logger.log(
         '[CreditoAutorizationService] Autorización creada OK (full):',
       );
@@ -529,19 +559,16 @@ export class CreditoAutorizationService {
         }));
       const reffVenta = `CRED-${dayjs().year()}-${String(authCreditoId).padStart(5, '0')}`;
       const ventaDTO: CreateVentaDto = {
-        metodoPago: metodoPago ?? 'EFECTIVO',
+        metodoPago: metodoPago ?? 'CREDITO',
         sucursalId: admin.sucursalId,
         tipoComprobante: 'RECIBO',
         observaciones: comentario,
         usuarioId: adminId,
-        // referenciaPago: reffVenta,
         clienteId: authorization.clienteId,
         productos: productosDTO,
       };
 
-      // Si tu servicio Venta soporta tx:
       const newVenta = await this.venta.createVentaTx(ventaDTO, tx);
-
       //  Datos derivados de las cuotas propuestas
       const cuotasAuth = (authorization.cuotasPropuestas ??
         []) as cuotasPropuestas[];
@@ -600,20 +627,27 @@ export class CreditoAutorizationService {
           );
         }
       }
+      const enganche = Number(authorization.cuotaInicialPropuesta | 0);
+      const debeRegistrarMF = itHasEnganche && enganche > 1e-6;
+      if (debeRegistrarMF) {
+        const dtoMF: CreateMFUtility = {
+          monto: authorization.cuotaInicialPropuesta,
+          motivo: 'COBRO_CREDITO',
+          sucursalId: creditHeader.sucursalId,
+          usuarioId: adminId,
+          descripcion: comentario,
+          metodoPago: metodoPago,
+          cuentaBancariaId: cuentaBancariaId,
+          registroCajaId: cajaId,
+        };
 
-      const dtoMF: CreateMFUtility = {
-        monto: authorization.cuotaInicialPropuesta,
-        motivo: 'COBRO_CREDITO',
-        sucursalId: creditHeader.sucursalId,
-        usuarioId: adminId,
-        descripcion: comentario,
-        metodoPago: metodoPago,
-        cuentaBancariaId: cuentaBancariaId,
-        registroCajaId: cajaId,
-      };
-
-      const mf = await this.mf.createMovimiento(dtoMF, { tx: tx });
-      this.logger.log('MF: ', mf);
+        const mf = await this.mf.createMovimiento(dtoMF, { tx: tx });
+        this.logger.log('MF: ', mf);
+      } else {
+        this.logger.log(
+          '[CreditoAutorizationService] Sin enganche (monto=0). Se omite movimiento financiero.',
+        );
+      }
 
       await this.generateCuotasFromCredito(
         tx,
@@ -646,6 +680,25 @@ export class CreditoAutorizationService {
         },
         data: {
           estado: 'APROBADO',
+        },
+      });
+
+      await this.notifications.createOne({
+        userId: authorization.solicitadoPor.id,
+        titulo: 'Crédito aprobado',
+        mensaje: `Se aprobó el su solicitud de crédito por ${creditHeader.totalVenta}`,
+        categoria: 'CREDITO',
+        severidad: 'EXITO',
+        subtipo: 'AUTH_APROBADA',
+        // route: `/creditos/registro/${credito.id}`,
+        referenciaTipo: 'CreditoVenta',
+        // referenciaId: credito.id,
+        remitenteId: adminId,
+        sucursalId: authorization.sucursalId ?? null,
+        actionLabel: 'Ir al crédito',
+        meta: {
+          enganche: authorization.cuotaInicialPropuesta ?? 0,
+          metodoPagoEnganche: metodoPago ?? null,
         },
       });
       return creditHeader;
@@ -1008,13 +1061,15 @@ export class CreditoAutorizationService {
             fechaRespuesta: dayjs().tz(TZGT).toDate(),
           },
         });
-        await this.notifications.create(
-          'Su solicitud de crédito ha sido rechazada',
-          adminId,
-          [auth.solicitadoPorId], // receptor del crédito
-          TipoNotificacion.OTRO,
-          auth.id,
-        );
+        await this.notifications.createOne({
+          userId: auth.solicitadoPorId,
+          mensaje: `Su solicitud de crédito ha sido rechazada por: ${comentario}`,
+          audiencia: 'USUARIOS',
+          categoria: 'CREDITO',
+          actionLabel: '',
+          titulo: 'Rechazo de solicitud',
+          severidad: 'INFORMACION',
+        });
         return {
           message: `Solicitud de crédito #${auth.id} rechazada correctamente`,
           solicitud: updated,

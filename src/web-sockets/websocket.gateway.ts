@@ -29,6 +29,7 @@ import * as isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
 import * as customParseFormat from 'dayjs/plugin/customParseFormat';
 import { SolicitudCreditoVenta } from '@prisma/client';
 import { NormalizedSolicitud } from 'src/credito-autorization/common/normalizerAutorizacionesResponse';
+import { UiNotificacionDTO } from 'src/notification/common/UINotificationDto';
 dayjs.extend(customParseFormat);
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -159,11 +160,43 @@ export class LegacyGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.server.emit(event, payload);
   }
 
+  emitToUsers<E extends string>(event: E, payload: any, userIds: number[]) {
+    for (const uid of userIds) {
+      this.server.to(`user:${uid}`).emit(event, payload);
+    }
+  }
+
   //=================>
+  // LegacyGateway (o tu nuevo Gateway principal)
+  emitNotiToUsers(payload: UiNotificacionDTO, userIds: number[]) {
+    for (const uid of userIds) {
+      this.server.to(`user:${uid}`).emit('noti:new', payload);
+    }
+  }
+
+  emitSolicitudPrecioToAdmins(p: {
+    solicitudId: number;
+    comentario?: string;
+    vendedorId: number;
+  }) {
+    this.server.to(`rol:ADMIN`).emit('solicitud:precio', p);
+  }
+
+  emitTransferenciaToAdmins(p: {
+    id: number;
+    monto: number;
+    deSucursal: number;
+    aSucursal: number;
+  }) {
+    this.server.to(`rol:ADMIN`).emit('transferencia:solicitud', p);
+  }
+
+  //nuevo->
 
   //ENVIAR LAS SOLICITUDES A LOS ADMINS:::::::::::
   handleEnviarSolicitudPrecio(solicitud: nuevaSolicitud, userID: number) {
     const SOCKEID_ADMIN = this.admins.get(userID);
+    this.logger.log('enviado al UI: ', solicitud, userID);
     if (SOCKEID_ADMIN) {
       this.server.to(SOCKEID_ADMIN).emit('recibirSolicitud', solicitud);
     } else {
@@ -192,6 +225,7 @@ export class LegacyGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   //NUEVO PARA FORMATO ROOMS
   emitCreditAuthorizationCreated(item: CreditAuthorizationCreatedEvent) {
+    this.logger.log('Enviando por socket...');
     this.server.to(`rol:ADMIN`).emit('credit:authorization.created', item);
   }
 

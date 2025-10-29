@@ -7,17 +7,21 @@ import { CreatePriceRequestDto } from './dto/create-price-request.dto';
 import { UpdatePriceRequestDto } from './dto/update-price-request.dto';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { NotificationService } from 'src/notification/notification.service';
+import { LegacyGateway } from 'src/web-sockets/websocket.gateway';
+import { nuevaSolicitud } from 'src/web-sockets/Types/SolicitudType';
 
 @Injectable()
 export class PriceRequestService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notificationService: NotificationService,
+    private readonly ws: LegacyGateway,
   ) {}
   //
   async create(createPriceRequestDto: CreatePriceRequestDto) {
     try {
-      const nuevaSolicitud = await this.prisma.solicitudPrecio.create({
+      // 1) Crear solicitud
+      const nueva = await this.prisma.solicitudPrecio.create({
         data: {
           precioSolicitado: createPriceRequestDto.precioSolicitado,
           aprobadoPorId: createPriceRequestDto.aprobadoPorId,
@@ -25,64 +29,92 @@ export class PriceRequestService {
           estado: 'PENDIENTE',
           solicitadoPorId: createPriceRequestDto.solicitadoPorId,
         },
-      });
-
-      const admins = await this.prisma.usuario.findMany({
-        where: { rol: 'ADMIN' },
-      });
-
-      const productoDetalles = await this.prisma.producto.findUnique({
-        where: { id: nuevaSolicitud.productoId },
-      });
-
-      const user = await this.prisma.usuario.findUnique({
-        where: { id: nuevaSolicitud.solicitadoPorId },
-      });
-
-      // Extraemos los IDs de los administradores para pasarlos al servicio de notificación
-      const adminIds = admins.map((admin) => admin.id);
-
-      await this.notificationService.create(
-        `El usuario ${user.nombre} ha solicitado un precio especial de Q${nuevaSolicitud.precioSolicitado} para el producto "${productoDetalles.nombre}".`,
-        nuevaSolicitud.solicitadoPorId,
-        adminIds, // Pasamos todos los admin IDs aquí
-        'SOLICITUD_PRECIO',
-      );
-
-      const solicitudDetalles = await this.prisma.solicitudPrecio.findUnique({
-        where: {
-          id: nuevaSolicitud.id,
-        },
         include: {
-          producto: true,
+          producto: { select: { id: true, nombre: true } },
           solicitadoPor: {
             select: {
-              nombre: true,
               id: true,
+              nombre: true,
               rol: true,
-              sucursal: {
-                select: {
-                  nombre: true,
-                },
-              },
+              sucursalId: true,
+              sucursal: { select: { id: true, nombre: true } },
             },
           },
         },
       });
 
-      await Promise.all(
-        admins.map((admin) =>
-          this.notificationService.enviarNotificarSolicitud(
-            solicitudDetalles,
-            admin.id,
-          ),
-        ),
-      );
+      // 2) Destinatarios: admins de la sucursal del solicitante
+      const adminsSucursal = await this.prisma.usuario.findMany({
+        where: {
+          rol: 'ADMIN',
+          sucursalId: nueva.solicitadoPor.sucursalId,
+          activo: true,
+        },
+        select: { id: true },
+      });
+      let userIds = adminsSucursal.map((a) => a.id);
 
-      console.log('La nueva solicitud de precio es: ', nuevaSolicitud);
-      return nuevaSolicitud;
+      // Fallback opcional a admins globales si no hay en sucursal
+      if (userIds.length === 0) {
+        const adminsGlobal = await this.prisma.usuario.findMany({
+          where: { rol: 'ADMIN', activo: true },
+          select: { id: true },
+        });
+        userIds = adminsGlobal.map((a) => a.id);
+      }
+
+      // 3) Notificación estandarizada
+      await this.notificationService.createForUsers({
+        userIds,
+        titulo: 'Nueva solicitud de precio',
+        mensaje: `El vendedor ${nueva.solicitadoPor.nombre} pide Q${nueva.precioSolicitado} para "${nueva.producto.nombre}".`,
+        categoria: 'VENTAS',
+        severidad: 'INFORMACION',
+        subtipo: 'PRICE_REQUEST_CREATED',
+        route: `/solicitudes-precio/${nueva.id}`,
+        referenciaTipo: 'SolicitudPrecio',
+        referenciaId: nueva.id,
+        remitenteId: nueva.solicitadoPor.id,
+        sucursalId: nueva.solicitadoPor.sucursalId,
+        actionLabel: 'Revisar solicitud',
+        meta: {
+          solicitudId: nueva.id,
+          precioSolicitado: nueva.precioSolicitado,
+          producto: { id: nueva.producto.id, nombre: nueva.producto.nombre },
+          solicitante: {
+            id: nueva.solicitadoPor.id,
+            nombre: nueva.solicitadoPor.nombre,
+            rol: nueva.solicitadoPor.rol,
+          },
+          sucursal: {
+            id:
+              nueva.solicitadoPor.sucursal?.id ??
+              nueva.solicitadoPor.sucursalId,
+            nombre: nueva.solicitadoPor.sucursal?.nombre ?? null,
+          },
+        },
+      });
+      const newSolicitud = await this.prisma.solicitudPrecio.findUnique({
+        where: { id: nueva.id },
+      });
+      const nuevaSolicitud: nuevaSolicitud = {
+        aprobadoPorId: newSolicitud.aprobadoPorId,
+        estado: newSolicitud.estado,
+        fechaRespuesta: newSolicitud.fechaRespuesta,
+        fechaSolicitud: newSolicitud.fechaSolicitud,
+        id: newSolicitud.id,
+        precioSolicitado: newSolicitud.precioSolicitado,
+        productoId: newSolicitud.productoId,
+        solicitadoPorId: newSolicitud.solicitadoPorId,
+      };
+      // 4) Emitir evento de dominio para actualizar la lista en vivo
+      for (const admin of userIds) {
+        this.ws.handleEnviarSolicitudPrecio(nuevaSolicitud, admin);
+      }
+
+      return nueva;
     } catch (error) {
-      console.log(error);
+      console.error(error);
       throw new InternalServerErrorException(
         'Error al crear registro y enviar notificaciones',
       );
@@ -91,14 +123,20 @@ export class PriceRequestService {
 
   async aceptPriceRequest(idSolicitud: number, idUser: number) {
     try {
+      // 1) Cargar y validar
       const solicitud = await this.prisma.solicitudPrecio.findFirst({
         where: { id: idSolicitud, estado: 'PENDIENTE' },
-        include: { producto: { select: { id: true, nombre: true } } },
+        include: {
+          producto: { select: { id: true, nombre: true } },
+          solicitadoPor: {
+            select: { id: true, nombre: true, sucursalId: true },
+          },
+        },
       });
-
       if (!solicitud)
         throw new BadRequestException('Solicitud no encontrada o ya procesada');
 
+      // 2) Aprobar + crear precio (DB)
       const solicitudAprobada = await this.prisma.solicitudPrecio.update({
         where: { id: idSolicitud },
         data: {
@@ -108,7 +146,6 @@ export class PriceRequestService {
         },
       });
 
-      // Crear el nuevo precio asociado al producto con los nuevos campos
       const maxOrden = await this.prisma.precioProducto.aggregate({
         where: { productoId: solicitud.producto.id },
         _max: { orden: true },
@@ -120,22 +157,38 @@ export class PriceRequestService {
           precio: solicitudAprobada.precioSolicitado,
           creadoPorId: idUser,
           productoId: solicitud.producto.id,
-          tipo: 'CREADO_POR_SOLICITUD', // Enum, ¡ajusta si hace falta!
-          orden: (maxOrden._max.orden || 0) + 1, // siguiente orden
+          tipo: 'CREADO_POR_SOLICITUD',
+          orden: (maxOrden._max.orden || 0) + 1,
           usado: false,
           rol: 'PUBLICO',
         },
       });
 
-      // 4. Notificar al solicitante
-      await this.notificationService.createOneNotification(
-        `Un administrador ha aceptado tu solicitud de precio para el producto "${solicitud.producto.nombre}"`,
-        idUser,
-        solicitudAprobada.solicitadoPorId,
-        'SOLICITUD_PRECIO',
-      );
+      // 3) Notificar al solicitante (estándar)
+      await this.notificationService.createOne({
+        userId: solicitud.solicitadoPor.id,
+        titulo: 'Solicitud de precio aprobada',
+        mensaje: `Se aprobó tu solicitud para "${solicitud.producto.nombre}" por Q${solicitudAprobada.precioSolicitado}.`,
+        categoria: 'VENTAS',
+        severidad: 'EXITO',
+        subtipo: 'PRICE_REQUEST_APPROVED',
+        route: `/solicitudes-precio/${solicitud.id}`,
+        referenciaTipo: 'SolicitudPrecio',
+        referenciaId: solicitud.id,
+        remitenteId: idUser,
+        sucursalId: solicitud.solicitadoPor.sucursalId,
+        actionLabel: 'Ver detalle',
+        meta: {
+          solicitudId: solicitud.id,
+          producto: {
+            id: solicitud.producto.id,
+            nombre: solicitud.producto.nombre,
+          },
+          precioAprobado: solicitudAprobada.precioSolicitado,
+          precioProductoId: nuevoPrecio.id,
+        },
+      });
 
-      // 5. ¡No borres la solicitud! Solo retorna o maneja si quieres limpiar la UI.
       return { solicitudAprobada, nuevoPrecio };
     } catch (error) {
       console.error(error);
@@ -143,32 +196,52 @@ export class PriceRequestService {
     }
   }
 
-  async rejectRequesPrice(idSolicitud: number, idUser: number) {
+  async rejectRequesPrice(
+    idSolicitud: number,
+    idUser: number,
+    motivo?: string,
+  ) {
     try {
-      // Eliminar la solicitud
-      const solicitudEliminada = await this.prisma.solicitudPrecio.delete({
+      // 1) Carga lo necesario para notificación
+      const solicitud = await this.prisma.solicitudPrecio.findUnique({
         where: { id: idSolicitud },
+        include: {
+          producto: { select: { id: true, nombre: true } },
+          solicitadoPor: {
+            select: { id: true, nombre: true, sucursalId: true },
+          },
+        },
       });
+      if (!solicitud) throw new BadRequestException('Solicitud no encontrada');
 
-      const producto = await this.prisma.producto.findUnique({
-        where: {
-          id: solicitudEliminada.productoId,
+      // 2) Borra la solicitud (si tu flujo así lo requiere)
+      await this.prisma.solicitudPrecio.delete({ where: { id: idSolicitud } });
+
+      // 3) Notifica al solicitante (no referencies el borrado)
+      await this.notificationService.createOne({
+        userId: solicitud.solicitadoPor.id,
+        titulo: 'Solicitud de precio rechazada',
+        mensaje: `Se rechazó tu solicitud para "${solicitud.producto.nombre}".${motivo ? ' Motivo: ' + motivo : ''}`,
+        categoria: 'VENTAS',
+        severidad: 'ALERTA',
+        subtipo: 'PRICE_REQUEST_REJECTED',
+        route: `/solicitudes-precio`, // vista general (o al producto)
+        referenciaTipo: null, // recurso eliminado
+        referenciaId: null,
+        remitenteId: idUser,
+        sucursalId: solicitud.solicitadoPor.sucursalId,
+        actionLabel: 'Ver solicitudes',
+        meta: {
+          solicitudId: idSolicitud,
+          producto: {
+            id: solicitud.producto.id,
+            nombre: solicitud.producto.nombre,
+          },
+          motivo: motivo ?? null,
         },
       });
 
-      if (solicitudEliminada) {
-        // Crear la notificación de rechazo
-        const notificacionRechazo =
-          await this.notificationService.createOneNotification(
-            `Un administrador ha rechazado tu solicitud de precio para el producto "${producto.nombre}"`,
-            idUser,
-            solicitudEliminada.solicitadoPorId,
-            'SOLICITUD_PRECIO',
-          );
-        console.log('Notificación de rechazo creada:', notificacionRechazo);
-      }
-
-      return solicitudEliminada;
+      return solicitud;
     } catch (error) {
       console.error(error);
       throw new InternalServerErrorException('Error al rechazar la solicitud');
@@ -178,6 +251,11 @@ export class PriceRequestService {
   async findAll() {
     try {
       const solicitudesDePrecio = await this.prisma.solicitudPrecio.findMany({
+        where: {
+          estado: 'PENDIENTE',
+          aprobadoPor: null,
+          fechaRespuesta: null,
+        },
         include: {
           producto: true,
           solicitadoPor: {

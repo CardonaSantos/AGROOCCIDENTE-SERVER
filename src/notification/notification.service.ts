@@ -1,232 +1,286 @@
+// notification.service.ts
 import {
   BadRequestException,
   Injectable,
   InternalServerErrorException,
 } from '@nestjs/common';
-import { UpdateNotificationDto } from './dto/update-notification.dto';
+import {
+  Prisma,
+  NotiAudience,
+  NotiCategory,
+  NotiSeverity,
+} from '@prisma/client';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { LegacyGateway } from 'src/web-sockets/websocket.gateway';
-import { Prisma, TipoNotificacion } from '@prisma/client';
-import { NotificationToEmit } from 'src/web-sockets/Types/NotificationTypeSocket';
-import { nuevaSolicitud } from 'src/web-sockets/Types/SolicitudType';
+import { UiNotificacionDTO } from './common/UINotificationDto';
+import { toUiNotificacion } from './common/notification.formatter';
+
+type CreateNotificacionBase = {
+  titulo?: string | null;
+  mensaje: string;
+  categoria?: NotiCategory;
+  subtipo?: string | null;
+  severidad?: NotiSeverity;
+  route?: string | null;
+  actionLabel?: string | null;
+  meta?: Prisma.JsonValue | null;
+  referenciaTipo?: string | null;
+  referenciaId?: number | null;
+  remitenteId?: number | null;
+  sucursalId?: number | null;
+  audiencia?: NotiAudience; // default USUARIOS
+};
+
+type CreateForUsersInput = CreateNotificacionBase & {
+  userIds: number[];
+};
+
+// filtros de GET
+type GetOpts = {
+  take?: number; // default 30
+  cursorId?: number | null; // paginación
+  soloNoLeidas?: boolean;
+  categoria?: NotiCategory;
+  minSeverity?: NotiSeverity; // filtra severidad >=
+};
 
 @Injectable()
 export class NotificationService {
   constructor(
-    private readonly prismaService: PrismaService,
-    private readonly webSocketService: LegacyGateway,
+    private readonly prisma: PrismaService,
+    private readonly ws: LegacyGateway,
   ) {}
-  //CREAR NOTIFICACION SIMPLE
 
-  async create(
-    mensaje: string,
-    remitenteId: number,
-    usuarioIds: number[], // ahora aceptamos un array de IDs de usuarios
-    tipoNotificacion: TipoNotificacion,
-    referenciaId?: number | null,
-  ) {
-    try {
-      const nuevaNotificacion = await this.prismaService.notificacion.create({
-        data: {
-          mensaje,
-          remitenteId,
-          tipoNotificacion,
-          referenciaId,
-        },
-      });
+  // ========= CREAR (multi-usuario) =========
+  async createForUsers(
+    input: CreateForUsersInput,
+  ): Promise<UiNotificacionDTO[]> {
+    const {
+      userIds,
+      titulo = null,
+      mensaje,
+      categoria = NotiCategory.OTROS,
+      subtipo = null,
+      severidad = NotiSeverity.INFORMACION,
+      route = null,
+      actionLabel = null,
+      meta = null,
+      referenciaTipo = null,
+      referenciaId = null,
+      remitenteId = null,
+      sucursalId = null,
+      audiencia = NotiAudience.USUARIOS,
+    } = input;
 
-      // Creamos las notificaciones para todos los usuarios
-      const notificationsForUsers = usuarioIds.map((usuarioId) => ({
+    if (!Array.isArray(userIds) || userIds.length === 0) {
+      throw new BadRequestException('Debe proveer al menos un usuario destino');
+    }
+
+    const noti = await this.prisma.notificacion.create({
+      data: {
+        titulo,
+        mensaje,
+        categoria,
+        subtipo,
+        severidad,
+        route,
+        actionLabel,
+        meta,
+        referenciaTipo,
+        referenciaId,
+        remitenteId,
+        sucursalId,
+        audiencia,
+      },
+    });
+
+    await this.prisma.notificacionesUsuarios.createMany({
+      data: userIds.map((usuarioId) => ({
         usuarioId,
-        notificacionId: nuevaNotificacion.id,
+        notificacionId: noti.id,
         leido: false,
         eliminado: false,
-      }));
+      })),
+      skipDuplicates: true,
+    });
 
-      const notificacionesParaUsuarios =
-        await this.prismaService.notificacionesUsuarios.createMany({
-          data: notificationsForUsers,
-        });
+    // Traemos filas ya “join” para formatear al DTO UI
+    const rows = await this.prisma.notificacionesUsuarios.findMany({
+      where: { usuarioId: { in: userIds }, notificacionId: noti.id },
+      include: {
+        notificacion: {
+          include: { remitente: { select: { id: true, nombre: true } } },
+        },
+      },
+    });
 
-      console.log(
-        'Los nuevos registros de notificaciones son: ',
-        notificacionesParaUsuarios,
-      );
+    const payloads: UiNotificacionDTO[] = rows.map(toUiNotificacion);
 
-      // Crear la notificación para emitir
-      const notificationToEmit: NotificationToEmit = {
-        id: nuevaNotificacion.id,
-        mensaje: nuevaNotificacion.mensaje,
-        remitenteId: nuevaNotificacion.remitenteId,
-        tipoNotificacion: nuevaNotificacion.tipoNotificacion,
-        referenciaId: referenciaId ?? null,
-        fechaCreacion: nuevaNotificacion.fechaCreacion.toISOString(),
-      };
+    // WS: emitimos el mismo DTO que devuelve el GET
+    this.ws.emitNotiToUsers(payloads[0], userIds); // mismo shape para todos
 
-      // Emitir la notificación a cada usuario
-      usuarioIds.forEach((usuarioId) => {
-        this.webSocketService.handleEnviarNotificacion(
-          notificationToEmit,
-          usuarioId,
-        );
-      });
-
-      return nuevaNotificacion;
-    } catch (error) {
-      console.log(error);
-      throw new BadRequestException('Error al crear notificación');
-    }
+    return payloads;
   }
 
-  async createOneNotification(
+  // ========= CREAR (unitaria) =========
+  async createOne(
+    input: Omit<CreateForUsersInput, 'userIds'> & { userId: number },
+  ): Promise<UiNotificacionDTO> {
+    const res = await this.createForUsers({
+      ...input,
+      userIds: [input.userId],
+    });
+    return res[0];
+  }
+
+  // ========= GET (bandeja del usuario) =========
+  async getMyNotifications(
+    userId: number,
+    opts: GetOpts = {},
+  ): Promise<UiNotificacionDTO[]> {
+    const {
+      cursorId = null,
+      soloNoLeidas = false,
+      categoria,
+      minSeverity,
+    } = opts;
+
+    const where: Prisma.NotificacionesUsuariosWhereInput = {
+      usuarioId: userId,
+      eliminado: false,
+      ...(soloNoLeidas ? { leido: false } : {}),
+      ...(categoria ? { notificacion: { categoria } } : {}),
+      ...(minSeverity
+        ? {
+            notificacion: {
+              severidad: {
+                // Prisma no tiene ">= enum" directo; si necesitas, resuélvelo en app/mapper
+                // aquí lo dejamos fuera o usa un set de severidades válidas
+              } as any,
+            },
+          }
+        : {}),
+    };
+
+    const rows = await this.prisma.notificacionesUsuarios.findMany({
+      where,
+      ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
+      orderBy: { recibidoEn: 'desc' },
+      include: {
+        notificacion: {
+          include: { remitente: { select: { id: true, nombre: true } } },
+        },
+      },
+    });
+
+    return rows.map(toUiNotificacion);
+  }
+
+  // ========= MARCAR LEÍDO =========
+  async markAsRead(userId: number, notificacionId: number): Promise<void> {
+    await this.prisma.notificacionesUsuarios.updateMany({
+      where: { usuarioId: userId, notificacionId },
+      data: { leido: true, leidoEn: new Date() },
+    });
+  }
+
+  async markAllAsRead(userId: number): Promise<number> {
+    const res = await this.prisma.notificacionesUsuarios.updateMany({
+      where: { usuarioId: userId, leido: false, eliminado: false },
+      data: { leido: true, leidoEn: new Date() },
+    });
+    return res.count;
+  }
+
+  // ========= DESCARTAR (soft delete) =========
+  async dismiss(userId: number, notificacionId: number): Promise<void> {
+    await this.prisma.notificacionesUsuarios.updateMany({
+      where: { usuarioId: userId, notificacionId },
+      data: { eliminado: true, dismissedAt: new Date() },
+    });
+  }
+
+  // ========= ELIMINAR RELACIÓN (hard) =========
+  async deleteForUser(userId: number, notificacionId: number): Promise<void> {
+    const row = await this.prisma.notificacionesUsuarios.findFirst({
+      where: { usuarioId: userId, notificacionId },
+    });
+    if (!row) return;
+    await this.prisma.notificacionesUsuarios.delete({ where: { id: row.id } });
+  }
+
+  // ========= LEGACY WRAPPERS (opcional, para transición) =========
+  // Si aún te llaman con "tipo: TipoNotificacion" mapea a (categoria/subtipo/severidad)
+  async createLegacy(
     mensaje: string,
     remitenteId: number | null,
-    usuarioId: number, // el ID del usuario receptor
-    tipoNotificacion: TipoNotificacion,
+    userIds: number[],
+    tipo: any, // TipoNotificacion (legacy)
     referenciaId?: number | null,
-    tx?: Prisma.TransactionClient, // <--- opcional
-  ) {
-    try {
-      const prisma = tx ?? this.prismaService;
+  ): Promise<UiNotificacionDTO[]> {
+    const map = this.mapLegacy(tipo);
+    return this.createForUsers({
+      mensaje,
+      remitenteId,
+      userIds,
+      categoria: map.categoria,
+      subtipo: map.subtipo,
+      severidad: map.severidad,
+      referenciaId: referenciaId ?? null,
+      referenciaTipo: map.referenciaTipo,
+      titulo: null,
+    });
+  }
 
-      const nuevaNotificacion = await prisma.notificacion.create({
-        data: {
-          mensaje,
-          remitenteId: remitenteId !== 0 ? remitenteId : null,
-          tipoNotificacion,
-          referenciaId,
-        },
-      });
-
-      await prisma.notificacionesUsuarios.create({
-        data: {
-          usuarioId,
-          notificacionId: nuevaNotificacion.id,
-          leido: false,
-          eliminado: false,
-        },
-      });
-
-      // Si tienes websockets puedes emitirlo después de confirmar la transacción,
-      // o fuera del transaction para evitar errores.
-      const notificationToEmit: NotificationToEmit = {
-        id: nuevaNotificacion.id,
-        mensaje: nuevaNotificacion.mensaje,
-        remitenteId: nuevaNotificacion.remitenteId,
-        tipoNotificacion: nuevaNotificacion.tipoNotificacion,
-        referenciaId: referenciaId ?? null,
-        fechaCreacion: nuevaNotificacion.fechaCreacion.toISOString(),
-      };
-
-      // Recomendado: solo emitir fuera de la transacción principal
-      await this.webSocketService.handleEnviarNotificacion(
-        notificationToEmit,
-        usuarioId,
-      );
-
-      return nuevaNotificacion;
-    } catch (error) {
-      console.log(error);
-      throw new BadRequestException('Error al crear notificación');
+  private mapLegacy(tipo: any): {
+    categoria: NotiCategory;
+    subtipo: string;
+    severidad: NotiSeverity;
+    referenciaTipo: string | null;
+  } {
+    switch (String(tipo)) {
+      case 'SOLICITUD_PRECIO':
+        return {
+          categoria: NotiCategory.VENTAS,
+          subtipo: 'PRICE_REQUEST',
+          severidad: NotiSeverity.INFORMACION,
+          referenciaTipo: 'SolicitudPrecio',
+        };
+      case 'TRANSFERENCIA':
+        return {
+          categoria: NotiCategory.INVENTARIO,
+          subtipo: 'TRANSFER_REQUEST',
+          severidad: NotiSeverity.ALERTA,
+          referenciaTipo: 'Transferencia',
+        };
+      case 'VENCIMIENTO':
+        return {
+          categoria: NotiCategory.INVENTARIO,
+          subtipo: 'EXPIRY',
+          severidad: NotiSeverity.ALERTA,
+          referenciaTipo: 'Lote',
+        };
+      case 'STOCK_BAJO':
+        return {
+          categoria: NotiCategory.INVENTARIO,
+          subtipo: 'LOW_STOCK',
+          severidad: NotiSeverity.ALERTA,
+          referenciaTipo: 'Producto',
+        };
+      case 'CREDITO_VENTA':
+        return {
+          categoria: NotiCategory.CREDITO,
+          subtipo: 'SALE_CREDIT',
+          severidad: NotiSeverity.INFORMACION,
+          referenciaTipo: 'Credito',
+        };
+      default:
+        return {
+          categoria: NotiCategory.OTROS,
+          subtipo: 'OTHER',
+          severidad: NotiSeverity.INFORMACION,
+          referenciaTipo: null,
+        };
     }
-  }
-
-  async getMyNotifications(idUser: number) {
-    try {
-      const notificaciones =
-        await this.prismaService.notificacionesUsuarios.findMany({
-          where: {
-            usuarioId: idUser,
-            eliminado: false,
-          },
-          include: {
-            notificacion: true,
-          },
-          orderBy: {
-            recibidoEn: 'desc',
-          },
-        });
-
-      // Mapear cada notificación al formato simplificado, construimos un array de objetos simples
-      const notificacionesSimplificadas = notificaciones.map((n) => ({
-        id: n.notificacion.id,
-        mensaje: n.notificacion.mensaje,
-        remitenteId: n.notificacion.remitenteId,
-        tipoNotificacion: n.notificacion.tipoNotificacion,
-        referenciaId: n.notificacion.referenciaId,
-        fechaCreacion: n.notificacion.fechaCreacion,
-      }));
-
-      return notificacionesSimplificadas;
-    } catch (error) {
-      console.error('Error al obtener notificaciones:', error);
-      throw new Error('No se pudo obtener las notificaciones.');
-    }
-  }
-
-  async deleteNotification(notificacionId: number, usuarioId: number) {
-    try {
-      // Buscamos la relación en NotificacionesUsuarios
-      const notificacionUsuario =
-        await this.prismaService.notificacionesUsuarios.findFirst({
-          where: {
-            notificacionId,
-            usuarioId,
-          },
-        });
-
-      if (!notificacionUsuario) {
-        throw new Error(
-          `No se encontró la notificación con id ${notificacionId} para el usuario ${usuarioId}.`,
-        );
-      }
-
-      // Procedemos a eliminar la relación
-      await this.prismaService.notificacionesUsuarios.delete({
-        where: {
-          id: notificacionUsuario.id,
-        },
-      });
-
-      return { message: 'Notificación eliminada correctamente.' };
-    } catch (error) {
-      console.error('Error al eliminar la notificación:', error);
-      throw new InternalServerErrorException(
-        'No se pudo eliminar la notificación.',
-      );
-    }
-  }
-
-  async enviarNotificarSolicitud(solicitud: nuevaSolicitud, userID: number) {
-    try {
-      await this.webSocketService.handleEnviarSolicitudPrecio(
-        solicitud,
-        userID,
-      );
-    } catch (error) {
-      console.log(error);
-      throw new BadRequestException('Error al enviar la solicitud');
-    }
-  }
-
-  findAll() {
-    return `This action returns all notification`;
-  }
-
-  findOne(id: number) {
-    return `This action returns a #${id} notification`;
-  }
-
-  update(id: number, updateNotificationDto: UpdateNotificationDto) {
-    return `This action updates a #${id} notification`;
-  }
-
-  async removeall() {
-    const x = await this.prismaService.notificacionesUsuarios.deleteMany({});
-    return await this.prismaService.notificacion.deleteMany({});
-  }
-
-  remove(id: number) {
-    return `This action removes a #${id} notification`;
   }
 }

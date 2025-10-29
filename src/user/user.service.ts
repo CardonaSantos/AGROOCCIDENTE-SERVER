@@ -86,11 +86,11 @@ export class UserService {
           //   },
           // },
           // entregasRecibidas: true,
-          notificacionesUsuarios: {
-            include: {
-              notificacion: true, // Incluye los detalles de la notificación en la tabla intermedia
-            },
-          },
+          // notificacionesUsuarios: {
+          //   include: {
+          //     notificacion: true, // Incluye los detalles de la notificación en la tabla intermedia
+          //   },
+          // },
           // solicitudesAprobadas: true,
           // solicitudesPrecio: true,
           // TransferenciaProducto: true,

@@ -1,4 +1,3 @@
-import { TipoNotificacion } from '@prisma/client';
 import {
   IsArray,
   IsEnum,
@@ -20,9 +19,6 @@ export class CreateNotificationDto {
   @ArrayNotEmpty()
   @IsInt({ each: true }) // Asegura que cada elemento del array sea un número entero
   usuarioId: number[]; // Ahora es un array de IDs de usuarios destinatarios
-
-  @IsEnum(TipoNotificacion)
-  tipoNotificacion: TipoNotificacion;
 
   @IsOptional()
   @IsInt()
