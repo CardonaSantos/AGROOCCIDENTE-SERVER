@@ -20,7 +20,6 @@ export class PriceRequestService {
   //
   async create(createPriceRequestDto: CreatePriceRequestDto) {
     try {
-      // 1) Crear solicitud
       const nueva = await this.prisma.solicitudPrecio.create({
         data: {
           precioSolicitado: createPriceRequestDto.precioSolicitado,
@@ -43,27 +42,24 @@ export class PriceRequestService {
         },
       });
 
-      // 2) Destinatarios: admins de la sucursal del solicitante
+      //Destinatarios: admins de la sucursal del solicitante
       const adminsSucursal = await this.prisma.usuario.findMany({
         where: {
           rol: 'ADMIN',
-          sucursalId: nueva.solicitadoPor.sucursalId,
-          activo: true,
+          // sucursalId: nueva.solicitadoPor.sucursalId,
         },
         select: { id: true },
       });
       let userIds = adminsSucursal.map((a) => a.id);
 
-      // Fallback opcional a admins globales si no hay en sucursal
       if (userIds.length === 0) {
         const adminsGlobal = await this.prisma.usuario.findMany({
-          where: { rol: 'ADMIN', activo: true },
+          where: { rol: 'ADMIN' },
           select: { id: true },
         });
         userIds = adminsGlobal.map((a) => a.id);
       }
 
-      // 3) Notificación estandarizada
       await this.notificationService.createForUsers({
         userIds,
         titulo: 'Nueva solicitud de precio',
@@ -107,7 +103,6 @@ export class PriceRequestService {
         productoId: newSolicitud.productoId,
         solicitadoPorId: newSolicitud.solicitadoPorId,
       };
-      // 4) Emitir evento de dominio para actualizar la lista en vivo
       for (const admin of userIds) {
         this.ws.handleEnviarSolicitudPrecio(nuevaSolicitud, admin);
       }

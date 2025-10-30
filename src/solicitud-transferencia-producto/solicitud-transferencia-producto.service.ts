@@ -33,7 +33,6 @@ export class SolicitudTransferenciaProductoService {
         usuarioSolicitanteId,
       } = createSolicitudTransferenciaProductoDto;
 
-      // 1) Crear la solicitud
       const solicitud = await this.prisma.solicitudTransferenciaProducto.create(
         {
           data: {
@@ -47,7 +46,6 @@ export class SolicitudTransferenciaProductoService {
         },
       );
 
-      // 2) Cargar datos mínimos para armar el mensaje/meta
       const [user, product, sucOrigen, sucDestino] = await Promise.all([
         this.prisma.usuario.findUnique({
           where: { id: usuarioSolicitanteId },
@@ -67,14 +65,12 @@ export class SolicitudTransferenciaProductoService {
         }),
       ]);
 
-      // 3) Destinatarios: admins de la sucursal destino
       const adminsDestino = await this.prisma.usuario.findMany({
-        where: { rol: 'ADMIN', sucursalId: sucursalDestinoId, activo: true },
+        where: { rol: 'ADMIN', activo: true },
         select: { id: true },
       });
       const userIds = adminsDestino.map((a) => a.id);
       if (userIds.length === 0) {
-        // fallback opcional: admins globales
         const adminsGlobal = await this.prisma.usuario.findMany({
           where: { rol: 'ADMIN', activo: true },
           select: { id: true },
@@ -82,14 +78,12 @@ export class SolicitudTransferenciaProductoService {
         userIds.push(...adminsGlobal.map((a) => a.id));
       }
 
-      // 4) Formato estandarizado (mismo que GET y que llega por WS `noti:new`)
       const titulo = 'Nueva solicitud de transferencia';
       const mensaje = `El usuario ${user?.nombre ?? 'N/D'} solicitó transferir ${cantidad} ud de "${product?.nombre ?? 'Producto'}" de "${sucOrigen?.nombre ?? 'Origen'}" hacia "${sucDestino?.nombre ?? 'Destino'}".`;
 
       // Deep link a detalle (ajústalo a tu ruta real)
       const route = `/transferencias/solicitudes/${solicitud.id}`;
 
-      // 5) Persistir y emitir **una sola vez** para todos los destinatarios
       await this.notificationService.createForUsers({
         userIds,
         titulo,
@@ -128,7 +122,6 @@ export class SolicitudTransferenciaProductoService {
       });
 
       // 6) (Opcional) Evento de dominio por WS, para widgets “en vivo”
-      // Si tu UI escucha "transferencia:solicitud", emítelo a rol ADMIN (rooms):
       this.webSocketGateway.emitTransferenciaToAdmins({
         id: solicitud.id,
         monto: 0, // si aplica, o remuévelo del payload de ese evento

@@ -304,42 +304,71 @@ export class VentaService {
       }
 
       // ===== Notificaciones stock bajo
+      // ===== Notificaciones stock bajo (enviar 1 sola vez al CRUZAR el umbral y sin duplicados)
       for (const prodId of unicProdIds) {
-        const agg = await tx.stock.aggregate({
-          where: { productoId: prodId, sucursalId },
-          _sum: { cantidad: true },
-        });
-        const stockGlobal = agg._sum.cantidad ?? 0;
-        const th = await tx.stockThreshold.findUnique({
-          where: { productoId: prodId },
-        });
-        if (!th) continue;
-
-        if (stockGlobal <= th.stockMinimo) {
-          const info = await tx.producto.findUnique({
+        // Calcular stock actual, threshold y nombre en paralelo
+        const [agg, th, info] = await Promise.all([
+          tx.stock.aggregate({
+            where: { productoId: prodId, sucursalId },
+            _sum: { cantidad: true },
+          }),
+          tx.stockThreshold.findUnique({ where: { productoId: prodId } }),
+          tx.producto.findUnique({
             where: { id: prodId },
             select: { nombre: true },
+          }),
+        ]);
+        if (!th) continue;
+
+        const stockGlobal = agg._sum.cantidad ?? 0;
+
+        // ✅ Notificar SOLO si se CRUZA el umbral (antes > mínimo && ahora <= mínimo)
+        const antes = cantidadesAnterioresProd[prodId] ?? stockGlobal;
+        const cruzoUmbral =
+          antes > th.stockMinimo && stockGlobal <= th.stockMinimo;
+        if (!cruzoUmbral) continue;
+
+        // Objetivo real de destinatarios (usa lo que calculaste arriba)
+        const targetIds = usuariosNotifIds; // p.ej. ADMIN + VENDEDOR
+
+        // ¿Existe ya una notificación (para este threshold) que podamos reutilizar?
+        const existente = await tx.notificacion.findFirst({
+          where: {
+            categoria: 'INVENTARIO',
+            referenciaId: th.id, // usa el ID del threshold como referencia estable
+          },
+          include: { notificacionesUsuarios: { select: { usuarioId: true } } },
+        });
+
+        // Adjuntar solo quienes no la tienen
+        const yaAsociados = new Set(
+          existente?.notificacionesUsuarios.map((nu) => nu.usuarioId) ?? [],
+        );
+        const faltantes = targetIds.filter((id) => !yaAsociados.has(id));
+        if (faltantes.length === 0 && existente) continue;
+
+        const titulo = `Stock mínimo de ${info?.nombre ?? prodId} alcanzado`;
+        const mensaje = `El producto ${info?.nombre ?? prodId} ha alcanzado el stock mínimo (quedan ${stockGlobal} uds).`;
+
+        if (!existente) {
+          // Crear UNA notificación y ligarla a TODOS los destinatarios objetivo
+          await this.notifications.createForUsers({
+            titulo,
+            mensaje,
+            userIds: targetIds,
+            categoria: 'INVENTARIO',
+            referenciaId: th.id,
+            // si tu servicio usa más campos (audiencia/categoria/severidad), añádelos aquí
           });
-          for (const uId of usuariosNotifIds) {
-            // const existe = await tx.notificacion.findFirst({
-            //   where: {
-            //     referenciaId: th.id,
-            //     tipoNotificacion: 'STOCK_BAJO',
-            //     notificacionesUsuarios: { some: { usuarioId: uId } },
-            //   },
-            // });
-            // if (existe) continue;
-            const userIds = await tx.usuario.findMany({ select: { id: true } });
-            const ids = userIds.map((u) => u.id);
-            await this.notifications.createForUsers({
-              titulo: `Stock Mínimo de ${info.nombre} Alcanzado`,
-              mensaje: `El producto ${info?.nombre ?? prodId} ha alcanzado stock mínimo (quedan ${stockGlobal} uds).`,
-              userIds: ids,
-              audiencia: 'GLOBAL',
-              categoria: 'INVENTARIO',
-              severidad: 'ALERTA',
-            });
-          }
+        } else {
+          // Solo crear vínculos faltantes (evita duplicados)
+          await tx.notificacionesUsuarios.createMany({
+            data: faltantes.map((usuarioId) => ({
+              usuarioId,
+              notificacionId: existente.id,
+            })),
+            skipDuplicates: true,
+          });
         }
       }
 
