@@ -536,10 +536,12 @@ export class CreditoAutorizationService {
     );
 
     return this.prisma.$transaction(async (tx) => {
+      //AUTH Y RESPONSABLE
       const authorization = await tx.solicitudCreditoVenta.findUnique({
         where: { id: authCreditoId },
         select: selectCreditAutorization,
       });
+
       if (!authorization)
         throw new BadRequestException('Autorización no encontrada');
 
@@ -586,6 +588,11 @@ export class CreditoAutorizationService {
 
       const creditHeader = await tx.ventaCuota.create({
         data: {
+          responsableCobro: {
+            connect: {
+              id: authorization.solicitadoPor.id,
+            },
+          },
           cliente: { connect: { id: newVenta.clienteId } },
           usuario: { connect: { id: adminId } },
           sucursal: { connect: { id: newVenta.sucursalId } },

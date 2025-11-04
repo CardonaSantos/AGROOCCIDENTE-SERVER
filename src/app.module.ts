@@ -74,6 +74,7 @@ import { CreditoAutorizationModule } from './credito-autorization/credito-autori
 import { CreditoCuotaModule } from './credito-cuota/credito-cuota.module';
 import { AbonoCuotaModule } from './abono-cuota/abono-cuota.module';
 import { TipoPresentacionModule } from './tipo-presentacion/tipo-presentacion.module';
+import { CuotasMoraCronModule } from './cuotas-mora-cron/cuotas-mora-cron.module';
 
 @Module({
   imports: [
@@ -150,6 +151,7 @@ import { TipoPresentacionModule } from './tipo-presentacion/tipo-presentacion.mo
     CreditoCuotaModule,
     AbonoCuotaModule,
     TipoPresentacionModule,
+    CuotasMoraCronModule,
   ],
   controllers: [AppController],
   providers: [AppService, CloudinaryProvider, SaldosServiceService],

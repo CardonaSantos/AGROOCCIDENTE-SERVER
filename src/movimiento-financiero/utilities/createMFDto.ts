@@ -8,7 +8,11 @@ import {
   IsEnum,
   IsBoolean,
 } from 'class-validator';
-import { MetodoPago, MotivoMovimiento } from '@prisma/client';
+import {
+  ClasificacionAdmin,
+  MetodoPago,
+  MotivoMovimiento,
+} from '@prisma/client';
 
 export class CreateMFUtility {
   @IsInt()
@@ -73,4 +77,6 @@ export class CreateMFUtility {
   @IsInt()
   @Min(1)
   usuarioId!: number;
+
+  clasificacionAdmin?: ClasificacionAdmin;
 }

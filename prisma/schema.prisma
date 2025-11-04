@@ -22,6 +22,8 @@
 // [S16] RECEPCIONES DE COMPRAS
 // [S17] COMPRAS A PAGAR
 // [S18] NOTIFICACIONES CREDITO VENTA
+// [S19] PRORROTEOS
+
 // Nota: No se han cambiado nombres ni propiedades; únicamente se reordenó y
 // se añadieron comentarios de organización.
 // ============================================================================
@@ -145,23 +147,24 @@ model Sucursal {
   //relaciones con peticiones credito
   solicitudesCreditoVenta SolicitudCreditoVenta[] @relation("SucursalToSolicitudCreditoVenta")
   abonosCredito           AbonoCredito[]          @relation("Sucursal_AbonosCredito") // <— backref
+
+  prorrateos Prorrateo[] @relation("SucursalToProrrateos")
 }
 
 model Usuario {
-  id                                Int                              @id @default(autoincrement())
-  nombre                            String
-  rol                               Rol // Rol del usuario
-  contrasena                        String
-  activo                            Boolean                          @default(true)
-  entregasRecibidas                 EntregaStock[]                   @relation("UsuarioRecibido")
-  correo                            String                           @unique
-  sucursalId                        Int // Relación con la sucursal
-  sucursal                          Sucursal                         @relation(fields: [sucursalId], references: [id], onDelete: Cascade)
-  TransferenciaProducto             TransferenciaProducto[]
-  PrecioProducto                    PrecioProducto[]
-  solicitudesPrecio                 SolicitudPrecio[]                @relation("SolicitadoPor")
-  solicitudesAprobadas              SolicitudPrecio[]                @relation("AprobadoPor")
-
+  id                    Int                     @id @default(autoincrement())
+  nombre                String
+  rol                   Rol // Rol del usuario
+  contrasena            String
+  activo                Boolean                 @default(true)
+  entregasRecibidas     EntregaStock[]          @relation("UsuarioRecibido")
+  correo                String                  @unique
+  sucursalId            Int // Relación con la sucursal
+  sucursal              Sucursal                @relation(fields: [sucursalId], references: [id], onDelete: Cascade)
+  TransferenciaProducto TransferenciaProducto[]
+  PrecioProducto        PrecioProducto[]
+  solicitudesPrecio     SolicitudPrecio[]       @relation("SolicitadoPor")
+  solicitudesAprobadas  SolicitudPrecio[]       @relation("AprobadoPor")
 
   solicitudesEnviadas               SolicitudTransferenciaProducto[] @relation("UsuarioSolicitante")
   solicitudesAprobadasTransferencia SolicitudTransferenciaProducto[] @relation("AdministradorAprobador") // Renombrada para especificidad
@@ -214,16 +217,19 @@ model Usuario {
   // Acciones registradas en el historial (actor)
   solicitudesCreditoVentaHistorialActuados SolicitudCreditoVentaHistorial[] @relation("ActorSolicitudCredito")
 
-  historialCredito VentaCuotaHistorial[] @relation("Usuario_HistorialCredito") // <— backref
-  abonosCredito    AbonoCredito[]        @relation("Usuario_AbonosCredito") // <— backref
+  historialCredito        VentaCuotaHistorial[]    @relation("Usuario_HistorialCredito") // <— backref
+  abonosCredito           AbonoCredito[]           @relation("Usuario_AbonosCredito") // <— backref
   //NOTIFICACIONES
-  NotificationPreference NotificationPreference[]
-    // Opuesta a Notificacion.remitente ("NotiRemitente")
+  NotificationPreference  NotificationPreference[]
+  // Opuesta a Notificacion.remitente ("NotiRemitente")
   notificacionesEmitidas  Notificacion[]           @relation("NotiRemitente")
   // Opuesta a NotificacionesUsuarios.usuario
   notificacionesRecibidas NotificacionesUsuarios[]
 
   ventasAnuladas Venta[] @relation(name: "AnuladoPor")
+
+  creditosAsignados  VentaCuota[]   @relation("ResponsableCobroCredito") 
+
 }
 
 // ============================================================================
@@ -322,7 +328,7 @@ model ProductoPresentacion {
 
   tipoPresentacionId Int?
   tipoPresentacion   TipoPresentacion? @relation(fields: [tipoPresentacionId], references: [id], onDelete: SetNull)
-  categorias               Categoria[]                      @relation(name: "CategoriaToPresentacion")
+  categorias         Categoria[]       @relation(name: "CategoriaToPresentacion")
 
   @@unique([productoId, nombre])
   @@index([productoId])
@@ -341,10 +347,11 @@ model TipoPresentacion {
   presentaciones ProductoPresentacion[]
   productos      Producto[]
 }
+
 model Categoria {
-  id        Int        @id @default(autoincrement())
-  nombre    String     @unique()
-  productos Producto[] @relation(name: "CategoriaToProducto")
+  id             Int                    @id @default(autoincrement())
+  nombre         String                 @unique()
+  productos      Producto[]             @relation(name: "CategoriaToProducto")
   presentaciones ProductoPresentacion[] @relation(name: "CategoriaToPresentacion")
 }
 
@@ -381,8 +388,6 @@ model StockPresentacion {
   @@index([productoId, sucursalId])
   @@index([presentacionId, sucursalId])
 }
-
-
 
 model ImagenProducto {
   id         Int      @id @default(autoincrement())
@@ -539,6 +544,13 @@ model Stock {
   //relacion con las recepciones de requisiciones
   requisicionRecepcionId Int?
   requisicionRecepcion   RequisicionRecepcion? @relation("StockRecepcion", fields: [requisicionRecepcionId], references: [id], onDelete: SetNull)
+
+  // NUEVO: ancla por recepción de compra con nombre de relación único
+  compraRecepcionId Int?
+  compraRecepcion   CompraRecepcion? @relation("StockToCompraRecepcion", fields: [compraRecepcionId], references: [id], onDelete: SetNull)
+
+  // Back-rel de detalles de prorrateo (opuesto de ProrrateoDetalle.stock)
+  prorrateoDetalles ProrrateoDetalle[] @relation("StockToProrrateoDetalles")
 }
 
 model EntregaStock {
@@ -555,6 +567,8 @@ model EntregaStock {
   sucursal        Sucursal?        @relation(fields: [sucursalId], references: [id], onDelete: Cascade)
   //tracker
   movimientoStock HistorialStock[]
+  // Back-rel: prorrateos aplicados a esta entrega
+  prorrateos      Prorrateo[]      @relation("EntregaStockToProrrateos")
 }
 
 model HistorialStock {
@@ -766,11 +780,11 @@ model Cliente {
   departamentoId     Int? // EN UBICACION TABLA
   departamento       Departamento?        @relation(fields: [departamentoId], references: [id], onDelete: SetNull) // EN UBICACION TABLA
   EliminacionCliente EliminacionCliente[]
-  dpi                String? // Campo DPI opcional
+  dpi         String?  @unique
+  nit         String?  @unique
   //PARA LAS GARANTÍAS
   Garantia           Garantia[]
   iPInternet         String? //IP PARA ENCONTRAR EL PAGO DE INTERNET
-
   VentaEliminada   VentaEliminada[]
   VentaCuota       VentaCuota[]
   Reparacion       Reparacion[]
@@ -778,9 +792,7 @@ model Cliente {
   eliminado        Boolean          @default(false) // SOFT DELETE FLAG
   fechaEliminacion DateTime? // Opcional: cuándo fue dado de baja
   pedidos          Pedido[]
-
   solicitudesCreditoVenta SolicitudCreditoVenta[] @relation("ClienteToSolicitudCreditoVenta")
-
   @@unique([dpi, id]) // Índice compuesto que permite múltiples null en dpi
 }
 
@@ -816,11 +828,11 @@ model Venta {
   solicitudCredito SolicitudCreditoVenta? @relation("SolicitudCreditoVentaToVenta")
 
   //FLAGS DE ANULACION
-  anulada               Boolean          @default(false)
-  fechaAnulacion        DateTime?
-  motivoAnulacion       String?
-  anuladaPorId          Int?
-  anuladaPor            Usuario?         @relation(name: "AnuladoPor",fields: [anuladaPorId], references: [id], onDelete: SetNull)
+  anulada         Boolean   @default(false)
+  fechaAnulacion  DateTime?
+  motivoAnulacion String?
+  anuladaPorId    Int?
+  anuladaPor      Usuario?  @relation(name: "AnuladoPor", fields: [anuladaPorId], references: [id], onDelete: SetNull)
 
   @@unique([imei, id]) // Permite null en `imei` sin conflicto de unicidad 
 }
@@ -1102,7 +1114,7 @@ model MovimientoFinanciero {
 
   creadoEn          DateTime         @default(now())
   actualizadoEn     DateTime         @updatedAt
-  esAsientoVentas   Boolean          @default(false) // 👈 nuevo
+  esAsientoVentas   Boolean          @default(false) 
   //nuevo
   comprobanteTipo   ComprobanteTipo?
   comprobanteNumero String?          @db.VarChar(64)
@@ -1110,6 +1122,23 @@ model MovimientoFinanciero {
   comprobanteUrl    String? // foto/pdf del baucher
   //NUEVO
   pagoCxP           CxPPago?         @relation("CxPPagoToMovimiento")
+
+  //RELACIONES CON PRORROTEOS
+  // Ámbito para aplicar prorrateo (uno u otro, opcionales)
+  compraId Int?
+  compra   Compra? @relation("MF_to_Compra", fields: [compraId], references: [id], onDelete: SetNull)
+
+  compraRecepcionId Int?
+  compraRecepcion   CompraRecepcion? @relation("MF_to_CompraRecepcion", fields: [compraRecepcionId], references: [id], onDelete: SetNull)
+
+  compraDetalleId Int?
+  compraDetalle   CompraDetalle? @relation("MF_to_CompraDetalle", fields: [compraDetalleId], references: [id], onDelete: SetNull)
+
+  requisicionRecepcionId Int?
+  requisicionRecepcion   RequisicionRecepcion? @relation("MF_to_ReqRecepcion", fields: [requisicionRecepcionId], references: [id], onDelete: SetNull)
+
+  // 1:1 con Prorrateo (idempotencia por movimiento)
+  prorrateo Prorrateo? @relation("MFToProrrateo")
 
   @@unique([registroCajaId, referencia], map: "uq_movfin_turno_referencia") // 👈 idempotencia por turno
   //CONCILIACION EN REPORTES DE CIERRES CON BOLETAS
@@ -1370,6 +1399,11 @@ model RequisicionRecepcion {
   //relacion con stock:
   stockLotes             Stock[]                     @relation("StockRecepcion")
   stockPresentacionLotes StockPresentacion[]         @relation("StockPresentacionRecepcion")
+  // Back-rel: prorrateos aplicados a esta recepción de requisición
+  prorrateos             Prorrateo[]                 @relation("ReqRecepcionToProrrateos")
+
+  // Back-rel: movimientos de costo asociado apuntando a esta recepción de requisición
+  movimientosCostosAsociados MovimientoFinanciero[] @relation("MF_to_ReqRecepcion")
 }
 
 model RequisicionRecepcionLinea {
@@ -1424,6 +1458,11 @@ model CompraDetalle {
   recepcionesLineas CompraRecepcionLinea[]
 
   lineasDocumento CxPDocumentoLinea[] @relation("DocumentoLineaToCompraDetalle")
+  // Back-rel: prorrateos aplicados a esta línea específica
+  prorrateos      Prorrateo[]         @relation("CompraDetalleToProrrateos")
+
+  // Back-rel: movimientos de costo asociado apuntando a esta línea
+  movimientosCostosAsociados MovimientoFinanciero[] @relation("MF_to_CompraDetalle")
 }
 
 enum EstadoCompra {
@@ -1468,6 +1507,12 @@ model Compra {
   //NUEVOS
   recepciones   CompraRecepcion[] @relation("CompraToRecepciones")
   cxpDocumentos CxPDocumento[]    @relation("CompraToCxPDocumentos")
+
+  // Back-rel: prorrateos aplicados a esta compra (cabecera)
+  prorrateos Prorrateo[] @relation("CompraToProrrateos")
+
+  // Back-rel: movimientos de costo asociado apuntando a la compra
+  movimientosCostosAsociados MovimientoFinanciero[] @relation("MF_to_Compra")
 
   creadoEn      DateTime @default(now())
   actualizadoEn DateTime @updatedAt
@@ -1666,35 +1711,35 @@ model DepositoCobro {
 // ============================================================================
 
 model Notificacion {
-  id              Int            @id @default(autoincrement())
+  id        Int          @id @default(autoincrement())
   // --- CONTENIDO ---
-  titulo          String?
-  mensaje         String
-  categoria       NotiCategory   @default(OTROS)
-  subtipo         String?        // libre: 'PRICE_REQUEST', 'CREDIT_AUTH_CREATED', 'LOW_STOCK', etc.
-  severidad       NotiSeverity   @default(INFORMACION)
+  titulo    String?
+  mensaje   String
+  categoria NotiCategory @default(OTROS)
+  subtipo   String? // libre: 'PRICE_REQUEST', 'CREDIT_AUTH_CREATED', 'LOW_STOCK', etc.
+  severidad NotiSeverity @default(INFORMACION)
 
   // --- CONTEXTO / REFERENCIAS ---
-  referenciaTipo  String?        // 'SolicitudPrecio', 'Transferencia', 'Credito', etc.
-  referenciaId    Int?
-  sucursalId      Int?           // para rastrear/filtrar por sucursal
+  referenciaTipo String? // 'SolicitudPrecio', 'Transferencia', 'Credito', etc.
+  referenciaId   Int?
+  sucursalId     Int? // para rastrear/filtrar por sucursal
   // si manejas multi-empresa futuros: companyId Int?
 
   // --- ACCIONES / UI ---
-  route           String?        // ej: '/dashboard/solicitudes/123'
-  actionLabel     String?        // ej: 'Ver detalle'
-  meta            Json?          // payload flexible (IDs, totales, etc.)
+  route       String? // ej: '/dashboard/solicitudes/123'
+  actionLabel String? // ej: 'Ver detalle'
+  meta        Json? // payload flexible (IDs, totales, etc.)
 
   // --- EMISOR/AUDITORÍA ---
-  remitenteId     Int?
-  remitente       Usuario?       @relation("NotiRemitente", fields: [remitenteId], references: [id])
+  remitenteId Int?
+  remitente   Usuario? @relation("NotiRemitente", fields: [remitenteId], references: [id])
 
-  audiencia       NotiAudience   @default(USUARIOS) // intención (no rompe nada)
+  audiencia NotiAudience @default(USUARIOS) // intención (no rompe nada)
 
-  fechaCreacion   DateTime       @default(now())
-  visibleFrom     DateTime?
-  expiresAt       DateTime?
-  scheduledAt     DateTime?      // si algún día programes envíos diferidos
+  fechaCreacion DateTime  @default(now())
+  visibleFrom   DateTime?
+  expiresAt     DateTime?
+  scheduledAt   DateTime? // si algún día programes envíos diferidos
 
   // Estado por usuario (join)
   notificacionesUsuarios NotificacionesUsuarios[]
@@ -1714,46 +1759,46 @@ model NotificacionesUsuarios {
   notificacion   Notificacion @relation(fields: [notificacionId], references: [id], onDelete: Cascade)
 
   // Estado por usuario
-  leido          Boolean      @default(false)
-  leidoEn        DateTime?
-  eliminado      Boolean      @default(false) // oculto/dismiss
-  dismissedAt    DateTime?
+  leido       Boolean   @default(false)
+  leidoEn     DateTime?
+  eliminado   Boolean   @default(false) // oculto/dismiss
+  dismissedAt DateTime?
 
   // Ordenado por “recibido”
-  recibidoEn     DateTime     @default(now())
+  recibidoEn DateTime @default(now())
 
-  pinnedUntil    DateTime?    // opcional: fijar en top hasta X fecha
+  pinnedUntil DateTime? // opcional: fijar en top hasta X fecha
 
   // Idempotencia y performance
-  @@unique([usuarioId, notificacionId])     // evita duplicados por carrera
+  @@unique([usuarioId, notificacionId]) // evita duplicados por carrera
   @@index([usuarioId, eliminado, leido, recibidoEn])
 }
 
 // Preferencias por usuario
 model NotificationPreference {
-  id          Int          @id @default(autoincrement())
-  usuarioId   Int
-  usuario     Usuario      @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
-  categoria   NotiCategory
-  subtipo     String?      // si quieres granular, si no, null = toda la categoría
-  sucursalId  Int?         // preferencias por sucursal (opcional)
+  id         Int          @id @default(autoincrement())
+  usuarioId  Int
+  usuario    Usuario      @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  categoria  NotiCategory
+  subtipo    String? // si quieres granular, si no, null = toda la categoría
+  sucursalId Int? // preferencias por sucursal (opcional)
 
-  inApp       Boolean      @default(true)    // canal in-app
-  email       Boolean      @default(false)   // canal email (futuro)
-  push        Boolean      @default(false)   // push móvil (futuro)
-  minSeverity NotiSeverity @default(INFORMACION)    // umbral mínimo
+  inApp       Boolean      @default(true) // canal in-app
+  email       Boolean      @default(false) // canal email (futuro)
+  push        Boolean      @default(false) // push móvil (futuro)
+  minSeverity NotiSeverity @default(INFORMACION) // umbral mínimo
 
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([usuarioId, categoria, subtipo, sucursalId])
 }
 
 // Nuevos enums
 enum NotiCategory {
-  VENTAS          // Ventas / precios / POS
-  INVENTARIO      // Stock, vencimiento, transferencias
-  CREDITO         // Cuentas por cobrar (CxC)
+  VENTAS // Ventas / precios / POS
+  INVENTARIO // Stock, vencimiento, transferencias
+  CREDITO // Cuentas por cobrar (CxC)
   CUENTAS_POR_PAGAR // CxP (antes "PAGABLES")
   GARANTIA
   REPARACIONES
@@ -1768,16 +1813,16 @@ enum NotiCategory {
 enum NotiSeverity {
   INFORMACION
   EXITO
-  ALERTA       // (Si prefieres "ADVERTENCIA", cámbialo aquí y en UI)
+  ALERTA // (Si prefieres "ADVERTENCIA", cámbialo aquí y en UI)
   ERROR
   CRITICO
 }
 
 enum NotiAudience {
-  USUARIOS   // notificaciones dirigidas a usuarios específicos (join table)
-  ROL        // intención a un rol (igual persistimos por usuario)
-  SUCURSAL   // intención a una sucursal (igual persistimos por usuario)
-  GLOBAL     // intención global/sistema (igual persistimos por usuario o lazy)
+  USUARIOS // notificaciones dirigidas a usuarios específicos (join table)
+  ROL // intención a un rol (igual persistimos por usuario)
+  SUCURSAL // intención a una sucursal (igual persistimos por usuario)
+  GLOBAL // intención global/sistema (igual persistimos por usuario o lazy)
 }
 
 // ============================================================================
@@ -1836,6 +1881,15 @@ model CompraRecepcion {
 
   documentos  CxPDocumentoRecepcion[] @relation("RecepcionDocumentos")
   pagosOrigen CxPPago[]               @relation("PagoOrigenRecepcion")
+
+  // Back-rel: prorrateos aplicados a esta recepción
+  prorrateos Prorrateo[] @relation("CompraRecepcionToProrrateos")
+
+  // Back-rel: movimientos de costo asociado apuntando a esta recepción
+  movimientosCostosAsociados MovimientoFinanciero[] @relation("MF_to_CompraRecepcion")
+
+  // Back-rel: lotes Stock creados por esta recepción (NUEVA relación explícita)
+  stockLotesCompra Stock[] @relation("StockToCompraRecepcion")
 
   @@index([compraId, fecha])
 }
@@ -2203,7 +2257,7 @@ enum OrigenCuotaPropuesta {
 }
 
 // ============================================================================
-// [19] CLIENTES Y VENTAS (incluye Garantías y Ventas a Cuotas)
+// [s19] CLIENTES Y VENTAS (incluye Garantías y Ventas a Cuotas)
 // ============================================================================
 
 model VentaCuota {
@@ -2249,6 +2303,10 @@ model VentaCuota {
   historial VentaCuotaHistorial[] @relation("Credito_Historial") // <— backref
   abonos    AbonoCredito[]        @relation("Credito_Abonos") // <— backref
 
+  responsableCobroId Int?
+  responsableCobro   Usuario?  @relation("ResponsableCobroCredito", fields: [responsableCobroId], references: [id], onDelete: SetNull)
+
+  @@index([responsableCobroId])                   // ✅ índice útil para filtros/cron
   // ======= Índices útiles =======
   @@index([estado, sucursalId, fechaInicio])
 }
@@ -2267,6 +2325,8 @@ model Cuota {
   montoPagado    Float      @default(0) // NEW: rápido para queries
   saldoPendiente Float? // NEW: si prefieres persistir (o calc on-the-fly)
   moraAcumulada  Float      @default(0) // NEW
+
+  fechaUltimoCalculoMora DateTime?
 
   fechaVencimiento DateTime?
   fechaPago        DateTime?
@@ -2413,4 +2473,94 @@ enum PlanCuotaModo {
   PRIMERA_MAYOR
   CRECIENTES
   DECRECIENTES
+}
+
+// ============================================================================
+// [s20] PRORROTEOS
+// ============================================================================
+// ============================================================================
+// [NUEVO] PRORRATEOS
+// ============================================================================
+
+model Prorrateo {
+  id Int @id @default(autoincrement())
+
+  sucursalId Int
+  sucursal   Sucursal @relation("SucursalToProrrateos", fields: [sucursalId], references: [id], onDelete: Cascade)
+
+  metodo     MetodoProrrateo
+  montoTotal Float
+
+  // Ámbitos opcionales (uno por registro)
+  compraId Int?
+  compra   Compra? @relation("CompraToProrrateos", fields: [compraId], references: [id], onDelete: Cascade)
+
+  compraRecepcionId Int?
+  compraRecepcion   CompraRecepcion? @relation("CompraRecepcionToProrrateos", fields: [compraRecepcionId], references: [id], onDelete: Cascade)
+
+  compraDetalleId Int?
+  compraDetalle   CompraDetalle? @relation("CompraDetalleToProrrateos", fields: [compraDetalleId], references: [id], onDelete: Cascade)
+
+  requisicionRecepcionId Int?
+  requisicionRecepcion   RequisicionRecepcion? @relation("ReqRecepcionToProrrateos", fields: [requisicionRecepcionId], references: [id], onDelete: Cascade)
+
+  entregaStockId Int?
+  entregaStock   EntregaStock? @relation("EntregaStockToProrrateos", fields: [entregaStockId], references: [id], onDelete: Cascade)
+
+  // Idempotencia por MF (1:1)
+  movimientoFinancieroId Int?
+  movimientoFinanciero   MovimientoFinanciero? @relation("MFToProrrateo", fields: [movimientoFinancieroId], references: [id], onDelete: SetNull)
+
+  // Idempotencia por CxP (si lo usas; ver bloque CxP abajo)
+  cxpDocumentoLineaId Int?
+  // cxpDocumentoLinea  CxPDocumentoLinea? @relation("CxPLineaToProrrateo", fields: [cxpDocumentoLineaId], references: [id], onDelete: SetNull)
+
+  estado     EstadoProrrateo @default(APLICADO)
+  comentario String?
+  creadoEn   DateTime        @default(now())
+
+  detalles ProrrateoDetalle[]
+
+  @@unique([movimientoFinancieroId])
+  @@unique([cxpDocumentoLineaId])
+  @@index([sucursalId])
+  @@index([compraId])
+  @@index([compraRecepcionId])
+  @@index([compraDetalleId])
+  @@index([requisicionRecepcionId])
+  @@index([entregaStockId])
+}
+
+model ProrrateoDetalle {
+  id Int @id @default(autoincrement())
+
+  prorrateoId Int
+  prorrateo   Prorrateo @relation(fields: [prorrateoId], references: [id], onDelete: Cascade)
+
+  stockId Int
+  stock   Stock @relation("StockToProrrateoDetalles", fields: [stockId], references: [id], onDelete: Cascade)
+
+  cantidadBase  Int
+  valorBase     Float
+  montoAsignado Float
+
+  precioCostoAntes Float
+  precioCostoDesp  Float
+
+  creadoEn DateTime @default(now())
+
+  @@index([prorrateoId])
+  @@index([stockId])
+}
+
+enum MetodoProrrateo {
+  VALOR
+  UNIDADES
+  PESO
+  VOLUMEN
+}
+
+enum EstadoProrrateo {
+  APLICADO
+  ANULADO
 }

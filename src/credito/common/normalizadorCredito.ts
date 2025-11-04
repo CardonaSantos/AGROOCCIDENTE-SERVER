@@ -1,6 +1,12 @@
 // utils/normalize-creditos.ts
 import { CreditoArrayResponse } from '../select/select-creditosResponse';
-
+function _sum(arr: number[] = []) {
+  return arr.reduce((a, b) => a + b, 0);
+}
+function _daysBetween(a: Date, b: Date) {
+  const ms = b.getTime() - a.getTime();
+  return Math.floor(ms / (1000 * 60 * 60 * 24));
+}
 // utils/normalize-creditos.ts
 
 type NormLineaVenta = {
@@ -31,20 +37,28 @@ type NormLineaVenta = {
   };
 };
 
-type NormCuota = {
+export type NormCuota = {
   id: number;
   numero: number;
   fechaVencimientoISO: string | null;
   fechaPagoISO: string | null;
   estado: string;
-  monto: number;
-  pagado: number;
-  saldoPendiente: number;
-  moraAcumulada: number;
-  abonos: {
-    count: number;
-    lastPagoISO: string | null;
+  monto: number; // monto "programado" de la cuota (capital+interés)
+  pagado: number; // total pagado aplicado a la cuota (cualquier concepto)
+  saldoPendiente: number; // respaldo (si el servidor aún no separa conceptos)
+  moraAcumulada: number; // mora almacenada e/o calculada
+  // NUEVO
+  diasAtraso: number; // >0 si pasó fechaVencimiento + diasGracia
+  capitalPendiente: number; // montoCapital - sum(abonos.capital)
+  interesPendiente: number; // montoInteres - sum(abonos.interes)
+  moraPendiente: number; // moraAcumulada "al día" (ver cálculo)
+  pagoSugerido: {
+    mora: number;
+    interes: number;
+    capital: number;
+    total: number;
   };
+  abonos: { count: number; lastPagoISO: string | null };
 };
 
 type NormAbono = {
@@ -334,10 +348,67 @@ export function normalizerCreditoRegist(
       const lastPagoISO = q.abonos?.length
         ? q.abonos[q.abonos.length - 1].abono.fechaAbono.toISOString()
         : null;
-      const saldo =
-        typeof q.saldoPendiente === 'number'
-          ? q.saldoPendiente
-          : Math.max(0, (q.monto ?? 0) - (q.montoPagado ?? 0));
+
+      // Sumas de abonos por concepto
+      const paidCapital = _sum(
+        (q.abonos ?? []).map((a) => a.montoCapital ?? 0),
+      );
+      const paidInteres = _sum(
+        (q.abonos ?? []).map((a) => a.montoInteres ?? 0),
+      );
+      const paidMora = _sum((q.abonos ?? []).map((a) => a.montoMora ?? 0));
+
+      // Capital/Interés programados (resiste nulls)
+      const progCapital =
+        typeof q.montoCapital === 'number'
+          ? q.montoCapital
+          : Math.max(0, (q.monto ?? 0) - (q.montoInteres ?? 0));
+      const progInteres = q.montoInteres ?? 0;
+
+      const capitalPendiente = Math.max(0, progCapital - paidCapital);
+      const interesPendiente = Math.max(0, progInteres - paidInteres);
+
+      // Días de atraso y mora "al día" (si el server aún no recalcula al vuelo)
+      const hoy = new Date();
+      const fv = q.fechaVencimiento ? new Date(q.fechaVencimiento) : null;
+      const diasGracia = c.diasGracia ?? 0;
+      const moraDiaria = c.moraDiaria ?? 0;
+      let diasAtraso = 0;
+      if (fv) {
+        const desde = new Date(fv);
+        desde.setDate(desde.getDate() + diasGracia);
+        diasAtraso = Math.max(0, _daysBetween(desde, hoy));
+      }
+      // Si el backend aún no actualiza q.moraAcumulada, calc on-the-fly
+      const moraAlDia =
+        typeof q.moraAcumulada === 'number'
+          ? q.moraAcumulada
+          : diasAtraso * moraDiaria;
+      const moraPendiente = Math.max(0, moraAlDia - paidMora);
+
+      // Pago sugerido (regla: MORA -> INTERÉS -> CAPITAL)
+      const montoProgramado =
+        q.monto ?? q.montoEsperado ?? progCapital + progInteres;
+      const pagadoTotal = q.montoPagado ?? 0; // respaldo
+      const saldoFallback = Math.max(0, montoProgramado - pagadoTotal);
+      const saldoPendiente =
+        typeof q.saldoPendiente === 'number' ? q.saldoPendiente : saldoFallback;
+
+      let rest = saldoPendiente + moraPendiente; // cubrir mora también
+      const sug = { mora: 0, interes: 0, capital: 0 } as any;
+      // Prioridad 1: Mora
+      const payMora = Math.min(moraPendiente, rest);
+      rest -= payMora;
+      sug.mora = payMora;
+      // Prioridad 2: Interés
+      const payInt = Math.min(interesPendiente, rest);
+      rest -= payInt;
+      sug.interes = payInt;
+      // Prioridad 3: Capital
+      const payCap = Math.min(capitalPendiente, rest);
+      rest -= payCap;
+      sug.capital = payCap;
+
       return {
         id: q.id,
         numero: q.numero,
@@ -346,14 +417,16 @@ export function normalizerCreditoRegist(
           : null,
         fechaPagoISO: q.fechaPago ? q.fechaPago.toISOString() : null,
         estado: String(q.estado),
-        monto: q.monto ?? q.montoEsperado ?? 0,
+        monto: montoProgramado,
         pagado: q.montoPagado ?? 0,
-        saldoPendiente: saldo,
-        moraAcumulada: q.moraAcumulada ?? 0,
-        abonos: {
-          count: q.abonos?.length ?? 0,
-          lastPagoISO,
-        },
+        saldoPendiente: saldoPendiente,
+        moraAcumulada: moraAlDia,
+        diasAtraso,
+        capitalPendiente,
+        interesPendiente,
+        moraPendiente,
+        pagoSugerido: { ...sug, total: sug.mora + sug.interes + sug.capital },
+        abonos: { count: q.abonos?.length ?? 0, lastPagoISO },
       };
     });
 

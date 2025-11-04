@@ -230,6 +230,11 @@ export class CreditoService {
   async getSimpleCredits() {
     try {
       const credits = await this.prisma.ventaCuota.findMany({
+        where: {
+          estado: {
+            in: ['ACTIVA', 'EN_MORA', 'PAUSADA', 'REPROGRAMADA'],
+          },
+        },
         select: SelectCreditos,
         orderBy: {
           creadoEn: 'desc',

@@ -16,7 +16,13 @@ import * as timezone from 'dayjs/plugin/timezone';
 import * as isSameOrAfter from 'dayjs/plugin/isSameOrAfter';
 import * as isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
 import { TZGT } from 'src/utils/utils';
-import { MetodoPago, Prisma, TipoMovimientoStock } from '@prisma/client';
+import {
+  CostoVentaTipo,
+  MetodoPago,
+  MotivoMovimiento,
+  Prisma,
+  TipoMovimientoStock,
+} from '@prisma/client';
 import { ComprasRegistrosQueryDto } from './dto/compras-registros.query.dto';
 import {
   CreateRequisicionRecepcionDto,
@@ -27,6 +33,9 @@ import { UtilitiesService } from 'src/utilities/utilities.service';
 import { HistorialStockTrackerService } from 'src/historial-stock-tracker/historial-stock-tracker.service';
 import { RecepcionarCompraAutoDto } from './dto/compra-recepcion.dto';
 import { StockBaseDto, StockPresentacionDto } from './interfaces';
+import { MovimientoFinancieroService } from 'src/movimiento-financiero/movimiento-financiero.service';
+import { CrearMovimientoDto } from 'src/movimiento-financiero/dto/crear-movimiento.dto';
+import { CreateMFUtility } from 'src/movimiento-financiero/utilities/createMFDto';
 dayjs.extend(utc);
 dayjs.extend(timezone);
 dayjs.extend(isSameOrBefore);
@@ -40,6 +49,8 @@ export class PurchaseRequisitionsService {
     private readonly prisma: PrismaService,
 
     private readonly utilities: UtilitiesService,
+    private readonly mf: MovimientoFinancieroService,
+
     private readonly tracker: HistorialStockTrackerService,
   ) {}
 
@@ -811,6 +822,8 @@ export class PurchaseRequisitionsService {
   async makeRecepcionCompraAuto(dto: RecepcionarCompraAutoDto) {
     try {
       return await this.prisma.$transaction(async (tx) => {
+        const { mf } = dto;
+
         // 0) Compra + detalles + presentaciones
         const compra = await tx.compra.findUnique({
           where: { id: dto.compraId },
@@ -1300,6 +1313,19 @@ export class PurchaseRequisitionsService {
           montoRecepcion,
         );
 
+        const dtoMFCostosVentas: CreateMFUtility = {
+          usuarioId: dto.usuarioId,
+          monto: mf.monto,
+          motivo: 'COSTO_ASOCIADO',
+          metodoPago: mf.metodoPago,
+          descripcion: mf.descripcion,
+          sucursalId: mf.sucursalId,
+          costoVentaTipo: mf.costoVentaTipo,
+          clasificacionAdmin: 'COSTO_VENTA',
+        };
+
+        const MFCostosVentas =
+          await this.mf.createMovimiento(dtoMFCostosVentas);
         await tx.movimientoFinanciero.create({
           data: {
             fecha: dayjs().tz(TZGT).toDate(),
@@ -1320,7 +1346,10 @@ export class PurchaseRequisitionsService {
             conFactura: (compra as any).conFactura ?? undefined,
           },
         });
-
+        this.logger.log(
+          'El costo asociado de la venta (FLETE U OTRO ES): ',
+          MFCostosVentas,
+        );
         return {
           ok: true,
           compra: {
@@ -1604,4 +1633,6 @@ export class PurchaseRequisitionsService {
       throw new InternalServerErrorException('No fue posible crear la compra');
     }
   }
+
+  //AJUSTAR
 }

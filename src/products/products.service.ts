@@ -1112,8 +1112,6 @@ export class ProductsService {
       ): Prisma.ProductoSelect => ({
         ...productoSelect,
         stock: {
-          // filtra los renglones de stock que se devuelven, pero
-          // NO condiciona que el producto exista
           where: sucursalId ? { sucursalId } : undefined,
           select: {
             id: true,

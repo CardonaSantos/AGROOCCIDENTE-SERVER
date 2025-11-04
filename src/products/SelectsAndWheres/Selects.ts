@@ -22,6 +22,7 @@ export const productoSelect = {
       cantidad: true,
       fechaVencimiento: true,
       fechaIngreso: true,
+      precioCosto: true,
       sucursal: { select: { id: true, nombre: true } },
     },
   },

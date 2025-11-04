@@ -1,13 +1,11 @@
-// dto/compra-recepcion-auto.dto.ts
-import { MetodoPago } from '@prisma/client';
 import {
-  IsEnum,
-  IsIn,
-  IsInt,
-  IsNumber,
-  IsOptional,
-  IsString,
-} from 'class-validator';
+  ClasificacionAdmin,
+  CostoVentaTipo,
+  GastoOperativoTipo,
+  MetodoPago,
+  MotivoMovimiento,
+} from '@prisma/client';
+import { IsEnum, IsInt, IsNumber, IsOptional, IsString } from 'class-validator';
 
 export class RecepcionarCompraAutoDto {
   @IsInt()
@@ -37,6 +35,20 @@ export class RecepcionarCompraAutoDto {
   cuentaBancariaId: number;
 
   lineas?: lineasOverrride[];
+  mf: MovimientoFinanciero;
+}
+
+class MovimientoFinanciero {
+  sucursalId: number | undefined;
+  motivo: MotivoMovimiento;
+  clasificacionAdmin: ClasificacionAdmin | undefined;
+  metodoPago: MetodoPago;
+  descripcion: string;
+  proveedorId: number;
+  gastoOperativoTipo: GastoOperativoTipo;
+  afectaInventario: boolean;
+  monto: number;
+  costoVentaTipo: CostoVentaTipo;
 }
 
 class lineasOverrride {
