@@ -15,40 +15,51 @@ export class RecepcionarCompraAutoDto {
   usuarioId!: number;
 
   @IsInt()
-  proveedorId: number;
+  proveedorId!: number;
 
   @IsOptional()
   @IsString()
   observaciones?: string;
 
   @IsEnum(MetodoPago)
-  metodoPago: MetodoPago;
+  metodoPago!: MetodoPago;
 
-  @IsNumber()
+  @IsOptional() // ✅ efectivo/contado no usa banco
+  @IsInt()
+  cuentaBancariaId?: number;
+
   @IsOptional()
+  @IsNumber()
   registroCajaId?: number;
 
   @IsInt()
-  sucursalId: number;
+  sucursalId!: number;
 
-  @IsInt()
-  cuentaBancariaId: number;
-
+  @IsOptional()
   lineas?: lineasOverrride[];
-  mf: MovimientoFinanciero;
+
+  mf?: MovimientoFinanciero; // ✅ hazlo opcional si se permite sin costo
+  prorrateo?: {
+    aplicar: boolean;
+    base: 'COSTO' | 'CANTIDAD';
+    incluirAntiguos?: boolean;
+  };
 }
 
 class MovimientoFinanciero {
-  sucursalId: number | undefined;
-  motivo: MotivoMovimiento;
-  clasificacionAdmin: ClasificacionAdmin | undefined;
-  metodoPago: MetodoPago;
-  descripcion: string;
-  proveedorId: number;
-  gastoOperativoTipo: GastoOperativoTipo;
-  afectaInventario: boolean;
-  monto: number;
-  costoVentaTipo: CostoVentaTipo;
+  sucursalId?: number;
+  motivo!: MotivoMovimiento; // 'COSTO_ASOCIADO' | 'COMPRA_MERCADERIA'
+  clasificacionAdmin?: ClasificacionAdmin; // para COSTO_ASOCIADO => 'COSTO_VENTA'
+  metodoPago!: MetodoPago;
+  descripcion!: string;
+  proveedorId!: number;
+
+  @IsOptional() // ✅ sólo si clasificacionAdmin === 'GASTO_OPERATIVO'
+  gastoOperativoTipo?: GastoOperativoTipo;
+
+  afectaInventario!: boolean; // true para prorratear
+  monto!: number;
+  costoVentaTipo!: CostoVentaTipo; // FLETE/ENCOMIENDA/...
 }
 
 class lineasOverrride {

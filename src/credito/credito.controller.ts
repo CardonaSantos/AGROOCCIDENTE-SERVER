@@ -3,7 +3,6 @@ import {
   Get,
   Post,
   Body,
-  Patch,
   Param,
   Delete,
   Query,
@@ -44,5 +43,10 @@ export class CreditoController {
   @Get('simple-credit-dashboard')
   getSimpleCredits() {
     return this.creditoService.getSimpleCredits();
+  }
+
+  @Delete('delete-credito/:id')
+  deleteCredito(@Param('id', ParseIntPipe) id: number) {
+    return this.creditoService.deleteOneCredito(id);
   }
 }

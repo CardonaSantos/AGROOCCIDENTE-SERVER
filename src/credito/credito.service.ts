@@ -4,6 +4,7 @@ import {
   Injectable,
   InternalServerErrorException,
   Logger,
+  NotFoundException,
 } from '@nestjs/common';
 import { CreateCreditoDto } from './dto/create-credito.dto';
 import { UpdateCreditoDto } from './dto/update-credito.dto';
@@ -13,6 +14,7 @@ import { CreditoQuery } from './query/query';
 import { SelectCreditos } from './select/select-creditosResponse';
 import { normalizerCreditoRegist } from './common/normalizadorCredito';
 import { simpleCreditNormalizer } from './common/simpleNormalizacer';
+import { log } from 'console';
 
 @Injectable()
 export class CreditoService {
@@ -246,6 +248,34 @@ export class CreditoService {
       this.logger.error('Error en módulo de credito-get: ', error?.stack);
       if (error instanceof HttpException) throw error;
       throw new InternalServerErrorException('Fatal Error: Error inesperado');
+    }
+  }
+
+  //--------->
+  async deleteOneCredito(creditoId: number) {
+    if (!Number.isInteger(creditoId) || creditoId <= 0) {
+      throw new BadRequestException('ID de crédito inválido');
+    }
+
+    try {
+      const deleted = await this.prisma.ventaCuota.delete({
+        where: { id: creditoId },
+      });
+
+      return { ok: true, id: deleted.id };
+    } catch (error) {
+      this.logger.error('Error generado es: ', error?.stack);
+
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2025'
+      ) {
+        throw new NotFoundException('Crédito no encontrado');
+      }
+
+      if (error instanceof HttpException) throw error;
+
+      throw new InternalServerErrorException('Error inesperado');
     }
   }
 }
