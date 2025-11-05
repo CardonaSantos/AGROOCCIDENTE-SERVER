@@ -1,8 +1,10 @@
 // notification.service.ts
 import {
   BadRequestException,
+  HttpException,
   Injectable,
   InternalServerErrorException,
+  Logger,
 } from '@nestjs/common';
 import {
   Prisma,
@@ -46,6 +48,7 @@ type GetOpts = {
 
 @Injectable()
 export class NotificationService {
+  private readonly logger = new Logger(NotificationService.name);
   constructor(
     private readonly prisma: PrismaService,
     private readonly ws: LegacyGateway,
@@ -202,11 +205,23 @@ export class NotificationService {
 
   // ========= ELIMINAR RELACIÓN (hard) =========
   async deleteForUser(userId: number, notificacionId: number): Promise<void> {
-    const row = await this.prisma.notificacionesUsuarios.findFirst({
-      where: { usuarioId: userId, notificacionId },
-    });
-    if (!row) return;
-    await this.prisma.notificacionesUsuarios.delete({ where: { id: row.id } });
+    try {
+      const row = await this.prisma.notificacionesUsuarios.findFirst({
+        where: { usuarioId: userId, notificacionId },
+        select: { id: true },
+      });
+      if (!row) return; // idempotente
+      await this.prisma.notificacionesUsuarios.delete({
+        where: { id: row.id },
+      });
+    } catch (error) {
+      this.logger.error(
+        'Error generado en modulo de notificaciones-eliminacion: ',
+        error?.stack,
+      );
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException('Fatal Error: Error inesperado');
+    }
   }
 
   // ========= LEGACY WRAPPERS (opcional, para transición) =========

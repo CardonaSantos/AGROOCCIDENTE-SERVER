@@ -878,7 +878,7 @@ export class PurchaseRequisitionsService {
 
         // Mapa de fecha de expiración desde requisición (fallback)
         let reqFechasMap = new Map<number, Date>();
-        if (compra.requisicionId) {
+        if (compra?.requisicionId) {
           const rlIds = compra.detalles
             .map((d) => d.requisicionLineaId)
             .filter((x): x is number => Number.isFinite(x as any));
@@ -1062,6 +1062,11 @@ export class PurchaseRequisitionsService {
 
           // c) SOLO PRESENTACION → StockPresentacion
           if (presId) {
+            const costoUnitPres = costoUnit;
+            const costoTotalPres = round(
+              costoUnitPres * cantidadLinea,
+              MONEY_DECIMALS,
+            );
             stockPresentacionDtos.push({
               productoId: det.productoId!,
               presentacionId: presId,
@@ -1070,6 +1075,8 @@ export class PurchaseRequisitionsService {
               fechaIngreso: dayjs().tz(TZGT).toDate(),
               fechaVencimiento: resolvedVto,
               requisicionRecepcionId,
+              precioCosto: costoUnitPres,
+              costoTotal: costoTotalPres,
             });
           }
 
@@ -1143,13 +1150,26 @@ export class PurchaseRequisitionsService {
         }
 
         // ===== 5) Insertar presentaciones
+        let createdPresResult: {
+          created: Array<{
+            id: number;
+            productoId: number;
+            presentacionId: number;
+            cantidadPresentacion: number;
+            precioCosto: number;
+            costoTotal: number;
+          }>;
+          totalCosto: number;
+          totalCantidad: number;
+        } = { created: [], totalCosto: 0, totalCantidad: 0 };
+
         if (stockPresentacionDtos.length > 0) {
-          const createdPres = await this.utilities.generateStockPresentacion(
+          createdPresResult = await this.utilities.generateStockPresentacion(
             tx,
             stockPresentacionDtos,
           );
           this.logger.debug(
-            `[RECEP] Presentaciones insertadas: ${createdPres.length}`,
+            `[RECEP] Presentaciones insertadas: ${createdPresResult.created.length} (totalCantidad=${createdPresResult.totalCantidad}, totalCosto=${createdPresResult.totalCosto.toFixed(2)})`,
           );
         }
 
@@ -1334,64 +1354,210 @@ export class PurchaseRequisitionsService {
           MFCostosVentas,
         );
 
-        // ===== 9) HACER PRORRATEO (si lo pide el front)
-        // Obtenemos los lotes base recién creados por esta entrega
-        let createdBaseStocks: Array<{
-          id: number;
-          productoId: number;
-          cantidad: number;
-        }> = [];
-        if (entregaId) {
-          createdBaseStocks = await tx.stock.findMany({
-            where: {
-              sucursalId,
-              entregaStockId: entregaId,
-              requisicionRecepcionId: requisicionRecepcionId ?? undefined,
-            },
-            select: { id: true, productoId: true, cantidad: true },
-          });
-        }
-        const newStockIds = createdBaseStocks.map((s) => s.id);
+        // ===== 9) PRORRATEO SIMPLE POR LOTE (UNIDADES) — SOLO ESTA COMPRA
+        {
+          const gastoTotal = Number(mf?.monto ?? 0);
+          if (gastoTotal > 0) {
+            // Lotes base recién creados con esta entrega
+            const createdBaseStocks = entregaId
+              ? await tx.stock.findMany({
+                  where: {
+                    sucursalId,
+                    entregaStockId: entregaId,
+                    requisicionRecepcionId: requisicionRecepcionId ?? undefined,
+                  },
+                  select: {
+                    id: true,
+                    productoId: true,
+                    cantidad: true,
+                    costoTotal: true,
+                    precioCosto: true,
+                  },
+                })
+              : [];
+            const newStockIds = createdBaseStocks.map((s) => s.id);
 
-        if (
-          dto.prorrateo?.aplicar &&
-          MFCostosVentas?.id &&
-          newStockIds.length > 0
-        ) {
-          const metodo = this.mapBaseToMetodo(dto.prorrateo.base);
-          const incluirAntiguos = !!dto.prorrateo.incluirAntiguos;
+            // Lotes de presentación recién creados (tenemos sus IDs por el utilitario)
+            const newStockPresIds = (createdPresResult.created ?? []).map(
+              (s) => s.id,
+            );
 
-          const stockIds = await this.collectStockIdsForProrrateo(
-            tx,
-            sucursalId,
-            newStockIds,
-            incluirAntiguos,
-          );
+            if (newStockIds.length || newStockPresIds.length) {
+              // Cargar targets completos (solo estos lotes)
+              const base = newStockIds.length
+                ? await tx.stock.findMany({
+                    where: { id: { in: newStockIds }, sucursalId },
+                    select: {
+                      id: true,
+                      productoId: true,
+                      cantidad: true,
+                      costoTotal: true,
+                      precioCosto: true,
+                    },
+                  })
+                : [];
+              const pres = newStockPresIds.length
+                ? await tx.stockPresentacion.findMany({
+                    where: { id: { in: newStockPresIds }, sucursalId },
+                    select: {
+                      id: true,
+                      productoId: true,
+                      cantidadPresentacion: true,
+                      costoTotal: true,
+                      precioCosto: true,
+                    },
+                  })
+                : [];
 
-          this.logger.debug(
-            `[PRORRATEO] IN -> suc:${sucursalId} metodo:${metodo} monto:${Number(mf.monto).toFixed(4)} ` +
-              `compra:${compra.id} entrega:${entregaId ?? '-'} reqRec:${requisicionRecepcionId ?? '-'} ` +
-              `mfId:${MFCostosVentas.id} incluirAntiguos:${incluirAntiguos} stockIds:${stockIds.join(',')}`,
-          );
+              type Target =
+                | {
+                    kind: 'BASE';
+                    id: number;
+                    productoId: number;
+                    cantidad: number;
+                    costoTotal: number;
+                    precioCosto: number;
+                  }
+                | {
+                    kind: 'PRES';
+                    id: number;
+                    productoId: number;
+                    cantidad: number;
+                    costoTotal: number;
+                    precioCosto: number;
+                  };
 
-          const { prorrateo: pr, detalles } =
-            await this.aplicarProrrateoSobreStock(tx, {
-              sucursalId,
-              metodo,
-              montoTotal: Number(mf.monto),
-              compraId: compra.id,
-              entregaStockId: entregaId ?? null,
-              requisicionRecepcionId: requisicionRecepcionId ?? null,
-              movimientoFinancieroId: MFCostosVentas.id,
-              stockIds,
-              comentario: incluirAntiguos
-                ? 'Incluye lotes antiguos con existencia'
-                : 'Solo lotes creados en esta recepción',
-            });
+              const targets: Target[] = [
+                ...base.map((s) => ({
+                  kind: 'BASE' as const,
+                  id: s.id,
+                  productoId: s.productoId,
+                  cantidad: Number(s.cantidad ?? 0),
+                  costoTotal: Number(s.costoTotal ?? 0),
+                  precioCosto: Number(s.precioCosto ?? 0),
+                })),
+                ...pres.map((s) => ({
+                  kind: 'PRES' as const,
+                  id: s.id,
+                  productoId: s.productoId,
+                  cantidad: Number(s.cantidadPresentacion ?? 0),
+                  costoTotal: Number(s.costoTotal ?? 0),
+                  precioCosto: Number(s.precioCosto ?? 0),
+                })),
+              ];
 
-          this.logger.debug(
-            `[PRORRATEO] aplicado pr#${pr.id} sobre ${stockIds.length} stocks (detalles=${detalles.length}).`,
-          );
+              const bases = targets.map((t) => Number(t.cantidad ?? 0));
+              const sumUnidades = bases.reduce((a, b) => a + b, 0);
+              if (!(sumUnidades > 0)) {
+                throw new BadRequestException(
+                  'Total de unidades para prorrateo es 0.',
+                );
+              }
+
+              // Reparto por unidades con cierre exacto
+              const asignaciones = this.distribute(gastoTotal, bases);
+
+              // Cabecera prorrateo (metodo fijo UNIDADES)
+              const pr = await tx.prorrateo.create({
+                data: {
+                  sucursalId,
+                  metodo: MetodoProrrateo.UNIDADES,
+                  montoTotal: round(gastoTotal, MONEY_DECIMALS),
+                  compraId: compra.id,
+                  compraRecepcionId: null,
+                  requisicionRecepcionId: requisicionRecepcionId ?? null,
+                  entregaStockId: entregaId ?? null,
+                  movimientoFinancieroId: MFCostosVentas?.id ?? null, // anclado al gasto asociado
+                  estado: EstadoProrrateo.APLICADO,
+                  comentario:
+                    'Prorrateo simple por lote (misma compra, por unidades)',
+                },
+              });
+
+              const detallesPayload: any[] = [];
+
+              for (let i = 0; i < targets.length; i++) {
+                const t = targets[i];
+                const cantidad = Number(t.cantidad ?? 0);
+                if (!(cantidad > 0)) {
+                  throw new BadRequestException(
+                    `${t.kind === 'BASE' ? 'Stock' : 'StockPresentacion'}#${t.id} tiene cantidad cero; no se puede recalcular precioCosto.`,
+                  );
+                }
+                const asignado = Number(asignaciones[i]) || 0;
+                const costoDesp = round(
+                  Number(t.costoTotal ?? 0) + asignado,
+                  MONEY_DECIMALS,
+                );
+                const precioDesp = round(costoDesp / cantidad, UNIT_DECIMALS);
+
+                if (t.kind === 'BASE') {
+                  await tx.stock.update({
+                    where: { id: t.id },
+                    data: { costoTotal: costoDesp, precioCosto: precioDesp },
+                  });
+                } else {
+                  await tx.stockPresentacion.update({
+                    where: { id: t.id },
+                    data: { costoTotal: costoDesp, precioCosto: precioDesp },
+                  });
+                }
+
+                const detalle = {
+                  prorrateoId: pr.id,
+                  stockId: t.kind === 'BASE' ? t.id : null,
+                  stockPresentacionId: t.kind === 'PRES' ? t.id : null,
+                  cantidadBase: round(cantidad, UNIT_DECIMALS), // base = unidades
+                  valorBase: round(cantidad, UNIT_DECIMALS), // guardamos unidades como valorBase
+                  montoAsignado: round(asignado, MONEY_DECIMALS),
+                  precioCostoAntes: round(
+                    Number(t.precioCosto ?? 0),
+                    UNIT_DECIMALS,
+                  ),
+                  precioCostoDesp: precioDesp,
+                };
+
+                // Sanidad: exactamente uno de los dos ids seteado
+                if (
+                  (detalle.stockId ? 1 : 0) +
+                    (detalle.stockPresentacionId ? 1 : 0) !==
+                  1
+                ) {
+                  throw new InternalServerErrorException(
+                    `Detalle inválido: debe enlazar stockId XOR stockPresentacionId (target=${t.kind} id=${t.id})`,
+                  );
+                }
+
+                detallesPayload.push(detalle);
+              }
+
+              if (!detallesPayload.length) {
+                await tx.prorrateo.update({
+                  where: { id: pr.id },
+                  data: {
+                    estado: EstadoProrrateo.ANULADO,
+                    comentario: 'Sin asignaciones (>0).',
+                  },
+                });
+                throw new ConflictException(
+                  'El prorrateo no generó asignaciones mayores a 0.',
+                );
+              }
+
+              await tx.prorrateoDetalle.createMany({ data: detallesPayload });
+
+              this.logger.debug(
+                `[PRORRATEO SIMPLE] targets=${targets.length} unidades=${sumUnidades} gasto=${gastoTotal} ` +
+                  `asignaciones=${JSON.stringify(asignaciones)} pr#${pr.id}`,
+              );
+            } else {
+              this.logger.debug(
+                '[PRORRATEO] No hay lotes nuevos para prorratear.',
+              );
+            }
+          } else {
+            this.logger.debug('[PRORRATEO] Omitido: gastoTotal=0.');
+          }
         }
 
         return {
@@ -1487,6 +1653,297 @@ export class PurchaseRequisitionsService {
 
     antiguos.forEach((s) => ids.add(s.id));
     return Array.from(ids);
+  }
+
+  private async collectTargetsForProrrateo(
+    tx: Tx,
+    sucursalId: number,
+    newStockIds: number[], // base recién creados
+    newStockPresIds: number[], // presentaciones recién creadas
+    incluirAntiguos: boolean,
+  ): Promise<{ stockIds: number[]; stockPresentacionIds: number[] }> {
+    const baseSet = new Set<number>(newStockIds);
+    const presSet = new Set<number>(newStockPresIds);
+
+    if (!incluirAntiguos) {
+      return {
+        stockIds: Array.from(baseSet),
+        stockPresentacionIds: Array.from(presSet),
+      };
+    }
+
+    // Productos implicados por cada tipo
+    const nuevosBase = newStockIds.length
+      ? await tx.stock.findMany({
+          where: { id: { in: newStockIds } },
+          select: { productoId: true },
+        })
+      : [];
+    const nuevosPres = newStockPresIds.length
+      ? await tx.stockPresentacion.findMany({
+          where: { id: { in: newStockPresIds } },
+          select: { productoId: true },
+        })
+      : [];
+
+    const productIds = Array.from(
+      new Set([...nuevosBase, ...nuevosPres].map((x) => x.productoId)),
+    );
+    if (productIds.length === 0)
+      return {
+        stockIds: Array.from(baseSet),
+        stockPresentacionIds: Array.from(presSet),
+      };
+
+    // Lotes base anteriores con existencia
+    const antiguosBase = await tx.stock.findMany({
+      where: {
+        sucursalId,
+        productoId: { in: productIds },
+        cantidad: { gt: 0 },
+        NOT: { id: { in: newStockIds } },
+      },
+      select: { id: true },
+    });
+    antiguosBase.forEach((s) => baseSet.add(s.id));
+
+    // Lotes presentación anteriores con existencia
+    const antiguosPres = await tx.stockPresentacion.findMany({
+      where: {
+        sucursalId,
+        productoId: { in: productIds },
+        cantidadPresentacion: { gt: 0 },
+        NOT: { id: { in: newStockPresIds } },
+      },
+      select: { id: true },
+    });
+    antiguosPres.forEach((s) => presSet.add(s.id));
+
+    return {
+      stockIds: Array.from(baseSet),
+      stockPresentacionIds: Array.from(presSet),
+    };
+  }
+
+  async aplicarProrrateoSobreInventario(
+    tx: Tx,
+    input: {
+      sucursalId: number;
+      metodo: MetodoProrrateo;
+      montoTotal: number;
+      compraId?: number | null;
+      entregaStockId?: number | null;
+      requisicionRecepcionId?: number | null;
+      compraRecepcionId?: number | null;
+      movimientoFinancieroId?: number | null;
+      stockIds?: number[]; // base
+      stockPresentacionIds?: number[]; // presentaciones
+      comentario?: string | null;
+    },
+  ) {
+    const {
+      sucursalId,
+      metodo,
+      montoTotal,
+      compraId = null,
+      entregaStockId = null,
+      requisicionRecepcionId = null,
+      compraRecepcionId = null,
+      movimientoFinancieroId = null,
+      stockIds = [],
+      stockPresentacionIds = [],
+      comentario = null,
+    } = input;
+
+    // Validaciones
+    if (!Number.isInteger(sucursalId) || sucursalId <= 0)
+      throw new BadRequestException('sucursalId inválido.');
+    const monto = Number(montoTotal);
+    if (!isFinite(monto) || monto <= 0)
+      throw new BadRequestException('montoTotal debe ser > 0.');
+
+    // Idempotencia por MF
+    if (movimientoFinancieroId) {
+      const ya = await tx.prorrateo.findUnique({
+        where: { movimientoFinancieroId: movimientoFinancieroId ?? undefined },
+        include: { detalles: true },
+      });
+      if (ya) return { prorrateo: ya, yaExistia: true };
+    }
+
+    // 1) Cargar objetivos
+    const base = stockIds.length
+      ? await tx.stock.findMany({
+          where: { id: { in: stockIds }, sucursalId },
+          select: {
+            id: true,
+            productoId: true,
+            cantidad: true,
+            costoTotal: true,
+            precioCosto: true,
+          },
+        })
+      : [];
+
+    const pres = stockPresentacionIds.length
+      ? await tx.stockPresentacion.findMany({
+          where: { id: { in: stockPresentacionIds }, sucursalId },
+          select: {
+            id: true,
+            productoId: true,
+            cantidadPresentacion: true,
+            costoTotal: true,
+            precioCosto: true,
+          },
+        })
+      : [];
+
+    if (!base.length && !pres.length) {
+      throw new BadRequestException(
+        'No hay lotes (base o presentación) para prorratear.',
+      );
+    }
+
+    // 2) Construir lista homogénea de "targets"
+    type Target =
+      | {
+          kind: 'BASE';
+          id: number;
+          productoId: number;
+          cantidad: number;
+          costoTotal: number;
+          precioCosto: number;
+        }
+      | {
+          kind: 'PRES';
+          id: number;
+          productoId: number;
+          cantidad: number;
+          costoTotal: number;
+          precioCosto: number;
+        };
+
+    const targets: Target[] = [
+      ...base.map((s) => ({
+        kind: 'BASE' as const,
+        id: s.id,
+        productoId: s.productoId,
+        cantidad: Number(s.cantidad ?? 0),
+        costoTotal: Number(s.costoTotal ?? 0),
+        precioCosto: Number(s.precioCosto ?? 0),
+      })),
+      ...pres.map((s) => ({
+        kind: 'PRES' as const,
+        id: s.id,
+        productoId: s.productoId,
+        cantidad: Number(s.cantidadPresentacion ?? 0),
+        costoTotal: Number(s.costoTotal ?? 0),
+        precioCosto: Number(s.precioCosto ?? 0),
+      })),
+    ];
+
+    // 3) Bases por método
+    const bases = targets.map((t) => {
+      switch (metodo) {
+        case MetodoProrrateo.VALOR:
+          return t.costoTotal;
+        case MetodoProrrateo.UNIDADES:
+          return t.cantidad; // existencia actual
+        case MetodoProrrateo.PESO:
+        case MetodoProrrateo.VOLUMEN:
+          return 0;
+        default:
+          return t.costoTotal;
+      }
+    });
+
+    const sumBase = bases.reduce((a, b) => a + b, 0);
+    if (!(sumBase > 0)) {
+      throw new BadRequestException(
+        'La suma base para prorrateo es 0; verifique método y datos.',
+      );
+    }
+
+    // 4) Distribución
+    const asignaciones = this.distribute(monto, bases);
+
+    // 5) Cabecera
+    const pr = await tx.prorrateo.create({
+      data: {
+        sucursalId,
+        metodo,
+        montoTotal: round(monto, MONEY_DECIMALS),
+        compraId: compraId ?? null,
+        compraRecepcionId: compraRecepcionId ?? null,
+        requisicionRecepcionId: requisicionRecepcionId ?? null,
+        entregaStockId: entregaStockId ?? null,
+        movimientoFinancieroId: movimientoFinancieroId ?? null,
+        estado: EstadoProrrateo.APLICADO,
+        comentario: comentario ?? null,
+      },
+    });
+
+    // 6) Aplicar
+    const detallesPayload: any[] = [];
+
+    for (let i = 0; i < targets.length; i++) {
+      const t = targets[i];
+      const asignado = Number(asignaciones[i]) || 0;
+      if (asignado === 0) continue;
+
+      const costoAntes = t.costoTotal;
+      const precioAntes = t.precioCosto;
+      const cantidad = t.cantidad;
+
+      if (!(cantidad > 0)) {
+        throw new BadRequestException(
+          `${t.kind === 'BASE' ? 'Stock' : 'StockPresentacion'}#${t.id} tiene cantidad cero; no se puede recalcular precioCosto.`,
+        );
+      }
+
+      const costoDesp = round(costoAntes + asignado, MONEY_DECIMALS);
+      const precioDesp = round(costoDesp / cantidad, UNIT_DECIMALS);
+
+      if (t.kind === 'BASE') {
+        await tx.stock.update({
+          where: { id: t.id },
+          data: { costoTotal: costoDesp, precioCosto: precioDesp },
+        });
+      } else {
+        await tx.stockPresentacion.update({
+          where: { id: t.id },
+          data: { costoTotal: costoDesp, precioCosto: precioDesp },
+        });
+      }
+
+      detallesPayload.push({
+        prorrateoId: pr.id,
+        stockId: t.kind === 'BASE' ? t.id : null,
+        stockPresentacionId: t.kind === 'PRES' ? t.id : null,
+        cantidadBase: round(cantidad, UNIT_DECIMALS),
+        valorBase: round(bases[i], MONEY_DECIMALS),
+        montoAsignado: round(asignado, MONEY_DECIMALS),
+        precioCostoAntes: round(precioAntes, UNIT_DECIMALS),
+        precioCostoDesp: precioDesp,
+      });
+    }
+
+    if (!detallesPayload.length) {
+      await tx.prorrateo.update({
+        where: { id: pr.id },
+        data: {
+          estado: EstadoProrrateo.ANULADO,
+          comentario: 'Sin asignaciones (>0).',
+        },
+      });
+      throw new ConflictException(
+        'El prorrateo no generó asignaciones mayores a 0.',
+      );
+    }
+
+    await tx.prorrateoDetalle.createMany({ data: detallesPayload });
+
+    return { prorrateo: pr, detalles: detallesPayload };
   }
 
   /**
@@ -1730,7 +2187,7 @@ export class PurchaseRequisitionsService {
     return { prorrateo: pr, detalles: detallesPayload };
   }
 
-  // helpers
+  //OTROS--------------->
   paymentChannel(
     m: MetodoPago | null | undefined,
   ): 'CAJA' | 'BANCO' | 'NINGUNO' {

@@ -62,12 +62,10 @@ export const presentacionSelect = {
       cantidadPresentacion: true,
       fechaVencimiento: true,
       fechaIngreso: true,
-      sucursal: {
-        select: {
-          id: true,
-          nombre: true,
-        },
-      },
+      // opcionalmente costo/pc para UI
+      costoTotal: true, // si lo vas a mostrar
+      precioCosto: true, // si lo vas a mostrar
+      sucursal: { select: { id: true, nombre: true } },
     },
   },
   producto: {

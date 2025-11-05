@@ -18,4 +18,6 @@ export type StockPresentacionDto = {
   fechaIngreso: Date;
   fechaVencimiento?: Date | null;
   requisicionRecepcionId?: number;
+  precioCosto: number;
+  costoTotal: number;
 };

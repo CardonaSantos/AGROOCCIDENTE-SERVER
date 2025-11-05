@@ -385,6 +385,14 @@ model StockPresentacion {
   compraRecepcionId Int?
   compraRecepcion   CompraRecepcion? @relation("StockPresentacionToCompraRecepcion", fields: [compraRecepcionId], references: [id], onDelete: SetNull)
 
+  // NUEVO: costo por lote de presentación
+  costoTotal              Float     @default(0)
+  precioCosto             Float     @default(0)
+
+  // Back-rel a prorrateo
+  prorrateoDetalles       ProrrateoDetalle[] @relation("StockPresToProrrateoDetalles")
+
+
   @@index([productoId, sucursalId])
   @@index([presentacionId, sucursalId])
 }
@@ -2537,8 +2545,11 @@ model ProrrateoDetalle {
   prorrateoId Int
   prorrateo   Prorrateo @relation(fields: [prorrateoId], references: [id], onDelete: Cascade)
 
-  stockId Int
-  stock   Stock @relation("StockToProrrateoDetalles", fields: [stockId], references: [id], onDelete: Cascade)
+  stockId Int?
+  stock   Stock? @relation("StockToProrrateoDetalles", fields: [stockId], references: [id], onDelete: Cascade)
+
+  stockPresentacionId Int?
+  stockPresentacion   StockPresentacion? @relation("StockPresToProrrateoDetalles", fields: [stockPresentacionId], references: [id], onDelete: SetNull)
 
   cantidadBase  Int
   valorBase     Float

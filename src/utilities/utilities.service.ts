@@ -13,7 +13,18 @@ import { GenerateStockDto } from './dto/generate-stock.dto';
 import { EntregaStockData } from './utils';
 import { StockPresentacionDto } from 'src/compras-requisiciones/interfaces';
 
-type GenerateStockPresentacionDto = StockPresentacionDto;
+export type GenerateStockPresentacionDto = {
+  productoId: number;
+  presentacionId: number;
+  sucursalId: number;
+  cantidadPresentacion: number;
+  fechaIngreso: Date;
+  fechaVencimiento?: Date | null;
+  requisicionRecepcionId?: number;
+  // 👇 NUEVOS (para base costo)
+  precioCosto: number; // costo unitario de la presentación
+  costoTotal: number; // costoTotal del lote (precioCosto * cantidadPresentacion)
+};
 
 @Injectable()
 export class UtilitiesService {
@@ -89,18 +100,26 @@ export class UtilitiesService {
   //crear stock de presentaciones
   async generateStockPresentacion(
     tx: Prisma.TransactionClient,
-    dtos: Array<{
-      productoId: number;
-      presentacionId: number;
-      sucursalId: number;
-      cantidadPresentacion: number;
-      fechaIngreso: Date;
-      fechaVencimiento?: Date | null;
-      requisicionRecepcionId?: number;
-    }>,
+    dtos: GenerateStockPresentacionDto[],
   ) {
     this.logger.log('DTOS StockPresentacion -> ', dtos);
-    if (!dtos.length) return [];
+    if (!dtos.length) return { created: [], totalCosto: 0, totalCantidad: 0 };
+
+    // Validaciones mínimas (evita bases 0 en prorrateo VALOR)
+    for (const d of dtos) {
+      if (!(d.cantidadPresentacion > 0)) {
+        throw new BadRequestException('cantidadPresentacion debe ser > 0');
+      }
+      if (!(d.costoTotal > 0) || !(d.precioCosto > 0)) {
+        // Si te llega uno de los dos en 0 por error de front:
+        // intenta derivar precioCosto o costoTotal.
+        // (Puedes hacerlo más estricto si prefieres)
+        const precio = d.precioCosto || d.costoTotal / d.cantidadPresentacion;
+        const total = d.costoTotal || precio * d.cantidadPresentacion;
+        d.precioCosto = Number(precio.toFixed(4));
+        d.costoTotal = Number(total.toFixed(4));
+      }
+    }
 
     const created = await Promise.all(
       dtos.map((sp) =>
@@ -116,6 +135,17 @@ export class UtilitiesService {
             requisicionRecepcion: sp.requisicionRecepcionId
               ? { connect: { id: sp.requisicionRecepcionId } }
               : undefined,
+            // 👇 NUEVO: claves para prorrateo en base COSTO
+            precioCosto: sp.precioCosto,
+            costoTotal: sp.costoTotal,
+          },
+          select: {
+            id: true,
+            productoId: true,
+            presentacionId: true,
+            cantidadPresentacion: true,
+            precioCosto: true,
+            costoTotal: true,
           },
         }),
       ),
@@ -126,7 +156,17 @@ export class UtilitiesService {
         'No se pudieron registrar presentaciones',
       );
     }
-    return created;
+
+    const totalCosto = created.reduce(
+      (acc, x) => acc + Number(x.costoTotal ?? 0),
+      0,
+    );
+    const totalCantidad = created.reduce(
+      (acc, x) => acc + Number(x.cantidadPresentacion ?? 0),
+      0,
+    );
+
+    return { created, totalCosto, totalCantidad };
   }
 
   //SERVICIOS DE UTILIDADES PARA TRUNCAR MOVIMIENTOS MAYORES Y EVITAR CAJAS NEGATIVAS

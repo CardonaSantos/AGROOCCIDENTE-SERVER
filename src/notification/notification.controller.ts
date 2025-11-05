@@ -13,6 +13,7 @@ import { NotificationService } from './notification.service';
 import { CreateNotificationDto } from './dto/create-notification.dto';
 import { UpdateNotificationDto } from './dto/update-notification.dto';
 import { DeleteOneUserNoti } from './dto/queryDelete';
+import { DeleteNotiDto } from './dto/DeleteNotiDto';
 // import { TipoNotificacion } from '@prisma/client';
 
 @Controller('notification')
@@ -24,13 +25,12 @@ export class NotificationController {
     return this.notificationService.getMyNotifications(id);
   }
 
-  @Delete('/delete-noti-one-user/:userId/:notificacionId')
-  deleteOneUserNotification(
-    @Param('userId', ParseIntPipe) userId: number,
-    @Param('notificacionId', ParseIntPipe) notificacionId: number,
-  ) {
-    return this.notificationService.deleteForUser(userId, notificacionId);
+  @Post('delete-noti-one-user')
+  async removeOneForUser(@Body() dto: DeleteNotiDto): Promise<void> {
+    await this.notificationService.deleteForUser(
+      dto.userID,
+      dto.notificacionId,
+    );
   }
-
   // delete-my-notification
 }

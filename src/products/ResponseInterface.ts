@@ -20,6 +20,11 @@ export interface PrecioProductoNormalized {
   orden: number;
 }
 export type StocksBySucursal = StockPorSucursal[];
+export interface ProrrateoLite {
+  sumaAsignado: number; // total prorrateado al lote
+  ultimaFecha: string | null; // ISO
+  ultimaProrrateoId: number | null; // para drill-down si hace falta
+}
 
 export interface StockPorSucursal {
   sucursalId: number;
@@ -32,4 +37,5 @@ export interface StocksProducto {
   cantidad: number;
   fechaIngreso: string;
   fechaVencimiento: string;
+  prorrateo?: ProrrateoLite; // 👈 nuevo (opcional)
 }
