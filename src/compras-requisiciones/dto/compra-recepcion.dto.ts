@@ -38,6 +38,8 @@ export class RecepcionarCompraAutoDto {
   @IsOptional()
   lineas?: lineasOverrride[];
 
+  aplicarProrrateo?: boolean;
+
   mf?: MovimientoFinanciero; // ✅ hazlo opcional si se permite sin costo
   prorrateo?: {
     aplicar: boolean;

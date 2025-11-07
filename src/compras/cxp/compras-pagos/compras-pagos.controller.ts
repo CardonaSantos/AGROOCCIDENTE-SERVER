@@ -3,14 +3,11 @@ import {
   Get,
   Post,
   Body,
-  Patch,
   Param,
   Delete,
-  Query,
   ParseIntPipe,
 } from '@nestjs/common';
 import { ComprasPagosService } from './compras-pagos.service';
-import { UpdateComprasPagoDto } from './dto/update-compras-pago.dto';
 import { DeletePagoCuota } from './dto/delete-pago-cuota';
 import { CreateComprasPagoConRecepcionDto } from './dto/create-compras-pago.dto';
 
@@ -27,7 +24,7 @@ export class ComprasPagosController {
     return this.comprasPagosService.getDetallesConRecepcion(id);
   }
 
-  @Delete('delete-cuota-payed')
+  @Post('delete-cuota-payed')
   deleteCuota(@Body() dto: DeletePagoCuota) {
     return this.comprasPagosService.deletePagoCuota(dto);
   }

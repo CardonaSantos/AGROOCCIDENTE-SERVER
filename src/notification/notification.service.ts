@@ -223,6 +223,23 @@ export class NotificationService {
       throw new InternalServerErrorException('Fatal Error: Error inesperado');
     }
   }
+  async deleteAllUserNotifications(userId: number): Promise<void> {
+    try {
+      await this.prisma.notificacionesUsuarios.deleteMany({
+        where: { usuarioId: userId },
+      });
+      // no retornes nada; 204 en controller
+    } catch (error) {
+      this.logger.error(
+        'Error generado en eliminación de notificaciones: ',
+        error?.stack,
+      );
+      if (error instanceof HttpException) throw error;
+      throw new InternalServerErrorException(
+        'Fatal Error: Error inesperado en módulo notificaciones',
+      );
+    }
+  }
 
   // ========= LEGACY WRAPPERS (opcional, para transición) =========
   // Si aún te llaman con "tipo: TipoNotificacion" mapea a (categoria/subtipo/severidad)

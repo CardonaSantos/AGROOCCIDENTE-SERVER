@@ -2498,7 +2498,6 @@ model Prorrateo {
 
   metodo     MetodoProrrateo
   montoTotal Float
-
   // Ámbitos opcionales (uno por registro)
   compraId Int?
   compra   Compra? @relation("CompraToProrrateos", fields: [compraId], references: [id], onDelete: Cascade)
@@ -2526,7 +2525,6 @@ model Prorrateo {
   estado     EstadoProrrateo @default(APLICADO)
   comentario String?
   creadoEn   DateTime        @default(now())
-
   detalles ProrrateoDetalle[]
 
   @@unique([movimientoFinancieroId])
@@ -2558,7 +2556,15 @@ model ProrrateoDetalle {
   precioCostoAntes Float
   precioCostoDesp  Float
 
+  // NUEVOS (para reconstruir Excel sin recalcular)
+  gastoUnitarioBase      Float?  // a_base = G/T (por unidad base)
+  costoFacturaUnitario   Float?  // cᵢ
+  gastoUnitarioAplicado  Float?  // a_target = a_base * factor
+  costoUnitarioResultante Float? // uᵢ = cᵢ + a_target
+  inversionLinea         Float?  // Lᵢ = cantidadTarget * u
+
   creadoEn DateTime @default(now())
+  
 
   @@index([prorrateoId])
   @@index([stockId])

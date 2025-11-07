@@ -317,51 +317,183 @@ export class ComprasPagosService {
     }
   }
 
+  /**
+   * Revierte el último pago asociado a una cuota de un documento.
+   * - Borra CxPPagoCuota (la distribución de ese pago a la cuota)
+   * - Si el pago no está distribuido a otras cuotas, borra CxPPago y su MF
+   * - Restaura saldo/estado de la cuota y estado del documento
+   */
   async deletePagoCuota(dto: DeletePagoCuota) {
-    try {
-      const { cuotaId, documentoId, usuarioId } = dto;
-      this.logger.log(`DTO recibido:\n${JSON.stringify(dto, null, 2)}`);
+    this.logger.log(
+      `DTO recibido (deletePagoCuota):\n${JSON.stringify(dto, null, 2)}`,
+    );
 
+    try {
       verifyProps<DeletePagoCuota>(dto, [
         'cuotaId',
         'documentoId',
         'usuarioId',
       ]);
 
-      const deletedCuota = await this.prisma.$transaction(async (tx) => {
-        const doc = await tx.cxPDocumento.findUnique({
-          where: {
-            id: documentoId,
-          },
-        });
+      const { cuotaId, documentoId } = dto;
+      const { Prisma } = await import('@prisma/client');
 
-        const cuota = await tx.cxPCuota.findUnique({
-          where: {
-            id: cuotaId,
-          },
-        });
+      return await this.prisma.$transaction(
+        async (tx) => {
+          // 1) Documento
+          const doc = await tx.cxPDocumento.findUnique({
+            where: { id: documentoId },
+            select: { id: true, estado: true, montoOriginal: true },
+          });
+          if (!doc) throw new BadRequestException('Documento ID no válido');
+          if (doc.estado === 'ANULADO') {
+            throw new BadRequestException(
+              'No se puede modificar un documento ANULADO.',
+            );
+          }
 
-        const user = await tx.usuario.findUnique({
-          where: {
-            id: usuarioId,
-          },
-        });
+          // 2) Lock cuota para evitar condiciones de carrera
+          await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+          await tx.$queryRaw`SELECT id FROM "CxPCuota" WHERE id = ${cuotaId} FOR UPDATE NOWAIT`;
 
-        if (!doc) throw new BadRequestException('Documento ID no válido');
-        if (!cuota) throw new BadRequestException('Cuota ID no válido');
-        if (!user) throw new BadRequestException('user ID no válido');
+          const cuota = await tx.cxPCuota.findUnique({
+            where: { id: cuotaId },
+            select: {
+              id: true,
+              documentoId: true,
+              estado: true,
+              saldo: true,
+              monto: true,
+            },
+          });
+          if (!cuota) throw new BadRequestException('Cuota ID no válido');
+          if (cuota.documentoId !== documentoId) {
+            throw new BadRequestException(
+              'La cuota no pertenece al documento.',
+            );
+          }
 
-        const newPagoCuotaDeleted: CxPCuota = await tx.cxPCuota.delete({
-          where: {
-            id: cuotaId,
-          },
-        });
-      });
+          // 3) Buscar el ÚLTIMO pago aplicado a esta cuota (por fecha/id desc)
+          const cuotaPago = await tx.cxPPagoCuota.findFirst({
+            where: { cuotaId },
+            orderBy: [
+              { pago: { fechaPago: 'desc' } as any }, // TS hack para anidado
+              { pagoId: 'desc' },
+            ],
+            include: {
+              pago: {
+                select: {
+                  id: true,
+                  movimientoFinancieroId: true,
+                  monto: true,
+                  compraRecepcionId: true, // por si decides tratar recepciones
+                },
+              },
+            },
+          });
+
+          if (!cuotaPago) {
+            throw new BadRequestException(
+              'La cuota no tiene pagos para revertir.',
+            );
+          }
+
+          // 4) Verificar si el pago se distribuyó a otras cuotas
+          const countDistribucion = await tx.cxPPagoCuota.count({
+            where: { pagoId: cuotaPago.pagoId },
+          });
+
+          // Política conservadora: si el pago está distribuido a varias cuotas,
+          // no lo tocamos con este endpoint simple.
+          if (countDistribucion > 1) {
+            throw new BadRequestException(
+              'El pago está distribuido entre varias cuotas. ' +
+                'Usa un endpoint específico con pagoId para revertir parcialmente.',
+            );
+          }
+
+          // 5) Eliminar la distribución cuota<->pago
+          await tx.cxPPagoCuota.delete({
+            where: {
+              pagoId_cuotaId: {
+                pagoId: cuotaPago.pagoId,
+                cuotaId: cuotaId,
+              },
+            },
+          });
+
+          // 6) Si existe MF, elimínalo primero (para que el FK de CxPPago quede en null por onDelete:SetNull)
+          if (cuotaPago.pago.movimientoFinancieroId) {
+            // Si tienes un método de dominio:
+            // if (this.mf?.deleteMovimiento) {
+            //   await this.mf.deleteMovimiento(cuotaPago.pago.movimientoFinancieroId, { tx });
+            // } else {
+            // Fallback: borrar directo (mantén onDelete:SetNull en CxPPago.movimientoFinancieroId)
+            await tx.movimientoFinanciero.delete({
+              where: { id: cuotaPago.pago.movimientoFinancieroId },
+            });
+            // }
+          }
+
+          // 7) Borrar el CxPPago (ya no apunta a ninguna cuota)
+          await tx.cxPPago.delete({ where: { id: cuotaPago.pagoId } });
+
+          // 8) Recalcular cuota: saldo = saldo + montoRevertido; estado/pagadaEn
+          const montoRevertido = new Prisma.Decimal(cuotaPago.monto);
+          const saldoNuevo = new Prisma.Decimal(cuota.saldo)
+            .plus(montoRevertido)
+            .toDecimalPlaces(2);
+
+          const estadoNuevo = saldoNuevo.gte(new Prisma.Decimal(cuota.monto))
+            ? ('PENDIENTE' as const)
+            : ('PARCIAL' as const);
+
+          await tx.cxPCuota.update({
+            where: { id: cuota.id },
+            data: {
+              saldo: saldoNuevo,
+              estado: estadoNuevo,
+              pagadaEn: null, // al revertir un pago, dejamos null
+            },
+          });
+
+          // 9) Recalcular documento: saldoPendiente y estado
+          const agg = await tx.cxPCuota.aggregate({
+            where: { documentoId },
+            _sum: { saldo: true },
+          });
+          const saldoDoc = new Prisma.Decimal(
+            agg._sum.saldo ?? 0,
+          ).toDecimalPlaces(2);
+
+          let estadoDoc: 'PENDIENTE' | 'PARCIAL' | 'PAGADO' | 'ANULADO' =
+            'PARCIAL';
+          if (saldoDoc.eq(0)) estadoDoc = 'PAGADO';
+          else {
+            const totalDoc = new Prisma.Decimal(doc.montoOriginal);
+            if (saldoDoc.eq(totalDoc)) estadoDoc = 'PENDIENTE';
+          }
+
+          await tx.cxPDocumento.update({
+            where: { id: documentoId },
+            data: {
+              saldoPendiente: saldoDoc,
+              estado: estadoDoc,
+            },
+          });
+
+          // 10) (Opcional) Si en create ataste una recepción a este pago (pago.compraRecepcionId),
+          // decide aquí si la anulas/ajustas. Yo por ahora NO la toco para no mezclar responsabilidades.
+
+          return { revertedAmount: montoRevertido.toNumber() };
+        },
+        { isolationLevel: 'Serializable' },
+      );
     } catch (error) {
       this.logger.error('Error en eliminar pago de cuota: ', error?.stack);
       if (error instanceof HttpException) throw error;
       throw new InternalServerErrorException(
-        'Fatal error: Error inesperado en modulo: eliminar pago de cuota',
+        'Fatal error: Error inesperado en módulo: eliminar pago de cuota',
       );
     }
   }

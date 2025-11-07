@@ -34,16 +34,18 @@ export class ProrrateoService {
       sucursalId: sucursalId ?? undefined,
       compraId: compraId ?? undefined,
       entregaStockId: entregaStockId ?? undefined,
-      requisicionRecepcionId: requisicionRecepcionId ?? undefined,
+      compraRecepcionId: requisicionRecepcionId ?? undefined,
       movimientoFinancieroId: movimientoFinancieroId ?? undefined,
       estado: estado ?? undefined,
       metodo: metodo ?? undefined,
     };
 
-    const take = Math.min(Math.max(limit, 1), 200);
-    const skip = (Math.max(page, 1) - 1) * take;
+    const take = Math.min(Math.max(+limit, 1), 200);
+    const skip = (Math.max(+page, 1) - 1) * take;
 
-    const [total, rows] = await this.prisma.$transaction([
+    // helper numérico
+
+    const [total, rowsRaw] = await this.prisma.$transaction([
       this.prisma.prorrateo.count({ where }),
       this.prisma.prorrateo.findMany({
         where,
@@ -54,7 +56,25 @@ export class ProrrateoService {
           includeDetalles === 'true'
             ? {
                 detalles: {
-                  include: {
+                  select: {
+                    id: true,
+                    // cantidades y montos
+                    cantidadBase: true,
+                    valorBase: true,
+                    montoAsignado: true,
+                    // costos
+                    precioCostoAntes: true,
+                    precioCostoDesp: true,
+                    gastoUnitarioBase: true, // a (G/T)
+                    costoFacturaUnitario: true, // cᵢ
+                    gastoUnitarioAplicado: true, // a_target (siempre = a)
+                    costoUnitarioResultante: true, // uᵢ
+                    inversionLinea: true, // Lᵢ
+                    creadoEn: true,
+                    // identificadores de lote
+                    stockId: true,
+                    stockPresentacionId: true,
+                    // para exponer producto/presentación
                     stock: {
                       select: {
                         id: true,
@@ -66,6 +86,16 @@ export class ProrrateoService {
                         precioCosto: true,
                       },
                     },
+                    stockPresentacion: {
+                      select: {
+                        id: true,
+                        productoId: true,
+                        presentacionId: true,
+                        cantidadPresentacion: true,
+                        precioCosto: true,
+                        costoTotal: true,
+                      },
+                    },
                   },
                   orderBy: { id: 'asc' },
                 },
@@ -74,14 +104,106 @@ export class ProrrateoService {
       }),
     ]);
 
+    // ===== Transformación “estilo Excel”
+    // ===== Transformación “como Excel”
+    const N = (x: any) => (Number.isFinite(Number(x)) ? Number(x) : 0);
+
+    const data = rowsRaw.map((pr) => {
+      if (includeDetalles !== 'true') return pr;
+
+      const dets = pr.detalles ?? [];
+
+      // Cabecera (G, T, a)
+      const T = dets.reduce((s, d) => s + N(d.cantidadBase), 0);
+      const G = N(pr.montoTotal);
+      const a = T > 0 ? +(G / T).toFixed(4) : 0;
+
+      const gastoAsignadoTotal = +dets
+        .reduce((s, d) => s + N(d.montoAsignado), 0)
+        .toFixed(4);
+      const costoProrrateadoTotalInversion = +dets
+        .reduce((s, d) => {
+          const u = N(d.costoUnitarioResultante) || N(d.precioCostoDesp);
+          return s + N(d.cantidadBase) * u;
+        }, 0)
+        .toFixed(4);
+
+      const lineas = dets.map((d) => {
+        const isPres = !!d.stockPresentacionId;
+        const productoId = isPres
+          ? (d.stockPresentacion?.productoId ?? null)
+          : (d.stock?.productoId ?? null);
+        const presentacionId = isPres
+          ? (d.stockPresentacion?.presentacionId ?? null)
+          : null;
+
+        const costoUnitarioDeGastoAsociado = N(d.gastoUnitarioAplicado) || a;
+        const precioCostoUnitario = N(d.costoFacturaUnitario);
+        const costoMasGastoAsociado =
+          N(d.costoUnitarioResultante) ||
+          +(precioCostoUnitario + costoUnitarioDeGastoAsociado).toFixed(4);
+        const totalInversion =
+          N(d.inversionLinea) ||
+          +(N(d.cantidadBase) * costoMasGastoAsociado).toFixed(4);
+
+        // Si no hubo stock previo para ese producto, esto es igual al “prorrateado”
+        const costoUnitarioProrrateado = costoMasGastoAsociado;
+
+        return {
+          id: d.id,
+          target: d.stockId
+            ? { tipo: 'STOCK' as const, id: d.stockId }
+            : { tipo: 'STOCK_PRES' as const, id: d.stockPresentacionId! },
+
+          productoId,
+          presentacionId,
+
+          // === columnas “tal cual Excel” ===
+          cantidad: N(d.cantidadBase),
+          precioCostoUnitario,
+          costoUnitarioDeGastoAsociado,
+          costoMasGastoAsociado,
+          totalInversion,
+          gastoAsignado: +N(d.montoAsignado).toFixed(4),
+
+          // auxiliares para auditoría
+          precioCostoAntes: +N(d.precioCostoAntes).toFixed(4),
+          precioCostoDespues: +N(d.precioCostoDesp).toFixed(4),
+          costoUnitarioProrrateado, // útil cuando no hay previos
+          createdAt: d.creadoEn,
+        };
+      });
+
+      return {
+        id: pr.id,
+        sucursalId: pr.sucursalId,
+        metodo: pr.metodo,
+        estado: pr.estado,
+        comentario: pr.comentario,
+        creadoEn: pr.creadoEn,
+
+        // === cabecera “tal cual Excel” ===
+        cabecera: {
+          gastosAsociadosPedido: G,
+          totalNuevas: T, // = “total nuevas”
+          nuevasExistencias: T, // alias útil
+          costoUnitarioDeGastoAsociado: a, // a = G/T
+          gastoAsignadoTotal,
+          costoProrrateadoTotalInversion,
+        },
+
+        lineas,
+      };
+    });
+
     return {
       meta: {
-        page,
+        page: +page,
         limit: take,
         total,
         pages: Math.max(Math.ceil(total / take), 1),
       },
-      data: rows,
+      data,
     };
   }
 

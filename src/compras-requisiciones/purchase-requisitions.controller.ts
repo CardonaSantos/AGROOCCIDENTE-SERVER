@@ -75,9 +75,7 @@ export class PurchaseRequisitionsController {
   }
 
   @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.purchaseRequisitionsService.findOne(+id);
-  }
+  findOne(@Param('id') id: string) {}
 
   @Patch(':id')
   update(

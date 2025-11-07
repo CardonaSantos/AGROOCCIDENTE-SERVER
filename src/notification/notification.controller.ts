@@ -32,5 +32,11 @@ export class NotificationController {
       dto.notificacionId,
     );
   }
-  // delete-my-notification
+
+  @Delete('delete-all-notifications-user/:id')
+  async removeAllNotificationsUser(
+    @Param('id', ParseIntPipe) id: number,
+  ): Promise<void> {
+    await this.notificationService.deleteAllUserNotifications(id);
+  }
 }
