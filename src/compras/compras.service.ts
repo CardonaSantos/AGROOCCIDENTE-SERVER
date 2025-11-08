@@ -20,6 +20,8 @@ import * as isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
 import { TZGT } from 'src/utils/utils';
 import { EstadoCompra, Prisma } from '@prisma/client';
 import { PrismaService } from 'src/prisma/prisma.service';
+import { ProrrateoService } from 'src/prorrateo/prorrateo.service';
+import { MovimientoFinancieroService } from 'src/movimiento-financiero/movimiento-financiero.service';
 dayjs.extend(utc);
 dayjs.extend(timezone);
 dayjs.extend(isSameOrBefore);
@@ -54,7 +56,11 @@ type StockLineaProductoPayload = {
 @Injectable()
 export class ComprasService {
   private readonly logger = new Logger(ComprasService.name);
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly prorrateo: ProrrateoService,
+    private readonly mf: MovimientoFinancieroService,
+  ) {}
 
   async create(dto: CreateCompraDto) {
     try {
@@ -205,9 +211,86 @@ export class ComprasService {
           tx,
           payloadProd,
           sucId,
+          cab.id,
         );
 
         await this.updateCompraEstado(tx, compraId);
+
+        // =========================
+        //  NUEVO: MF + PRORRATEO
+        // =========================
+        // 1) Movimiento financiero del costo asociado (si viene en dto.mf)
+        let mfRecord: { id: number } | null = null;
+        if (
+          dto.mf &&
+          dto.mf.motivo === 'COSTO_ASOCIADO' &&
+          Number(dto.mf.monto) > 0
+        ) {
+          // Validaciones rápidas del canal de pago
+          const metodo = dto.mf.metodoPago;
+          const isBanco =
+            metodo === 'TRANSFERENCIA' ||
+            metodo === 'TARJETA' ||
+            metodo === 'CHEQUE';
+          const isCaja = metodo === 'EFECTIVO' || metodo === 'CONTADO';
+
+          if (isBanco && !dto.mf.cuentaBancariaId) {
+            throw new BadRequestException(
+              'Selecciona la cuenta bancaria para pagos por banco.',
+            );
+          }
+          if (isCaja && !dto.mf.registroCajaId) {
+            throw new BadRequestException(
+              'Selecciona la caja para pagos en efectivo/contado.',
+            );
+          }
+
+          // Usa tu servicio utilitario para MF (el mismo que en recepción total)
+          const mfDto = {
+            usuarioId: dto.usuarioId,
+            monto: Number(dto.mf.monto),
+            motivo: 'COSTO_ASOCIADO' as const,
+            metodoPago: metodo,
+            descripcion: dto.mf.descripcion,
+            sucursalId: dto.mf.sucursalId ?? sucId,
+            costoVentaTipo: dto.mf.costoVentaTipo, // 'FLETE' etc.
+            clasificacionAdmin: 'COSTO_VENTA' as const,
+            proveedorId: dto.mf.proveedorId ?? null,
+            cuentaBancariaId: dto.mf.cuentaBancariaId,
+            registroCajaId: dto.mf.registroCajaId,
+            afectaInventario: false,
+          };
+
+          const mfCreado = await this.mf.createMovimiento(mfDto); // <- tu helper existente
+          mfRecord = { id: mfCreado.id };
+        }
+
+        // 2) Prorrateo (por LOTES NUEVOS) si viene activado
+        const aplicar =
+          (dto.prorrateo?.aplicar ?? dto.aplicarProrrateo ?? false) &&
+          Number(dto.mf?.monto ?? 0) > 0;
+
+        if (aplicar) {
+          // Prepara los IDs de lotes recién creados
+          const newStockIds = (stocksProd ?? []).map((s: any) =>
+            typeof s === 'number' ? s : s.id,
+          );
+          const newStocksPresIds = (stocksPres ?? []).map((s: any) =>
+            typeof s === 'number' ? s : s.id,
+          );
+
+          // Lanza prorrateo en MODO B (por lotes nuevos)
+          await this.prorrateo.generarProrrateoUnidadesTx(tx, {
+            sucursalId: sucId,
+            gastosAsociadosCompra: Number(dto.mf!.monto),
+            movimientoFinancieroId: mfRecord?.id ?? null,
+            comentario: `Prorrateo UNIDADES – Compra #${compraId} – Recepción #${cab.id}`,
+            newStockIds,
+            newStocksPresIds,
+            compraId,
+            compraRecepcionId: cab.id, // opcional; MODO B usa lotes, pero no estorba
+          });
+        }
 
         return {
           recepcionId: cab.id,
@@ -216,6 +299,8 @@ export class ComprasService {
           stocksProducto: stocksProd.map((s) => s.id),
         };
       });
+
+      //registrar el prorrateo
 
       return { ok: true, data };
     } catch (error) {
@@ -276,6 +361,7 @@ export class ComprasService {
     tx: Prisma.TransactionClient,
     items: StockLineaProductoPayload[],
     sucursalId: number,
+    recepcionId?: number, //
   ) {
     this.logger.log('El payload cargado a create productos stock es: ', items);
 
@@ -287,6 +373,9 @@ export class ComprasService {
           data: {
             producto: { connect: { id: it.productoId } },
             sucursal: { connect: { id: sucursalId } },
+            ...(recepcionId
+              ? { compraRecepcion: { connect: { id: recepcionId } } }
+              : {}),
             cantidadInicial: it.cantidad,
             cantidad: it.cantidad,
             precioCosto: it.precioCosto,

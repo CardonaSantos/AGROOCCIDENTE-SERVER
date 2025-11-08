@@ -6,10 +6,12 @@ import { ComprasPagosModule } from './cxp/compras-pagos/compras-pagos.module';
 import { DocumentoModule } from './cxp/documento/documento.module';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { PrismaModule } from 'src/prisma/prisma.module';
+import { ProrrateoService } from 'src/prorrateo/prorrateo.service';
+import { MovimientoFinancieroService } from 'src/movimiento-financiero/movimiento-financiero.service';
 
 @Module({
   controllers: [ComprasController],
-  providers: [ComprasService],
+  providers: [ComprasService, ProrrateoService, MovimientoFinancieroService],
   imports: [
     RecepcionesModule,
     ComprasPagosModule,
