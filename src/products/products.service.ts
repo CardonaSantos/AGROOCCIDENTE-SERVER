@@ -1107,42 +1107,6 @@ export class ProductsService {
           JSON.stringify(wherePresentaciones, null, 2),
       );
 
-      const productoSelectFor = (
-        sucursalId?: number,
-      ): Prisma.ProductoSelect => ({
-        ...productoSelect,
-        stock: {
-          where: sucursalId ? { sucursalId } : undefined,
-          select: {
-            id: true,
-            cantidad: true,
-            fechaVencimiento: true,
-            fechaIngreso: true,
-            precioCosto: true,
-            costoTotal: true,
-            sucursal: { select: { id: true, nombre: true } },
-          },
-        },
-      });
-
-      const presentacionSelectFor = (
-        sucursalId?: number,
-      ): Prisma.ProductoPresentacionSelect => ({
-        ...presentacionSelect,
-        stockPresentaciones: {
-          where: sucursalId ? { sucursalId } : undefined,
-          select: {
-            id: true,
-            cantidadPresentacion: true,
-            fechaVencimiento: true,
-            fechaIngreso: true,
-            costoTotal: true,
-            precioCosto: true,
-            sucursal: { select: { id: true, nombre: true } },
-          },
-        },
-      });
-
       this.logger.log(`DTO recibido:\n${JSON.stringify(dto, null, 2)}`);
 
       const [productos, presentaciones, totalProductos, totalPresentaciones]: [
@@ -1169,72 +1133,15 @@ export class ProductsService {
       ]);
 
       //----> prorrateo
-      const stockIdsFromProductos = (productos ?? []).flatMap((p) =>
-        (p.stock ?? []).map((s) => s.id),
-      );
-
-      const stockPresIdsFromPresentaciones = (presentaciones ?? []).flatMap(
-        (p) => (p.stockPresentaciones ?? []).map((s) => s.id),
-      );
-
-      // Map<stockId, { suma, fecha, prId }>
-      const prAggByStock = new Map<
-        number,
-        { suma: number; fecha: Date | null; prId: number | null }
-      >();
-      // Map<stockPresentacionId, { suma, fecha, prId }>
-      const prAggByStockPres = new Map<
-        number,
-        { suma: number; fecha: Date | null; prId: number | null }
-      >();
-
-      if (stockIdsFromProductos.length > 0) {
-        const r = await this.prisma.prorrateoDetalle.groupBy({
-          by: ['stockId'],
-          where: {
-            stockId: { in: stockIdsFromProductos },
-            prorrateo: { estado: 'APLICADO' },
-          },
-          _sum: { montoAsignado: true },
-          _max: { creadoEn: true, prorrateoId: true },
-        });
-        for (const x of r) {
-          prAggByStock.set(x.stockId!, {
-            suma: Number(x._sum.montoAsignado ?? 0),
-            fecha: (x._max as any)?.creadoEn ?? null,
-            prId: (x._max as any)?.prorrateoId ?? null,
-          });
-        }
-      }
-
-      if (stockPresIdsFromPresentaciones.length > 0) {
-        const r2 = await this.prisma.prorrateoDetalle.groupBy({
-          by: ['stockPresentacionId'],
-          where: {
-            stockPresentacionId: { in: stockPresIdsFromPresentaciones },
-            prorrateo: { estado: 'APLICADO' },
-          },
-          _sum: { montoAsignado: true },
-          _max: { creadoEn: true, prorrateoId: true },
-        });
-        for (const x of r2) {
-          prAggByStockPres.set(x.stockPresentacionId!, {
-            suma: Number(x._sum.montoAsignado ?? 0),
-            fecha: (x._max as any)?.creadoEn ?? null,
-            prId: (x._max as any)?.prorrateoId ?? null,
-          });
-        }
-      }
 
       const productosArray = Array.isArray(productos)
-        ? this.normalizerProductsInventario(productos, sucursalId, prAggByStock)
+        ? this.normalizerProductsInventario(productos, sucursalId)
         : [];
 
       const presentacionesArray = Array.isArray(presentaciones)
         ? this.normalizerProductPresentacionInventario(
             presentaciones,
             sucursalId,
-            prAggByStockPres,
           )
         : [];
 
@@ -1264,35 +1171,38 @@ export class ProductsService {
   }
 
   // HELPERS =======================>
-
   normalizerProductsInventario(
     arrayProductos: ProductoWithSelect[],
     sucursalId?: number,
-    prAggByStock?: Map<
-      number,
-      { suma: number; fecha: Date | null; prId: number | null }
-    >,
   ): ProductoInventarioResponse[] {
     return arrayProductos.map((p) => {
-      //----> PRORRATEO
       const toLite = (s: (typeof p.stock)[number]) => {
-        const agg = prAggByStock?.get(s.id);
-        const suma = Number(agg?.suma ?? 0);
         const qty = Number(s.cantidad ?? 0);
 
-        // prorrateo por unidad (para auditoría/tooltip)
-        const porUnidad =
-          qty > 0 ? Math.round((suma / qty) * 10_000) / 10_000 : 0;
+        const detalles = (s.prorrateoDetalles ?? []).sort(
+          (a, b) => dayjs(b.creadoEn).valueOf() - dayjs(a.creadoEn).valueOf(),
+        );
+        const vigente = detalles[0];
 
-        const pr = agg
-          ? {
-              sumaAsignado: Math.round(suma * 10_000) / 10_000,
-              porUnidad,
-              precioCostoFinal: Number(s.precioCosto ?? 0), // 👈 unitario resultante
-              ultimaFecha: agg.fecha ? dayjs(agg.fecha).toISOString() : null,
-              ultimaProrrateoId: agg.prId ?? null,
-            }
-          : undefined;
+        const stockCost = Number(s.precioCosto ?? NaN);
+        const costoUnitario = Number.isFinite(stockCost)
+          ? stockCost
+          : Number(vigente?.costoUnitarioResultante ?? 0);
+
+        const prorrateoInfo = detalles.map((pro) => ({
+          id: pro.id,
+          creadoEn: pro.creadoEn,
+          costoFacturaUnitario: pro.costoFacturaUnitario,
+          costoProrrateadoTotalInversion: pro.costoProrrateadoTotalInversion,
+          costoUnitarioProrrateado: pro.costoUnitarioProrrateado,
+          costoUnitarioResultante: pro.costoUnitarioResultante,
+          existenciasPrevias: pro.existenciasPrevias,
+          gastoUnitarioAplicado: pro.gastoUnitarioAplicado,
+          gastoUnitarioBase: pro.gastoUnitarioBase,
+          inversionLinea: pro.inversionLinea,
+          inversionPrevias: pro.inversionPrevias,
+          nuevasExistencias: pro.nuevasExistencias,
+        }));
 
         return {
           id: s.id,
@@ -1303,8 +1213,8 @@ export class ProductsService {
           fechaVencimiento: s.fechaVencimiento
             ? dayjs(s.fechaVencimiento).format('DD-MM-YYYY')
             : '',
-          costoUnitario: Number(s.precioCosto ?? 0), // 👈 ESTE es el 50/45 para el UI
-          ...(pr ? { prorrateo: pr } : {}),
+          costoUnitario,
+          prorrateo: prorrateoInfo,
         };
       };
 
@@ -1318,17 +1228,15 @@ export class ProductsService {
         }),
       );
 
-      // TODOS los lotes
       const stocksAll: StocksProducto[] = (p.stock ?? []).map(toLite);
 
       const stocksSucursal: StocksProducto[] = (p.stock ?? [])
         .filter((s) => (sucursalId ? s.sucursal?.id === sucursalId : true))
         .map(toLite);
 
-      // Agregado por sucursal (con TODOS los lotes)
       const dict = (p.stock ?? []).reduce<Record<string, StockPorSucursal>>(
         (acc, s) => {
-          const sid = s.sucursal?.id ?? 0; // 👈 renombrado
+          const sid = s.sucursal?.id ?? 0;
           const key = String(sid);
           const nombre = s.sucursal?.nombre ?? key;
           const item = acc[key] ?? { sucursalId: sid, nombre, cantidad: 0 };
@@ -1348,10 +1256,10 @@ export class ProductsService {
         precioCosto:
           p.precioCostoActual != null ? p.precioCostoActual.toString() : '0',
         precios,
-        stocks: stocksSucursal, // 👈 solo la sucursal pedida
-        stocksAll, // 👈 NUEVA prop consistente
-        stocksBySucursal, // 👈 agregado con TODOS los lotes
-        image: p?.imagenesProducto[0]?.url,
+        stocks: stocksSucursal,
+        stocksAll,
+        stocksBySucursal,
+        image: p?.imagenesProducto?.[0]?.url,
         images: p?.imagenesProducto,
         type: 'PRODUCTO',
         productoId: p.id,
@@ -1362,31 +1270,35 @@ export class ProductsService {
   normalizerProductPresentacionInventario(
     arrayProductos: PresentacionWithSelect[],
     sucursalId?: number,
-    prAggByStockPres?: Map<
-      number,
-      { suma: number; fecha: Date | null; prId: number | null }
-    >,
   ): ProductoInventarioResponse[] {
     return (arrayProductos ?? []).map((p) => {
       const stockPres = p.stockPresentaciones ?? [];
 
+      // -----> LOTES (sin prorrateo)
       const toLite = (s: (typeof stockPres)[number]) => {
-        const agg = prAggByStockPres?.get(s.id);
-        const suma = Number(agg?.suma ?? 0);
         const qty = Number(s.cantidadPresentacion ?? 0);
 
-        const porUnidad =
-          qty > 0 ? Math.round((suma / qty) * 10_000) / 10_000 : 0;
-
-        const pr = agg
-          ? {
-              sumaAsignado: Math.round(suma * 10_000) / 10_000,
-              porUnidad,
-              precioCostoFinal: Number(s.precioCosto ?? 0), // 👈 unitario resultante
-              ultimaFecha: agg.fecha ? dayjs(agg.fecha).toISOString() : null,
-              ultimaProrrateoId: agg.prId ?? null,
-            }
-          : undefined;
+        const prorrateoInfo = s.prorrateoDetalles
+          .map((pro) => {
+            return {
+              id: pro.id,
+              creadoEn: pro.creadoEn,
+              costoFacturaUnitario: pro.costoFacturaUnitario,
+              costoProrrateadoTotalInversion:
+                pro.costoProrrateadoTotalInversion,
+              costoUnitarioProrrateado: pro.costoUnitarioProrrateado,
+              costoUnitarioResultante: pro.costoUnitarioResultante,
+              existenciasPrevias: pro.existenciasPrevias,
+              gastoUnitarioAplicado: pro.gastoUnitarioAplicado,
+              gastoUnitarioBase: pro.gastoUnitarioBase,
+              inversionLinea: pro.inversionLinea,
+              inversionPrevias: pro.inversionPrevias,
+              nuevasExistencias: pro.nuevasExistencias,
+            };
+          })
+          .sort(
+            (a, b) => dayjs(b.creadoEn).valueOf() - dayjs(a.creadoEn).valueOf(),
+          );
 
         return {
           id: s.id,
@@ -1397,8 +1309,8 @@ export class ProductsService {
           fechaVencimiento: s.fechaVencimiento
             ? dayjs(s.fechaVencimiento).format('DD-MM-YYYY')
             : '',
-          costoUnitario: Number(s.precioCosto ?? 0), // 👈 ESTE es el 50/45 para el UI
-          ...(pr ? { prorrateo: pr } : {}),
+          costoUnitario: Number(s.precioCosto ?? 0), //  50/45 para UI
+          prorrateo: prorrateoInfo,
         };
       };
 
@@ -1412,8 +1324,8 @@ export class ProductsService {
         }),
       );
 
-      // TODOS los lotes
       const stocksAll: StocksProducto[] = stockPres.map(toLite);
+
       const stocksSucursal: StocksProducto[] = stockPres
         .filter((s) => (sucursalId ? s.sucursal?.id === sucursalId : true))
         .map(toLite);
@@ -1446,9 +1358,9 @@ export class ProductsService {
             : '0',
         tipoPresentacion: p.tipoPresentacion ?? null,
         precios,
-        stocks: stocksSucursal, // 👈 solo la sucursal pedida
-        stocksAll, // 👈 NUEVA prop consistente
-        stocksBySucursal, // 👈 agregado con TODOS los lotes
+        stocks: stocksSucursal,
+        stocksAll,
+        stocksBySucursal,
         image,
         images,
         type: 'PRESENTACION',

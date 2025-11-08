@@ -24,6 +24,24 @@ export const productoSelect = {
       fechaIngreso: true,
       precioCosto: true,
       sucursal: { select: { id: true, nombre: true } },
+      prorrateoDetalles: {
+        select: {
+          id: true,
+          gastoUnitarioBase: true,
+          costoFacturaUnitario: true, // cᵢ
+          gastoUnitarioAplicado: true, // a_target = a_base * factor
+          costoUnitarioResultante: true, // uᵢ = cᵢ + a_target
+          inversionLinea: true, // Lᵢ = cantidadTarget * u
+
+          existenciasPrevias: true,
+          inversionPrevias: true,
+          nuevasExistencias: true,
+          costoProrrateadoTotalInversion: true,
+          costoUnitarioProrrateado: true, // promedio ponderado final (lo “core”)
+
+          creadoEn: true,
+        },
+      },
     },
   },
   stockThreshold: { select: { id: true, stockMinimo: true } },
@@ -66,6 +84,24 @@ export const presentacionSelect = {
       costoTotal: true, // si lo vas a mostrar
       precioCosto: true, // si lo vas a mostrar
       sucursal: { select: { id: true, nombre: true } },
+      prorrateoDetalles: {
+        select: {
+          id: true,
+          gastoUnitarioBase: true,
+          costoFacturaUnitario: true, // cᵢ
+          gastoUnitarioAplicado: true, // a_target = a_base * factor
+          costoUnitarioResultante: true, // uᵢ = cᵢ + a_target
+          inversionLinea: true, // Lᵢ = cantidadTarget * u
+
+          existenciasPrevias: true,
+          inversionPrevias: true,
+          nuevasExistencias: true,
+          costoProrrateadoTotalInversion: true,
+          costoUnitarioProrrateado: true, // promedio ponderado final (lo “core”)
+
+          creadoEn: true,
+        },
+      },
     },
   },
   producto: {

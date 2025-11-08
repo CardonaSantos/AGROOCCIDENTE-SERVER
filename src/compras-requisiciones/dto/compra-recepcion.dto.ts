@@ -56,6 +56,8 @@ class MovimientoFinanciero {
   descripcion!: string;
   proveedorId!: number;
 
+  cuentaBancariaId?: number;
+  registroCajaId?: number;
   @IsOptional() // ✅ sólo si clasificacionAdmin === 'GASTO_OPERATIVO'
   gastoOperativoTipo?: GastoOperativoTipo;
 

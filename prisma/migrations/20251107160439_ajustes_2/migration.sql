@@ -1,0 +1,11 @@
+-- AlterTable
+ALTER TABLE "ProrrateoDetalle" ALTER COLUMN "cantidadBase" DROP NOT NULL,
+ALTER COLUMN "cantidadBase" SET DEFAULT 0,
+ALTER COLUMN "valorBase" DROP NOT NULL,
+ALTER COLUMN "valorBase" SET DEFAULT 0,
+ALTER COLUMN "montoAsignado" DROP NOT NULL,
+ALTER COLUMN "montoAsignado" SET DEFAULT 0,
+ALTER COLUMN "precioCostoAntes" DROP NOT NULL,
+ALTER COLUMN "precioCostoAntes" SET DEFAULT 0,
+ALTER COLUMN "precioCostoDesp" DROP NOT NULL,
+ALTER COLUMN "precioCostoDesp" SET DEFAULT 0;

@@ -39,11 +39,13 @@ import { StockBaseDto, StockPresentacionDto } from './interfaces';
 import { MovimientoFinancieroService } from 'src/movimiento-financiero/movimiento-financiero.service';
 import { CrearMovimientoDto } from 'src/movimiento-financiero/dto/crear-movimiento.dto';
 import { CreateMFUtility } from 'src/movimiento-financiero/utilities/createMFDto';
+import { ProrrateoService } from 'src/prorrateo/prorrateo.service';
 dayjs.extend(utc);
 dayjs.extend(timezone);
 dayjs.extend(isSameOrBefore);
 dayjs.extend(isSameOrAfter);
 dayjs.locale('es');
+const N = (x: any) => (Number.isFinite(Number(x)) ? Number(x) : 0);
 
 // Tipo de transacción (ya lo usas)
 type Tx = Prisma.TransactionClient;
@@ -92,6 +94,7 @@ export class PurchaseRequisitionsService {
     private readonly mf: MovimientoFinancieroService,
 
     private readonly tracker: HistorialStockTrackerService,
+    private readonly prorrateo: ProrrateoService,
   ) {}
 
   create(createPurchaseRequisitionDto: CreatePurchaseRequisitionDto) {
@@ -1344,15 +1347,59 @@ export class PurchaseRequisitionsService {
           montoRecepcion,
         );
 
+        if (!mf) {
+          throw new BadRequestException(
+            'Falta el movimiento financiero de costo asociado (mf).',
+          );
+        }
+
+        const metodoMF = mf.metodoPago ?? 'EFECTIVO';
+        const canalMF = this.paymentChannel(metodoMF);
+
+        // Resolver IDs con fallback al top-level del DTO
+        const cuentaBancariaIdMF = mf.cuentaBancariaId ?? dto.cuentaBancariaId;
+        const registroCajaIdMF = mf.registroCajaId ?? dto.registroCajaId;
+
+        if (canalMF === 'BANCO') {
+          if (!Number.isFinite(Number(cuentaBancariaIdMF))) {
+            throw new BadRequestException(
+              'Cuenta bancaria requerida para movimientos bancarios (costo asociado).',
+            );
+          }
+        }
+        if (canalMF === 'CAJA') {
+          // Si no te enviaron registroCajaIdMF, intenta usar el turno abierto como ya haces arriba
+          if (!Number.isFinite(Number(registroCajaIdMF))) {
+            const turno = await tx.registroCaja.findFirst({
+              where: { sucursalId, estado: 'ABIERTO' },
+              select: { id: true },
+            });
+            if (!turno) {
+              throw new BadRequestException(
+                'No hay turno de caja ABIERTO para costo asociado.',
+              );
+            }
+          }
+        }
+
         const dtoMFCostosVentas: CreateMFUtility = {
           usuarioId: dto.usuarioId,
+          proveedorId: dto.proveedorId, // opcional pero recomendado si tu createMovimiento lo usa
           monto: mf.monto,
           motivo: 'COSTO_ASOCIADO',
-          metodoPago: mf.metodoPago,
+          metodoPago: metodoMF,
           descripcion: mf.descripcion,
-          sucursalId: mf.sucursalId,
+          sucursalId: mf.sucursalId ?? sucursalId,
           costoVentaTipo: mf.costoVentaTipo,
           clasificacionAdmin: 'COSTO_VENTA',
+
+          // 🔴 Agregar los IDs correctos
+          cuentaBancariaId: Number.isFinite(Number(cuentaBancariaIdMF))
+            ? Number(cuentaBancariaIdMF)
+            : undefined,
+          registroCajaId: Number.isFinite(Number(registroCajaIdMF))
+            ? Number(registroCajaIdMF)
+            : undefined,
         };
 
         const MFCostosVentas =
@@ -1415,16 +1462,19 @@ export class PurchaseRequisitionsService {
                 '[PRORRATEO] No hay lotes nuevos para prorratear.',
               );
             } else {
-              const prRes = await this.generarProrrateoUnidadesTx(tx, {
-                sucursalId,
-                gastosAsociadosCompra: costoAdicionalTotal,
-                movimientoFinancieroId: MFCostosVentas?.id,
-                comentario: `Prorrateo UNIDADES – Compra #${compra.id} – Entrega #${entregaId}`,
-                newStockIds,
-                newStocksPresIds: newStockPresIds,
-                compraId: compra.id,
-                entregaStockId: entregaId,
-              });
+              const prRes = await this.prorrateo.generarProrrateoUnidadesTx(
+                tx,
+                {
+                  sucursalId,
+                  gastosAsociadosCompra: costoAdicionalTotal,
+                  movimientoFinancieroId: MFCostosVentas?.id,
+                  comentario: `Prorrateo UNIDADES – Compra #${compra.id} – Entrega #${entregaId}`,
+                  newStockIds,
+                  newStocksPresIds: newStockPresIds,
+                  compraId: compra.id,
+                  entregaStockId: entregaId,
+                },
+              );
             }
           } else {
             this.logger.debug(
@@ -1453,300 +1503,6 @@ export class PurchaseRequisitionsService {
       if (e instanceof HttpException) throw e;
       throw new InternalServerErrorException('Fatal error: Error inesperado');
     }
-  }
-
-  // Wrapper público (lo puedes seguir usando fuera de otras transacciones)
-  async generarProrrateoUnidades(dto: DtoGenProrrateo) {
-    return this.prisma.$transaction(async (tx) => {
-      return this.generarProrrateoUnidadesTx(tx, dto);
-    });
-  }
-
-  // Helper real que NO abre transacción; usa la que le pases
-  private async generarProrrateoUnidadesTx(
-    tx: Prisma.TransactionClient,
-    dto: DtoGenProrrateo,
-  ) {
-    this.logger.log(
-      `DTO recibido en generarProrrateoUnidadesTx:\n${JSON.stringify(dto, null, 2)}`,
-    );
-
-    // 0) Idempotencia por MF (usar el mismo tx!)
-    if (dto.movimientoFinancieroId) {
-      const dup = await tx.prorrateo.findUnique({
-        where: { movimientoFinancieroId: dto.movimientoFinancieroId },
-      });
-      if (dup) return dup;
-    }
-
-    const G = Number(dto.gastosAsociadosCompra ?? 0);
-    if (G < 0) throw new Error('gastosAsociadosCompra no puede ser negativo');
-
-    // ==========================
-    // MODO A: por CompraRecepcion
-    // ==========================
-    if (dto.compraRecepcionId) {
-      const recep = await tx.compraRecepcion.findUnique({
-        where: { id: dto.compraRecepcionId },
-        include: {
-          compra: { select: { id: true } },
-          lineas: {
-            select: {
-              id: true,
-              productoId: true,
-              presentacionId: true,
-              cantidadRecibida: true,
-              stockPresentacionId: true,
-              compraDetalle: { select: { costoUnitario: true } },
-            },
-          },
-        },
-      });
-      if (!recep) throw new Error('Recepción no encontrada');
-      if (!recep.lineas.length) throw new Error('Recepción sin líneas');
-
-      const T = recep.lineas.reduce(
-        (s, ln) => s + (ln.cantidadRecibida || 0),
-        0,
-      );
-      if (T <= 0) throw new Error('No hay unidades para prorratear');
-      const a = G / T;
-
-      const pr = await tx.prorrateo.create({
-        data: {
-          sucursalId: dto.sucursalId,
-          metodo: 'UNIDADES',
-          montoTotal: G,
-          compraId: recep.compra?.id ?? dto.compraId ?? null,
-          compraRecepcionId: recep.id,
-          entregaStockId: dto.entregaStockId ?? null,
-          movimientoFinancieroId: dto.movimientoFinancieroId ?? null,
-          comentario: dto.comentario ?? null,
-        },
-      });
-
-      for (const ln of recep.lineas) {
-        const cantidad = ln.cantidadRecibida || 0;
-        if (cantidad <= 0) continue;
-
-        const cFactura = ln.compraDetalle.costoUnitario ?? 0;
-        const u = cFactura + a;
-        const montoAsignado = cantidad * a;
-        const inversionLinea = cantidad * u;
-
-        if (ln.presentacionId) {
-          if (!ln.stockPresentacionId) {
-            throw new Error(
-              `Línea ${ln.id} es presentación pero no tiene stockPresentacionId enlazado.`,
-            );
-          }
-          const before = await tx.stockPresentacion.findUnique({
-            where: { id: ln.stockPresentacionId },
-            select: { precioCosto: true },
-          });
-          await tx.stockPresentacion.update({
-            where: { id: ln.stockPresentacionId },
-            data: { precioCosto: u },
-          });
-          await tx.prorrateoDetalle.create({
-            data: {
-              prorrateoId: pr.id,
-              stockId: null,
-              stockPresentacionId: ln.stockPresentacionId,
-              cantidadBase: cantidad,
-              valorBase: 0,
-              montoAsignado,
-              precioCostoAntes: Number(before?.precioCosto ?? 0),
-              precioCostoDesp: u,
-              gastoUnitarioBase: a,
-              costoFacturaUnitario: cFactura,
-              gastoUnitarioAplicado: a,
-              costoUnitarioResultante: u,
-              inversionLinea,
-            },
-          });
-        } else {
-          const loteBase = await tx.stock.findFirst({
-            where: { compraRecepcionId: recep.id, productoId: ln.productoId! },
-            orderBy: { id: 'desc' },
-            select: { id: true, precioCosto: true },
-          });
-          if (!loteBase) {
-            throw new Error(
-              `No se encontró lote Stock para producto ${ln.productoId} en recepción ${recep.id}`,
-            );
-          }
-          await tx.stock.update({
-            where: { id: loteBase.id },
-            data: { precioCosto: u },
-          });
-          await tx.prorrateoDetalle.create({
-            data: {
-              prorrateoId: pr.id,
-              stockId: loteBase.id,
-              stockPresentacionId: null,
-              cantidadBase: cantidad,
-              valorBase: 0,
-              montoAsignado,
-              precioCostoAntes: Number(loteBase.precioCosto ?? 0),
-              precioCostoDesp: u,
-              gastoUnitarioBase: a,
-              costoFacturaUnitario: cFactura,
-              gastoUnitarioAplicado: a,
-              costoUnitarioResultante: u,
-              inversionLinea,
-            },
-          });
-        }
-      }
-
-      return pr;
-    }
-
-    // ==========================
-    // MODO B: por LOTES NUEVOS
-    // ==========================
-    const baseIds = dto.newStockIds ?? [];
-    const presIds = dto.newStocksPresIds ?? [];
-    if (!baseIds.length && !presIds.length) {
-      throw new Error(
-        'Debes proporcionar compraRecepcionId o newStockIds/newStocksPresIds',
-      );
-    }
-
-    const lotesBase = baseIds.length
-      ? await tx.stock.findMany({
-          where: { id: { in: baseIds } },
-          select: {
-            id: true,
-            cantidadInicial: true,
-            cantidad: true,
-            precioCosto: true,
-            costoTotal: true,
-          },
-        })
-      : [];
-    const lotesPres = presIds.length
-      ? await tx.stockPresentacion.findMany({
-          where: { id: { in: presIds } },
-          select: {
-            id: true,
-            cantidadPresentacion: true,
-            precioCosto: true,
-            costoTotal: true,
-          },
-        })
-      : [];
-
-    const N = (x: any) => (Number.isFinite(Number(x)) ? Number(x) : 0);
-
-    const qtyBaseByLot = lotesBase.map((l) => {
-      const q1 = N(l.cantidadInicial);
-      const q2 = q1 > 0 ? q1 : N(l.cantidad);
-      const q3 =
-        q2 > 0 || !l.precioCosto
-          ? q2
-          : N((l.costoTotal ?? 0) / (l.precioCosto || 1));
-      return { id: l.id, qty: q3, cFactura: N(l.precioCosto) };
-    });
-
-    const qtyPresByLot = lotesPres.map((l) => {
-      const q1 = N(l.cantidadPresentacion);
-      const q3 =
-        q1 > 0 || !l.precioCosto
-          ? q1
-          : N((l.costoTotal ?? 0) / (l.precioCosto || 1));
-      return { id: l.id, qty: q3, cFactura: N(l.precioCosto) };
-    });
-
-    const Tbase = qtyBaseByLot.reduce((s, x) => s + x.qty, 0);
-    const Tpres = qtyPresByLot.reduce((s, x) => s + x.qty, 0);
-    const T = Tbase + Tpres;
-    this.logger.debug(`[PRORRATEO] Tbase=${Tbase} Tpres=${Tpres} T=${T}`);
-    if (T <= 0)
-      throw new Error('No hay unidades en los lotes nuevos para prorratear');
-
-    const a = N(G) / T;
-
-    const pr = await tx.prorrateo.create({
-      data: {
-        sucursalId: dto.sucursalId,
-        metodo: 'UNIDADES',
-        montoTotal: N(G),
-        compraId: dto.compraId ?? null,
-        compraRecepcionId: dto.compraRecepcionId ?? null,
-        entregaStockId: dto.entregaStockId ?? null,
-        movimientoFinancieroId: dto.movimientoFinancieroId ?? null,
-        comentario: dto.comentario ?? null,
-      },
-    });
-
-    for (const l of qtyBaseByLot) {
-      if (l.qty <= 0) continue;
-      const u = l.cFactura + a;
-      const montoAsignado = l.qty * a;
-      const inversionLinea = l.qty * u;
-
-      const before = await tx.stock.findUnique({
-        where: { id: l.id },
-        select: { precioCosto: true },
-      });
-      await tx.stock.update({ where: { id: l.id }, data: { precioCosto: u } });
-
-      await tx.prorrateoDetalle.create({
-        data: {
-          prorrateoId: pr.id,
-          stockId: l.id,
-          stockPresentacionId: null,
-          cantidadBase: l.qty,
-          valorBase: 0,
-          montoAsignado,
-          precioCostoAntes: N(before?.precioCosto),
-          precioCostoDesp: u,
-          gastoUnitarioBase: a,
-          costoFacturaUnitario: l.cFactura,
-          gastoUnitarioAplicado: a,
-          costoUnitarioResultante: u,
-          inversionLinea,
-        },
-      });
-    }
-
-    for (const l of qtyPresByLot) {
-      if (l.qty <= 0) continue;
-      const u = l.cFactura + a;
-      const montoAsignado = l.qty * a;
-      const inversionLinea = l.qty * u;
-
-      const before = await tx.stockPresentacion.findUnique({
-        where: { id: l.id },
-        select: { precioCosto: true },
-      });
-      await tx.stockPresentacion.update({
-        where: { id: l.id },
-        data: { precioCosto: u },
-      });
-
-      await tx.prorrateoDetalle.create({
-        data: {
-          prorrateoId: pr.id,
-          stockId: null,
-          stockPresentacionId: l.id,
-          cantidadBase: l.qty,
-          valorBase: 0,
-          montoAsignado,
-          precioCostoAntes: N(before?.precioCosto),
-          precioCostoDesp: u,
-          gastoUnitarioBase: a,
-          costoFacturaUnitario: l.cFactura,
-          gastoUnitarioAplicado: a,
-          costoUnitarioResultante: u,
-          inversionLinea,
-        },
-      });
-    }
-
-    return pr;
   }
 
   /**

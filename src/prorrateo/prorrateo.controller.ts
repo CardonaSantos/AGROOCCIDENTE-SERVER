@@ -32,6 +32,13 @@ export class ProrrateoController {
   findAll(@Query() q: ListProrrateoDto) {
     return this.prorrateoService.findAll(q);
   }
+
+  /** Listado con filtros/paginación */
+  @Get('get-raw-prorrateos')
+  findAllRawRegist() {
+    return this.prorrateoService.findAllRawRegist();
+  }
+
   /**
    * Stocks con existencias (>0) y resumen de prorrateo:
    * - suma de `montoAsignado`

@@ -2549,12 +2549,12 @@ model ProrrateoDetalle {
   stockPresentacionId Int?
   stockPresentacion   StockPresentacion? @relation("StockPresToProrrateoDetalles", fields: [stockPresentacionId], references: [id], onDelete: SetNull)
 
-  cantidadBase  Int
-  valorBase     Float
-  montoAsignado Float
+  cantidadBase  Int?  @default(0)
+  valorBase     Float? @default(0)
+  montoAsignado Float? @default(0)
 
-  precioCostoAntes Float
-  precioCostoDesp  Float
+  precioCostoAntes Float? @default(0)
+  precioCostoDesp  Float? @default(0)
 
   // NUEVOS (para reconstruir Excel sin recalcular)
   gastoUnitarioBase      Float?  // a_base = G/T (por unidad base)
@@ -2562,6 +2562,12 @@ model ProrrateoDetalle {
   gastoUnitarioAplicado  Float?  // a_target = a_base * factor
   costoUnitarioResultante Float? // uᵢ = cᵢ + a_target
   inversionLinea         Float?  // Lᵢ = cantidadTarget * u
+
+  existenciasPrevias             Int?
+  inversionPrevias               Float?
+  nuevasExistencias              Int?
+  costoProrrateadoTotalInversion Float?
+  costoUnitarioProrrateado       Float?  // promedio ponderado final (lo “core”)
 
   creadoEn DateTime @default(now())
   

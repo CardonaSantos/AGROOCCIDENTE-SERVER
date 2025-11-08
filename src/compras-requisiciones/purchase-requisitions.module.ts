@@ -5,15 +5,14 @@ import { PrismaService } from 'src/prisma/prisma.service';
 import { UtilitiesService } from 'src/utilities/utilities.service';
 import { HistorialStockTrackerService } from 'src/historial-stock-tracker/historial-stock-tracker.service';
 import { MovimientoFinancieroModule } from 'src/movimiento-financiero/movimiento-financiero.module';
+import { ProrrateoModule } from 'src/prorrateo/prorrateo.module';
 
 @Module({
-  imports: [MovimientoFinancieroModule],
-
+  imports: [MovimientoFinancieroModule, ProrrateoModule],
   controllers: [PurchaseRequisitionsController],
   providers: [
     PurchaseRequisitionsService,
     PrismaService,
-
     UtilitiesService,
     HistorialStockTrackerService,
   ],

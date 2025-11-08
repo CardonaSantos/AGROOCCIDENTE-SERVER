@@ -7,5 +7,6 @@ import { PrismaModule } from 'src/prisma/prisma.module';
   imports: [PrismaModule],
   controllers: [ProrrateoController],
   providers: [ProrrateoService],
+  exports: [ProrrateoService],
 })
 export class ProrrateoModule {}

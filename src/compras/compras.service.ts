@@ -58,7 +58,9 @@ export class ComprasService {
 
   async create(dto: CreateCompraDto) {
     try {
-      this.logger.log(`DTO recibido:\n${JSON.stringify(dto, null, 2)}`);
+      this.logger.log(
+        `DTO recibido en recepcionar compra parcial:\n${JSON.stringify(dto, null, 2)}`,
+      );
 
       const { compraId, lineas, observaciones, usuarioId, sucursalId } = dto;
 
