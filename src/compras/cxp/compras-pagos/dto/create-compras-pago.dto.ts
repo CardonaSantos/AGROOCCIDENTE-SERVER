@@ -14,45 +14,87 @@ import {
   ArrayNotEmpty,
   IsIn,
   Min,
+  IsBoolean,
+  IsNumber,
 } from 'class-validator';
 
 const DECIMAL_14_2 = /^\d{1,12}(\.\d{1,2})?$/; // @db.Decimal(14,2)
 
 // ---------------- Recepción anidada ----------------
 export class CreateRecepcionItemDto {
-  @Type(() => Number)
-  @IsInt()
-  @IsPositive()
-  compraDetalleId!: number;
+  @Type(() => Number) @IsInt() @IsPositive() compraDetalleId!: number;
+  @Type(() => Number) @IsInt() @IsPositive() refId!: number;
+  @IsIn(['PRESENTACION', 'PRODUCTO']) tipo!: 'PRESENTACION' | 'PRODUCTO';
+  @Type(() => Number) @IsInt() @Min(1) cantidad!: number;
+  @IsOptional() @IsISO8601({ strict: true }) fechaVencimientoISO?:
+    | string
+    | null;
 
+  // si quieres permitir costo puntual por ítem (opcional)
+  @IsOptional()
   @Type(() => Number)
-  @IsInt()
-  @IsPositive()
-  refId!: number;
+  @IsNumber({ maxDecimalPlaces: 4 })
+  precioCosto?: number;
+}
 
-  @IsIn(['PRESENTACION', 'PRODUCTO'])
-  tipo!: 'PRESENTACION' | 'PRODUCTO';
+export class RecepcionMfCostoDto {
+  @Type(() => Number) @IsInt() @IsPositive() sucursalId!: number;
+  @Type(() => Number) @IsInt() @IsPositive() proveedorId!: number;
 
-  @Type(() => Number)
-  @IsInt()
-  @Min(1)
-  cantidad!: number;
+  @IsEnum(['EFECTIVO', 'TRANSFERENCIA', 'TARJETA', 'CHEQUE'] as const)
+  metodoPago!: 'EFECTIVO' | 'TRANSFERENCIA' | 'TARJETA' | 'CHEQUE';
+
+  @IsEnum(['FLETE', 'SEGURO', 'OTRO'] as const)
+  costoVentaTipo!: 'FLETE' | 'SEGURO' | 'OTRO';
+
+  @Type(() => Number) @IsNumber() monto!: number;
 
   @IsOptional()
-  @IsISO8601({ strict: true })
-  fechaVencimientoISO?: string | null;
+  @Type(() => Number)
+  @IsInt()
+  @IsPositive()
+  cuentaBancariaId?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @IsPositive()
+  registroCajaId?: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  descripcion?: string;
+}
+
+export class RecepcionProrrateoFlagsDto {
+  @IsBoolean() aplicar!: boolean; // <- con esto basta
+  @IsOptional()
+  @IsEnum(['UNIDADES'] as const)
+  base?: 'UNIDADES';
+  @IsOptional()
+  @IsBoolean()
+  incluirAntiguos?: boolean;
 }
 
 export class CreateRecepcionDesdeCreditoDto {
-  @Type(() => Number)
-  @IsInt()
-  @IsPositive()
-  compraId!: number;
+  @Type(() => Number) @IsInt() @IsPositive() compraId!: number;
 
   @ArrayNotEmpty()
   @ValidateNested({ each: true })
   @Type(() => CreateRecepcionItemDto)
   items!: CreateRecepcionItemDto[];
+
+  // === NUEVO: ambos opcionales ===
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => RecepcionMfCostoDto)
+  mf?: RecepcionMfCostoDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => RecepcionProrrateoFlagsDto)
+  prorrateo?: RecepcionProrrateoFlagsDto;
 }
 
 // --------------- Pago + Recepción (unificado) ---------------
@@ -136,6 +178,7 @@ export class CreateComprasPagoConRecepcionDto {
   comprobanteUrl?: string;
 
   // ---- NUEVO: bloque recepcion opcional ----
+
   @IsOptional()
   @ValidateNested()
   @Type(() => CreateRecepcionDesdeCreditoDto)

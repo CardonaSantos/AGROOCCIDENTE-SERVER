@@ -19,6 +19,7 @@ export class ComprasPagosController {
   create(@Body() createComprasPagoDto: CreateComprasPagoConRecepcionDto) {
     return this.comprasPagosService.create(createComprasPagoDto);
   }
+
   @Get('get-detalles-productos-recepcion/:id')
   getProductosLineas(@Param('id', ParseIntPipe) id: number) {
     return this.comprasPagosService.getDetallesConRecepcion(id);

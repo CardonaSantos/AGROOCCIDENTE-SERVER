@@ -25,6 +25,7 @@ import {
   CreateComprasPagoConRecepcionDto,
   CreateRecepcionItemDto,
 } from './dto/create-compras-pago.dto';
+import { ProrrateoService } from 'src/prorrateo/prorrateo.service';
 dayjs.extend(customParseFormat);
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -39,6 +40,7 @@ export class ComprasPagosService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly mf: MovimientoFinancieroService,
+    private readonly prorrateo: ProrrateoService,
   ) {}
 
   /**
@@ -47,7 +49,9 @@ export class ComprasPagosService {
    * @returns Registro de pago a una cuota
    */
   async create(dto: CreateComprasPagoConRecepcionDto) {
-    this.logger.log(`DTO recibido:\n${JSON.stringify(dto, null, 2)}`);
+    this.logger.log(
+      `DTO recibido en pago cuota credito compra:\n${JSON.stringify(dto, null, 2)}`,
+    );
 
     try {
       // Requeridos mínimos (fechaPago es opcional en tu DTO)
@@ -292,7 +296,55 @@ export class ComprasPagosService {
           // - Por ahora, lo dejamos como metadata en movimiento/pago vía `referencia` y `observaciones`.
           // - Si más adelante añades tabla de comprobantes, se inserta aquí.
           this.logger.log('Llamando al registro de create stock credito ');
-          await this.creatStockFromCompraCreditoParcial(tx, dto);
+          const recv = await this.creatStockFromCompraCreditoParcial(tx, dto);
+
+          // Si hay costo asociado y se pidió prorratear, lo hacemos ahora
+          if (
+            recv &&
+            dto.recepcion?.prorrateo?.aplicar &&
+            dto.recepcion?.mf?.monto! > 0
+          ) {
+            // 1) Movimiento financiero del costo asociado (separado del pago de la cuota)
+            const mfCosto = await this.mf.createMovimiento(
+              {
+                sucursalId: dto.recepcion.mf!.sucursalId,
+                usuarioId: registradoPorId,
+                proveedorId:
+                  (
+                    await tx.cxPDocumento.findUnique({
+                      where: { id: documentoId },
+                      select: { proveedorId: true },
+                    })
+                  )?.proveedorId ?? undefined,
+                motivo: 'COSTO_ASOCIADO',
+                clasificacionAdmin: 'COSTO_VENTA',
+                metodoPago: dto.recepcion.mf!.metodoPago as any,
+                costoVentaTipo: dto.recepcion.mf!.costoVentaTipo as any,
+                monto: dto.recepcion.mf!.monto,
+                descripcion:
+                  dto.recepcion.mf!.descripcion ??
+                  `Costo asociado compra #${dto.recepcion.compraId} – Recepción #${recv.recepcionId}`,
+                cuentaBancariaId: dto.recepcion.mf!.cuentaBancariaId,
+                registroCajaId: dto.recepcion.mf!.registroCajaId,
+              },
+              { tx },
+            );
+
+            // 2) PRORRATEO — prioriza Modo A y pasa ids como fallback Modo B
+            await this.prorrateo.generarProrrateoUnidadesTx(tx, {
+              sucursalId: dto.sucursalId,
+              compraId: dto.recepcion.compraId,
+              compraRecepcionId: recv.recepcionId, // 👈 Modo A
+              gastosAsociadosCompra: dto.recepcion.mf!.monto,
+              movimientoFinancieroId: mfCosto.id, // idempotencia
+              comentario: `Prorrateo UNIDADES – Compra #${dto.recepcion.compraId} – Recepción #${recv.recepcionId}`,
+              newStockIds: recv.newStockIds, // 👈 fallback Modo B
+              newStocksPresIds: recv.newStocksPresIds, // 👈 fallback Modo B
+              // Si más adelante honras base/incluirAntiguos:
+              // base: dto.recepcion.prorrateo?.base,
+              // incluirAntiguos: dto.recepcion.prorrateo?.incluirAntiguos ?? false,
+            });
+          }
 
           return {
             pago,
@@ -576,46 +628,33 @@ export class ComprasPagosService {
     const { recepcion, sucursalId, documentoId, registradoPorId } = dto;
     if (!recepcion || !recepcion.items?.length) return null;
 
-    // 1) Header de recepción
     const header = await tx.compraRecepcion.create({
       data: {
         compraId: recepcion.compraId,
-        usuarioId: registradoPorId, // o el usuario en sesión
+        usuarioId: registradoPorId,
         fecha: new Date(),
         observaciones: `Recepción generada desde pago de documento #${documentoId}`,
       },
+      select: { id: true },
     });
 
-    // 2) Procesar líneas
+    const newStockIds: number[] = [];
+    const newStocksPresIds: number[] = [];
+
     for (const p of recepcion.items) {
       const fechaVenc = p.fechaVencimientoISO
         ? new Date(p.fechaVencimientoISO)
         : null;
 
       if (p.tipo === 'PRODUCTO') {
-        // a) validar producto
         const prod = await tx.producto.findUnique({
           where: { id: p.refId },
           select: { id: true, precioCostoActual: true },
         });
-        if (!prod) {
-          throw new Error(`Producto con ID ${p.refId} no encontrado`);
-        }
+        if (!prod) throw new Error(`Producto ${p.refId} no encontrado`);
 
-        // b) crear stock
-        await tx.stock.create({
-          data: {
-            producto: { connect: { id: prod.id } },
-            cantidad: p.cantidad,
-            precioCosto: prod.precioCostoActual,
-            costoTotal: prod.precioCostoActual * p.cantidad,
-            fechaIngreso: new Date(),
-            sucursal: { connect: { id: sucursalId } },
-          },
-        });
-
-        // c) línea de recepción (sirve para sumar “recibido”)
-        await tx.compraRecepcionLinea.create({
+        // línea de recepción (PRODUCTO)
+        const linea = await tx.compraRecepcionLinea.create({
           data: {
             compraRecepcionId: header.id,
             compraDetalleId: p.compraDetalleId,
@@ -623,76 +662,80 @@ export class ComprasPagosService {
             cantidadRecibida: p.cantidad,
             fechaExpiracion: fechaVenc,
           },
+          select: { id: true },
+        });
+
+        // lote base vinculado a la cabecera
+        const stock = await tx.stock.create({
+          data: {
+            producto: { connect: { id: prod.id } },
+            sucursal: { connect: { id: sucursalId } },
+            cantidadInicial: p.cantidad,
+            cantidad: p.cantidad,
+            precioCosto: p.precioCosto ?? prod.precioCostoActual,
+            costoTotal: (p.precioCosto ?? prod.precioCostoActual) * p.cantidad,
+            fechaIngreso: new Date(),
+            fechaVencimiento: fechaVenc,
+            compraRecepcion: { connect: { id: header.id } },
+          },
+          select: { id: true },
+        });
+
+        newStockIds.push(stock.id);
+
+        //  para PRODUCTO:
+        await tx.compraRecepcionLinea.update({
+          where: { id: linea.id },
+          data: { stockId: stock.id },
         });
       }
 
       if (p.tipo === 'PRESENTACION') {
-        // a) validar presentacion y producto padre
         const pres = await tx.productoPresentacion.findUnique({
           where: { id: p.refId },
-          select: {
-            id: true,
-            productoId: true,
-          },
+          select: { id: true, productoId: true },
         });
+        if (!pres) throw new Error(`Presentación ${p.refId} no encontrada`);
 
-        if (!pres) {
-          throw new Error(`Presentación con ID ${p.refId} no encontrada`);
-        }
-
-        // b) crear stock de presentación
         const sp = await tx.stockPresentacion.create({
           data: {
             producto: { connect: { id: pres.productoId } },
             presentacion: { connect: { id: pres.id } },
             sucursal: { connect: { id: sucursalId } },
-            cantidadRecibidaInicial: p.cantidad, // # de presentaciones recibidas
-            cantidadPresentacion: p.cantidad, // unidades por presentación (factor)
+            cantidadRecibidaInicial: p.cantidad,
+            cantidadPresentacion: p.cantidad,
             fechaIngreso: new Date(),
             fechaVencimiento: fechaVenc,
-            compraRecepcion: { connect: { id: header.id } }, // traza recibo
+            compraRecepcion: { connect: { id: header.id } },
           },
+          select: { id: true },
         });
 
-        // c) línea de recepción (ligada al lote de presentación)
+        newStocksPresIds.push(sp.id);
+
         await tx.compraRecepcionLinea.create({
           data: {
-            compraRecepcion: {
-              connect: {
-                id: header.id,
-              },
-            },
-            compraDetalle: {
-              connect: {
-                id: p.compraDetalleId,
-              },
-            },
-            presentacion: {
-              connect: {
-                id: pres.id,
-              },
-            },
+            compraRecepcionId: header.id,
+            compraDetalleId: p.compraDetalleId,
+            presentacionId: pres.id,
+            productoId: pres.productoId,
             cantidadRecibida: p.cantidad,
             fechaExpiracion: fechaVenc,
-            stockPresentacion: { connect: { id: sp.id } },
+            stockPresentacionId: sp.id,
           },
         });
       }
     }
 
-    // 3) (Opcional) asociar recepción al documento
     await tx.cxPDocumentoRecepcion.upsert({
       where: {
-        documentoId_recepcionId: {
-          documentoId,
-          recepcionId: header.id,
-        },
+        documentoId_recepcionId: { documentoId, recepcionId: header.id },
       },
       create: { documentoId, recepcionId: header.id },
       update: {},
     });
 
-    return header; // => { id: number, ... }
+    return { recepcionId: header.id, newStockIds, newStocksPresIds };
   }
 
   async createProductsStocks(

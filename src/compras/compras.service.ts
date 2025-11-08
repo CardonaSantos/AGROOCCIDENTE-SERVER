@@ -47,6 +47,8 @@ type StockLineaPresentacionPayload = {
 };
 
 type StockLineaProductoPayload = {
+  lineaId?: number; // 👈 nuevo
+
   productoId: number;
   cantidad: number;
   fechaVencimiento: string | null;
@@ -188,6 +190,7 @@ export class ComprasService {
               });
 
               payloadProd.push({
+                lineaId: linea.id,
                 productoId,
                 cantidad: l.cantidadRecibida,
                 fechaVencimiento: l.fechaExpiracion ?? null,
@@ -226,13 +229,11 @@ export class ComprasService {
           dto.mf.motivo === 'COSTO_ASOCIADO' &&
           Number(dto.mf.monto) > 0
         ) {
-          // Validaciones rápidas del canal de pago
           const metodo = dto.mf.metodoPago;
-          const isBanco =
-            metodo === 'TRANSFERENCIA' ||
-            metodo === 'TARJETA' ||
-            metodo === 'CHEQUE';
-          const isCaja = metodo === 'EFECTIVO' || metodo === 'CONTADO';
+          const isBanco = ['TRANSFERENCIA', 'TARJETA', 'CHEQUE'].includes(
+            metodo,
+          );
+          const isCaja = ['EFECTIVO', 'CONTADO'].includes(metodo);
 
           if (isBanco && !dto.mf.cuentaBancariaId) {
             throw new BadRequestException(
@@ -245,7 +246,6 @@ export class ComprasService {
             );
           }
 
-          // Usa tu servicio utilitario para MF (el mismo que en recepción total)
           const mfDto = {
             usuarioId: dto.usuarioId,
             monto: Number(dto.mf.monto),
@@ -253,15 +253,16 @@ export class ComprasService {
             metodoPago: metodo,
             descripcion: dto.mf.descripcion,
             sucursalId: dto.mf.sucursalId ?? sucId,
-            costoVentaTipo: dto.mf.costoVentaTipo, // 'FLETE' etc.
+            costoVentaTipo: dto.mf.costoVentaTipo,
             clasificacionAdmin: 'COSTO_VENTA' as const,
             proveedorId: dto.mf.proveedorId ?? null,
             cuentaBancariaId: dto.mf.cuentaBancariaId,
             registroCajaId: dto.mf.registroCajaId,
-            afectaInventario: false,
+            afectaInventario: true,
           };
 
-          const mfCreado = await this.mf.createMovimiento(mfDto); // <- tu helper existente
+          // 👇 MUY importante: en la misma transacción
+          const mfCreado = await this.mf.createMovimiento(mfDto, { tx });
           mfRecord = { id: mfCreado.id };
         }
 
@@ -271,24 +272,20 @@ export class ComprasService {
           Number(dto.mf?.monto ?? 0) > 0;
 
         if (aplicar) {
-          // Prepara los IDs de lotes recién creados
-          const newStockIds = (stocksProd ?? []).map((s: any) =>
-            typeof s === 'number' ? s : s.id,
-          );
-          const newStocksPresIds = (stocksPres ?? []).map((s: any) =>
-            typeof s === 'number' ? s : s.id,
-          );
+          const newStockIds = (stocksProd ?? []).map((s) => s.id);
+          const newStocksPresIds = (stocksPres ?? []).map((s) => s.id);
 
-          // Lanza prorrateo en MODO B (por lotes nuevos)
           await this.prorrateo.generarProrrateoUnidadesTx(tx, {
             sucursalId: sucId,
+            compraId,
+            compraRecepcionId: cab.id, // 👈 Modo A
             gastosAsociadosCompra: Number(dto.mf!.monto),
             movimientoFinancieroId: mfRecord?.id ?? null,
             comentario: `Prorrateo UNIDADES – Compra #${compraId} – Recepción #${cab.id}`,
+
+            // fallback si algún día decides forzar Modo B:
             newStockIds,
             newStocksPresIds,
-            compraId,
-            compraRecepcionId: cab.id, // opcional; MODO B usa lotes, pero no estorba
           });
         }
 
@@ -361,21 +358,17 @@ export class ComprasService {
     tx: Prisma.TransactionClient,
     items: StockLineaProductoPayload[],
     sucursalId: number,
-    recepcionId?: number, //
+    recepcionId: number,
   ) {
     this.logger.log('El payload cargado a create productos stock es: ', items);
-
     if (!items.length) return [];
 
     const created = await Promise.all(
-      items.map((it) =>
-        tx.stock.create({
+      items.map(async (it) => {
+        const stock = await tx.stock.create({
           data: {
             producto: { connect: { id: it.productoId } },
             sucursal: { connect: { id: sucursalId } },
-            ...(recepcionId
-              ? { compraRecepcion: { connect: { id: recepcionId } } }
-              : {}),
             cantidadInicial: it.cantidad,
             cantidad: it.cantidad,
             precioCosto: it.precioCosto,
@@ -384,10 +377,22 @@ export class ComprasService {
             fechaVencimiento: it.fechaVencimiento
               ? dayjs(it.fechaVencimiento).tz(TZGT).startOf('day').toDate()
               : null,
+            // 👇 enlaza el lote a la recepción (requisito Modo A)
+            compraRecepcion: { connect: { id: recepcionId } },
           },
           select: { id: true },
-        }),
-      ),
+        });
+
+        // Si migraste tu esquema con `CompraRecepcionLinea.stockId`:
+        if (it.lineaId) {
+          await tx.compraRecepcionLinea.update({
+            where: { id: it.lineaId },
+            data: { stockId: stock.id }, // 👈 relación 1–1 en líneas de PRODUCTO
+          });
+        }
+
+        return stock;
+      }),
     );
 
     return created;

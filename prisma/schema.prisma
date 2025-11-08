@@ -559,6 +559,8 @@ model Stock {
 
   // Back-rel de detalles de prorrateo (opuesto de ProrrateoDetalle.stock)
   prorrateoDetalles ProrrateoDetalle[] @relation("StockToProrrateoDetalles")
+
+  compraRecepcionLineas CompraRecepcionLinea[]
 }
 
 model EntregaStock {
@@ -1919,6 +1921,8 @@ model CompraRecepcionLinea {
   cantidadRecibida Int
   fechaExpiracion  DateTime?
 
+  stockId Int?    @unique
+  stock   Stock?  @relation(fields: [stockId], references: [id], onDelete: SetNull)
   // === UNO-A-UNO con StockPresentacion ===
   stockPresentacionId Int?               @unique
   stockPresentacion   StockPresentacion? @relation("LineaToStockPresentacion", fields: [stockPresentacionId], references: [id], onDelete: SetNull)
