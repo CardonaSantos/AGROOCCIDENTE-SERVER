@@ -1263,58 +1263,92 @@ export class CajaService {
     });
     if (!venta) throw new NotFoundException('Venta no encontrada');
 
-    const metodo = venta.metodoPago?.metodoPago ?? 'EFECTIVO'; // default más neutro
-    const esEfectivo = metodo === 'EFECTIVO' || metodo === 'CONTADO'; // ← tolera ambos
+    const metodo = venta.metodoPago?.metodoPago ?? 'EFECTIVO';
+    const esEfectivo = metodo === 'EFECTIVO' || metodo === 'CONTADO';
     const esCredito = metodo === 'CREDITO';
 
-    // 1) turno solo si vamos a tocar caja (efectivo)
+    // 1) Buscar turno SOLO si pretendemos tocar caja (efectivo)
     let turno: { id: number } | null = null;
     if (esEfectivo) {
       turno = await tx.registroCaja.findFirst({
         where: {
           sucursalId,
-          usuarioInicioId: usuarioId, // ← filtro por usuario
+          usuarioInicioId: usuarioId,
           estado: 'ABIERTO',
           fechaCierre: null,
         },
         orderBy: { fechaApertura: 'desc' },
         select: { id: true },
       });
+
       if (!turno && exigirCajaSiEfectivo) {
+        // ⛔ Sólo error si la política exige caja
         throw new BadRequestException(
           'No tienes una caja abierta en esta sucursal para registrar la venta en efectivo.',
         );
       }
     }
 
-    // 2) En crédito NO linkees turno (evita que aparezca en arqueos)
-    if (!esCredito && turno) {
+    // 2) Link a turno sólo si NO es crédito y SÍ hay turno
+    const shouldLinkCaja = !esCredito && !!turno;
+    if (shouldLinkCaja) {
       await tx.venta.updateMany({
         where: { id: venta.id, registroCajaId: null },
-        data: { registroCajaId: turno.id },
+        data: { registroCajaId: turno!.id },
       });
     }
 
-    // 3) MF solo si NO es crédito y totalVenta > 0
+    // 3) Movimiento financiero (no para crédito)
+    // if (!esCredito && venta.totalVenta > 0) {
+    //   const afectaCaja = esEfectivo && !!turno; // sólo si hay turno
+    //   const deltaCaja = afectaCaja ? venta.totalVenta : 0;
+    //   const deltaBanco = !esEfectivo ? venta.totalVenta : 0;
+
+    //   await tx.movimientoFinanciero.create({
+    //     data: {
+    //       fecha: new Date(),
+    //       sucursalId,
+    //       registroCajaId: afectaCaja ? turno!.id : null,
+    //       clasificacion: 'INGRESO',
+    //       motivo: 'VENTA',
+    //       metodoPago: metodo, // usa el método real
+    //       deltaCaja,
+    //       deltaBanco,
+    //       descripcion: `Venta #${venta.id}`,
+    //       referencia: venta.referenciaPago ?? null,
+    //       usuarioId: usuarioId ?? venta.usuarioId,
+    //       esDepositoCierre: false,
+    //       esDepositoProveedor: false,
+    //       afectaInventario: false,
+    //     },
+    //   });
+    // }
+
     if (!esCredito && venta.totalVenta > 0) {
-      await tx.movimientoFinanciero.create({
-        data: {
-          fecha: new Date(),
-          sucursalId,
-          registroCajaId: esEfectivo ? (turno?.id ?? null) : null,
-          clasificacion: 'INGRESO',
-          motivo: 'VENTA',
-          metodoPago: esEfectivo ? 'EFECTIVO' : 'TRANSFERENCIA', // ← usa el enum de MF
-          deltaCaja: esEfectivo ? venta.totalVenta : 0,
-          deltaBanco: esEfectivo ? 0 : venta.totalVenta,
-          descripcion: `Venta #${venta.id}`,
-          referencia: venta.referenciaPago ?? null,
-          usuarioId: usuarioId ?? venta.usuarioId,
-          esDepositoCierre: false,
-          esDepositoProveedor: false,
-          afectaInventario: false,
-        },
-      });
+      const afectaCaja = esEfectivo && !!turno;
+      const deltaCaja = afectaCaja ? venta.totalVenta : 0;
+      const deltaBanco = !esEfectivo ? venta.totalVenta : 0;
+
+      if (deltaCaja > 0 || deltaBanco > 0) {
+        await tx.movimientoFinanciero.create({
+          data: {
+            fecha: new Date(),
+            sucursalId,
+            registroCajaId: afectaCaja ? turno!.id : null,
+            clasificacion: 'INGRESO',
+            motivo: 'VENTA',
+            metodoPago: metodo,
+            deltaCaja,
+            deltaBanco,
+            descripcion: `Venta #${venta.id}`,
+            referencia: venta.referenciaPago ?? null,
+            usuarioId: usuarioId ?? venta.usuarioId,
+            esDepositoCierre: false,
+            esDepositoProveedor: false,
+            afectaInventario: false,
+          },
+        });
+      }
     }
 
     return { ventaId: venta.id, registroCajaId: turno?.id ?? null };

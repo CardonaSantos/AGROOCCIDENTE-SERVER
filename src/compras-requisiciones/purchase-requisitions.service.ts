@@ -872,8 +872,6 @@ export class PurchaseRequisitionsService {
       );
 
       return await this.prisma.$transaction(async (tx) => {
-        const { mf } = dto;
-
         // 0) Compra + detalles + presentaciones
         const compra = await tx.compra.findUnique({
           where: { id: dto.compraId },
@@ -994,16 +992,14 @@ export class PurchaseRequisitionsService {
           cantidad: number;
           costoUnitario: number;
         }): Promise<number | null> => {
-          if (det.presentacionId) return det.presentacionId; // a) ya viene
+          if (det.presentacionId) return det.presentacionId;
           if (det.requisicionLineaId) {
-            // b) desde requisición
             const rl = await tx.requisicionLinea.findUnique({
               where: { id: det.requisicionLineaId },
               select: { presentacionId: true },
             });
             if (rl?.presentacionId) return rl.presentacionId;
           }
-          // c) desde pedido
           if (compra.pedido?.lineas?.length) {
             const matches = compra.pedido.lineas.filter(
               (pl) =>
@@ -1014,7 +1010,7 @@ export class PurchaseRequisitionsService {
             );
             if (matches.length === 1) return matches[0].presentacionId!;
           }
-          return null; // d) sin match
+          return null;
         };
 
         // ===== 3) Procesar cada detalle
@@ -1347,29 +1343,32 @@ export class PurchaseRequisitionsService {
           montoRecepcion,
         );
 
-        if (!mf) {
-          throw new BadRequestException(
-            'Falta el movimiento financiero de costo asociado (mf).',
-          );
-        }
+        // --- Costo asociado (OPCIONAL) ---
+        let MFCostosVentas: { id: number } | null = null;
+        const mfPayload = dto.mf;
+        const hasMF = !!mfPayload && Number(mfPayload.monto) > 0;
 
-        const metodoMF = mf.metodoPago ?? 'EFECTIVO';
-        const canalMF = this.paymentChannel(metodoMF);
+        if (hasMF) {
+          const metodoMF = mfPayload.metodoPago ?? 'EFECTIVO';
+          const canalMF = this.paymentChannel(metodoMF);
 
-        // Resolver IDs con fallback al top-level del DTO
-        const cuentaBancariaIdMF = mf.cuentaBancariaId ?? dto.cuentaBancariaId;
-        const registroCajaIdMF = mf.registroCajaId ?? dto.registroCajaId;
+          const cuentaBancariaIdMF =
+            mfPayload.cuentaBancariaId ?? dto.cuentaBancariaId;
+          const registroCajaIdMF =
+            mfPayload.registroCajaId ?? dto.registroCajaId;
 
-        if (canalMF === 'BANCO') {
-          if (!Number.isFinite(Number(cuentaBancariaIdMF))) {
+          if (
+            canalMF === 'BANCO' &&
+            !Number.isFinite(Number(cuentaBancariaIdMF))
+          ) {
             throw new BadRequestException(
               'Cuenta bancaria requerida para movimientos bancarios (costo asociado).',
             );
           }
-        }
-        if (canalMF === 'CAJA') {
-          // Si no te enviaron registroCajaIdMF, intenta usar el turno abierto como ya haces arriba
-          if (!Number.isFinite(Number(registroCajaIdMF))) {
+          if (
+            canalMF === 'CAJA' &&
+            !Number.isFinite(Number(registroCajaIdMF))
+          ) {
             const turno = await tx.registroCaja.findFirst({
               where: { sucursalId, estado: 'ABIERTO' },
               select: { id: true },
@@ -1380,31 +1379,27 @@ export class PurchaseRequisitionsService {
               );
             }
           }
-        }
 
-        const dtoMFCostosVentas: CreateMFUtility = {
-          usuarioId: dto.usuarioId,
-          proveedorId: dto.proveedorId, // opcional pero recomendado si tu createMovimiento lo usa
-          monto: mf.monto,
-          motivo: 'COSTO_ASOCIADO',
-          metodoPago: metodoMF,
-          descripcion: mf.descripcion,
-          sucursalId: mf.sucursalId ?? sucursalId,
-          costoVentaTipo: mf.costoVentaTipo,
-          clasificacionAdmin: 'COSTO_VENTA',
+          MFCostosVentas = await this.mf.createMovimiento({
+            usuarioId: dto.usuarioId,
+            proveedorId: dto.proveedorId ?? undefined,
+            monto: mfPayload.monto!,
+            motivo: 'COSTO_ASOCIADO',
+            metodoPago: metodoMF,
+            descripcion: mfPayload.descripcion,
+            sucursalId: mfPayload.sucursalId ?? sucursalId,
+            costoVentaTipo: mfPayload.costoVentaTipo,
+            clasificacionAdmin: 'COSTO_VENTA',
+            cuentaBancariaId: Number.isFinite(Number(cuentaBancariaIdMF))
+              ? Number(cuentaBancariaIdMF)
+              : undefined,
+            registroCajaId: Number.isFinite(Number(registroCajaIdMF))
+              ? Number(registroCajaIdMF)
+              : undefined,
+          });
+        } // si no hay MF, seguimos sin error
 
-          // 🔴 Agregar los IDs correctos
-          cuentaBancariaId: Number.isFinite(Number(cuentaBancariaIdMF))
-            ? Number(cuentaBancariaIdMF)
-            : undefined,
-          registroCajaId: Number.isFinite(Number(registroCajaIdMF))
-            ? Number(registroCajaIdMF)
-            : undefined,
-        };
-
-        const MFCostosVentas =
-          await this.mf.createMovimiento(dtoMFCostosVentas);
-
+        // Movimiento financiero de la compra (siempre)
         await tx.movimientoFinanciero.create({
           data: {
             fecha: dayjs().tz(TZGT).toDate(),
@@ -1427,16 +1422,15 @@ export class PurchaseRequisitionsService {
         });
 
         this.logger.log(
-          'El costo asociado de la venta (FLETE U OTRO ES): ',
+          'El costo asociado de la compra (si hubo): ',
           MFCostosVentas,
         );
 
-        // ===== 9) PRORRATEO (ÚNICO): por VALOR sobre lotes nuevos (opcional)
+        // ===== 9) PRORRATEO (opcional)
         {
-          // Nueva forma: una sola bandera + un monto opcional
-          const aplicarProrrateo: boolean = dto.aplicarProrrateo ?? true; // default: sí
+          const aplicarProrrateo: boolean = dto.aplicarProrrateo ?? hasMF;
           const costoAdicionalTotal: number = Number(
-            (dto as any).costoAdicionalTotal ?? mf?.monto ?? 0,
+            (dto as any).costoAdicionalTotal ?? mfPayload?.monto ?? 0,
           );
 
           if (aplicarProrrateo && costoAdicionalTotal > 0) {
@@ -1462,19 +1456,16 @@ export class PurchaseRequisitionsService {
                 '[PRORRATEO] No hay lotes nuevos para prorratear.',
               );
             } else {
-              const prRes = await this.prorrateo.generarProrrateoUnidadesTx(
-                tx,
-                {
-                  sucursalId,
-                  gastosAsociadosCompra: costoAdicionalTotal,
-                  movimientoFinancieroId: MFCostosVentas?.id,
-                  comentario: `Prorrateo UNIDADES – Compra #${compra.id} – Entrega #${entregaId}`,
-                  newStockIds,
-                  newStocksPresIds: newStockPresIds,
-                  compraId: compra.id,
-                  entregaStockId: entregaId,
-                },
-              );
+              await this.prorrateo.generarProrrateoUnidadesTx(tx, {
+                sucursalId,
+                gastosAsociadosCompra: costoAdicionalTotal,
+                movimientoFinancieroId: MFCostosVentas?.id ?? undefined,
+                comentario: `Prorrateo UNIDADES – Compra #${compra.id} – Entrega #${entregaId}`,
+                newStockIds,
+                newStocksPresIds: newStockPresIds,
+                compraId: compra.id,
+                entregaStockId: entregaId,
+              });
             }
           } else {
             this.logger.debug(

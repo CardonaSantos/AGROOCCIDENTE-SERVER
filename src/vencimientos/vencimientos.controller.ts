@@ -16,9 +16,7 @@ export class VencimientosController {
   constructor(private readonly vencimientosService: VencimientosService) {}
 
   @Post()
-  create(@Body() createVencimientoDto: CreateVencimientoDto) {
-    return this.vencimientosService.create(createVencimientoDto);
-  }
+  create(@Body() createVencimientoDto: CreateVencimientoDto) {}
 
   @Get('/get-all-regist-expiration')
   findAll() {
@@ -44,7 +42,5 @@ export class VencimientosController {
   }
 
   @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.vencimientosService.remove(+id);
-  }
+  remove(@Param('id') id: string) {}
 }

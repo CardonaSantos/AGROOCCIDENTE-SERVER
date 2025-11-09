@@ -12,7 +12,7 @@ import { PrismaService } from 'src/prisma/prisma.service';
 import { ClientService } from 'src/client/client.service';
 import { NotificationService } from 'src/notification/notification.service';
 import { NotificationToEmit } from 'src/web-sockets/Types/NotificationTypeSocket';
-import { Prisma } from '@prisma/client';
+import { MetodoPago, Prisma, Rol } from '@prisma/client';
 import { HistorialStockTrackerService } from 'src/historial-stock-tracker/historial-stock-tracker.service';
 import { CreateRequisicionRecepcionLineaDto } from 'src/recepcion-requisiciones/dto/requisicion-recepcion-create.dto';
 import { SoloIDProductos } from 'src/recepcion-requisiciones/dto/create-venta-tracker.dto';
@@ -29,6 +29,8 @@ import * as timezone from 'dayjs/plugin/timezone';
 import * as isSameOrAfter from 'dayjs/plugin/isSameOrAfter';
 import * as isSameOrBefore from 'dayjs/plugin/isSameOrBefore';
 import * as customParseFormat from 'dayjs/plugin/customParseFormat';
+import { exigeCajaPorRolYMetodo } from './helper';
+import { MetasService } from 'src/metas/metas.service';
 dayjs.extend(customParseFormat);
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -66,6 +68,7 @@ export class VentaService {
     private readonly notifications: NotificationService,
     private readonly tracker: HistorialStockTrackerService,
     private readonly cajaService: CajaService,
+    private readonly metas: MetasService,
   ) {}
 
   async create(createVentaDto: CreateVentaDto, tx: Prisma.TransactionClient) {
@@ -73,7 +76,7 @@ export class VentaService {
       sucursalId,
       clienteId,
       productos,
-      metodoPago,
+      metodoPago, // método que viene del payload
       nombre,
       dpi,
       telefono,
@@ -90,19 +93,35 @@ export class VentaService {
       `DTO recibido en generar ventas:\n${JSON.stringify(createVentaDto, null, 2)}`,
     );
 
+    // ------------------------------------------------------------------
+    // 0) Rol real del actor + política de caja
+    // ------------------------------------------------------------------
+    const actorReal = await tx.usuario.findUnique({
+      where: { id: usuarioId },
+      select: { rol: true },
+    });
+    const rolEjecutor: Rol = actorReal?.rol ?? 'VENDEDOR';
+    // OJO: el método real puede modificarse más abajo al crear el pago,
+    // por eso recalcularemos la bandera después del pago también si hace falta.
+    let metodoReal: MetodoPago = metodoPago;
+
     const referenciaPagoValid =
       referenciaPago && referenciaPago.trim() !== ''
         ? referenciaPago.trim()
         : null;
 
     try {
-      // ===== Usuarios para notificaciones
+      // ----------------------------------------------------------------
+      // 1) Usuarios destinatarios de notificaciones (sin cambios)
+      // ----------------------------------------------------------------
       const usuariosNotif = await tx.usuario.findMany({
         where: { rol: { in: ['ADMIN', 'VENDEDOR'] } },
       });
       const usuariosNotifIds = usuariosNotif.map((u) => u.id);
 
-      // ===== Cliente
+      // ----------------------------------------------------------------
+      // 2) Cliente: conectar o crear rápido (sin cambios)
+      // ----------------------------------------------------------------
       let clienteConnect: { connect: { id: number } } | undefined;
       if (clienteId) {
         clienteConnect = { connect: { id: clienteId } };
@@ -113,11 +132,14 @@ export class VentaService {
         clienteConnect = { connect: { id: nuevo.id } };
       }
 
+      // ----------------------------------------------------------------
+      // 3) Validación de líneas vs precio seleccionado (igual que antes)
+      //    y obtención de lineas Producto/Presentación consolidadas
+      // ----------------------------------------------------------------
       const prodValidadas: LineaProd[] = [];
       const presValidadas: LineaPres[] = [];
       type LineaEntrada = (typeof productos)[number];
 
-      // ===== Validar cada línea contra el precio seleccionado
       for (const p of productos as LineaEntrada[]) {
         const precio = await tx.precioProducto.findUnique({
           where: { id: p.selectedPriceId },
@@ -144,7 +166,6 @@ export class VentaService {
           );
         }
 
-        // PRESENTACIÓN
         if (precio.presentacionId) {
           const presentacionId = Number(precio.presentacionId);
 
@@ -158,11 +179,10 @@ export class VentaService {
             where: { id: presentacionId },
             select: { id: true, productoId: true },
           });
-          if (!pres) {
+          if (!pres)
             throw new BadRequestException(
               `Presentación ${presentacionId} no existe.`,
             );
-          }
 
           presValidadas.push({
             presentacionId,
@@ -175,7 +195,6 @@ export class VentaService {
           continue;
         }
 
-        // PRODUCTO
         if (precio.productoId) {
           const productoId = Number(precio.productoId);
 
@@ -200,7 +219,7 @@ export class VentaService {
         );
       }
 
-      // ===== Consolidar líneas (productoId,selectedPriceId) y (presentacionId,selectedPriceId)
+      // Consolidar (productoId,selectedPriceId) y (presentacionId,selectedPriceId)
       const keyProd = (x: LineaProd) => `${x.productoId}|${x.selectedPriceId}`;
       const keyPres = (x: LineaPres) =>
         `${x.presentacionId}|${x.selectedPriceId}`;
@@ -223,7 +242,9 @@ export class VentaService {
       }
       const presConsolidadas = Array.from(mapPres.values());
 
-      // ===== Fotos de stock anterior
+      // ----------------------------------------------------------------
+      // 4) Snapshot de stock anterior (sin cambios)
+      // ----------------------------------------------------------------
       const cantidadesAnterioresProd: Record<number, number> = {};
       const unicProdIds = Array.from(
         new Set(prodConsolidadas.map((x) => x.productoId)),
@@ -248,8 +269,9 @@ export class VentaService {
         cantidadesAnterioresPres[prId] = agg._sum.cantidadPresentacion ?? 0;
       }
 
-      // ===== Descontar STOCK (Producto -> Stock; Presentación -> StockPresentacion)
-      // Producto: FIFO
+      // ----------------------------------------------------------------
+      // 5) Descontar STOCK FIFO (producto + presentacion) (sin cambios)
+      // ----------------------------------------------------------------
       for (const linea of prodConsolidadas) {
         let restante = linea.cantidad;
         const lotes = await tx.stock.findMany({
@@ -276,7 +298,6 @@ export class VentaService {
         }
       }
 
-      // Presentación: FIFO
       for (const linea of presConsolidadas) {
         let restante = linea.cantidad;
         const lotes = await tx.stockPresentacion.findMany({
@@ -303,10 +324,10 @@ export class VentaService {
         }
       }
 
-      // ===== Notificaciones stock bajo
-      // ===== Notificaciones stock bajo (enviar 1 sola vez al CRUZAR el umbral y sin duplicados)
+      // ----------------------------------------------------------------
+      // 6) Notificaciones de stock bajo (igual que antes)
+      // ----------------------------------------------------------------
       for (const prodId of unicProdIds) {
-        // Calcular stock actual, threshold y nombre en paralelo
         const [agg, th, info] = await Promise.all([
           tx.stock.aggregate({
             where: { productoId: prodId, sucursalId },
@@ -321,26 +342,18 @@ export class VentaService {
         if (!th) continue;
 
         const stockGlobal = agg._sum.cantidad ?? 0;
-
-        // ✅ Notificar SOLO si se CRUZA el umbral (antes > mínimo && ahora <= mínimo)
         const antes = cantidadesAnterioresProd[prodId] ?? stockGlobal;
         const cruzoUmbral =
           antes > th.stockMinimo && stockGlobal <= th.stockMinimo;
         if (!cruzoUmbral) continue;
 
-        // Objetivo real de destinatarios (usa lo que calculaste arriba)
-        const targetIds = usuariosNotifIds; // p.ej. ADMIN + VENDEDOR
+        const targetIds = usuariosNotifIds;
 
-        // ¿Existe ya una notificación (para este threshold) que podamos reutilizar?
         const existente = await tx.notificacion.findFirst({
-          where: {
-            categoria: 'INVENTARIO',
-            referenciaId: th.id, // usa el ID del threshold como referencia estable
-          },
+          where: { categoria: 'INVENTARIO', referenciaId: th.id },
           include: { notificacionesUsuarios: { select: { usuarioId: true } } },
         });
 
-        // Adjuntar solo quienes no la tienen
         const yaAsociados = new Set(
           existente?.notificacionesUsuarios.map((nu) => nu.usuarioId) ?? [],
         );
@@ -351,17 +364,14 @@ export class VentaService {
         const mensaje = `El producto ${info?.nombre ?? prodId} ha alcanzado el stock mínimo (quedan ${stockGlobal} uds).`;
 
         if (!existente) {
-          // Crear UNA notificación y ligarla a TODOS los destinatarios objetivo
           await this.notifications.createForUsers({
             titulo,
             mensaje,
             userIds: targetIds,
             categoria: 'INVENTARIO',
             referenciaId: th.id,
-            // si tu servicio usa más campos (audiencia/categoria/severidad), añádelos aquí
           });
         } else {
-          // Solo crear vínculos faltantes (evita duplicados)
           await tx.notificacionesUsuarios.createMany({
             data: faltantes.map((usuarioId) => ({
               usuarioId,
@@ -372,7 +382,9 @@ export class VentaService {
         }
       }
 
-      // ===== Totales
+      // ----------------------------------------------------------------
+      // 7) Totales (sin cambios)
+      // ----------------------------------------------------------------
       const totalVentaProd = prodConsolidadas.reduce(
         (sum, x) => sum.add(x.precioVenta.mul(x.cantidad)),
         new Prisma.Decimal(0),
@@ -383,7 +395,9 @@ export class VentaService {
       );
       const totalVenta = totalVentaProd.add(totalVentaPres);
 
-      // ===== Crear venta + líneas
+      // ----------------------------------------------------------------
+      // 8) Crear venta + líneas (sin cambios)
+      // ----------------------------------------------------------------
       const venta = await tx.venta.create({
         data: {
           tipoComprobante,
@@ -413,7 +427,9 @@ export class VentaService {
       });
       this.logger.log('La venta es: ', venta);
 
-      // ===== Trackers
+      // ----------------------------------------------------------------
+      // 9) Trackers (sin cambios)
+      // ----------------------------------------------------------------
       if (prodConsolidadas.length) {
         await this.tracker.trackerSalidaProductoVenta(
           tx,
@@ -429,7 +445,6 @@ export class VentaService {
           `Registro generado por venta #${venta.id}`,
         );
       }
-
       if (
         presConsolidadas.length &&
         (this.tracker as any).trackerSalidaPresentacionVenta
@@ -450,7 +465,9 @@ export class VentaService {
         );
       }
 
-      // Pago + vincular a venta
+      // ----------------------------------------------------------------
+      // 10) Pago + linkear a venta (una sola vez) y fijar método real
+      // ----------------------------------------------------------------
       if (metodoPago && metodoPago !== 'CREDITO') {
         const pago = await tx.pago.create({
           data: {
@@ -463,16 +480,8 @@ export class VentaService {
           where: { id: venta.id },
           data: { metodoPago: { connect: { id: pago.id } } },
         });
-
-        await this.cajaService.attachAndRecordSaleTx(
-          tx,
-          venta.id,
-          sucursalId,
-          usuarioId,
-          { exigirCajaSiEfectivo: true },
-        );
+        metodoReal = metodoPago;
       } else {
-        // Crédito: opcional, crear pago marcador 0 si tu UI lo espera
         const pago0 = await tx.pago.create({
           data: {
             metodoPago: 'CREDITO',
@@ -484,15 +493,26 @@ export class VentaService {
           where: { id: venta.id },
           data: { metodoPago: { connect: { id: pago0.id } } },
         });
+        metodoReal = 'CREDITO';
       }
 
-      //  Caja
+      // ----------------------------------------------------------------
+      // 11) Caja & MF — UNA sola llamada con política correcta
+      // ----------------------------------------------------------------
+      const exigirCaja = exigeCajaPorRolYMetodo(rolEjecutor, metodoReal);
       await this.cajaService.attachAndRecordSaleTx(
         tx,
         venta.id,
         sucursalId,
         usuarioId,
-        { exigirCajaSiEfectivo: true },
+        { exigirCajaSiEfectivo: exigirCaja },
+      );
+
+      await this.metas.incrementarMetaTx(
+        tx,
+        createVentaDto.usuarioId,
+        venta.totalVenta,
+        'tienda',
       );
 
       return venta;

@@ -11,9 +11,11 @@ import { CajaService } from 'src/caja/caja.service';
 import { UtilidadesService } from 'src/caja/utilidades/utilidades.service';
 import { CajaModule } from 'src/caja/caja.module';
 import { PrismaModule } from 'src/prisma/prisma.module';
+import { MetasService } from 'src/metas/metas.service';
+import { MetasModule } from 'src/metas/metas.module';
 
 @Module({
-  imports: [PrismaModule, CajaModule], // importa el módulo que exporta CajaService
+  imports: [PrismaModule, CajaModule, MetasModule], // importa el módulo que exporta CajaService
   controllers: [VentaController],
   providers: [
     VentaService,

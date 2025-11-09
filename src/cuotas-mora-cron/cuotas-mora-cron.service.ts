@@ -40,7 +40,7 @@ export class CuotasMoraCronService {
   ) {}
 
   // Ejecuta poco después de medianoche GT
-  // @Cron(CronExpression.EVERY_10_SECONDS, {
+  // @Cron(CronExpression.EVERY_MINUTE, {
   //   name: 'creditos.mora.daily',
   //   timeZone: TZGT,
   // })

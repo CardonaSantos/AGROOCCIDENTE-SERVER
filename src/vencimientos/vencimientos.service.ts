@@ -1,161 +1,285 @@
-import { Injectable, InternalServerErrorException } from '@nestjs/common';
-import { CreateVencimientoDto } from './dto/create-vencimiento.dto';
-import { UpdateVencimientoDto } from './dto/update-vencimiento.dto';
-import { PrismaService } from 'src/prisma/prisma.service';
+import {
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+} from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import { PrismaService } from 'src/prisma/prisma.service';
 import { NotificationService } from 'src/notification/notification.service';
+import { NotiCategory, NotiSeverity, NotiAudience } from '@prisma/client';
 import * as dayjs from 'dayjs';
 import * as utc from 'dayjs/plugin/utc';
 import * as timezone from 'dayjs/plugin/timezone';
 import 'dayjs/locale/es-mx';
-import { differenceInCalendarDays } from 'date-fns';
+import { UpdateVencimientoDto } from './dto/update-vencimiento.dto';
 
 dayjs.extend(utc);
-dayjs.locale('es-mx');
 dayjs.extend(timezone);
-type NotifyVencimientoInput = {
-  stockId: number; // id del registro de stock/lote
-  productoId: number;
-  productoNombre: string;
-  sucursalId: number;
-  sucursalNombre?: string | null;
-  fechaVencimiento: Date;
-  cantidad?: number | null;
-  ubicacion?: string | null; // estante, bodega, etc. (si la tienes)
-  adminActorId?: number | null; // quien disparó el proceso (opcional)
-};
-//formato UTC
-// Función formatFecha corregida:
-const formatFecha = (fecha: Date): string =>
-  dayjs(fecha)
-    .tz('America/Guatemala', true) // <-- Tercer parámetro es el booleano
-    .locale('es')
-    .format('D [de] MMMM [de] YYYY');
+dayjs.locale('es-mx');
+
+type StageKey = 'T-45' | 'T-30' | 'T-15' | 'T-7' | 'EXPIRED';
+
+const TZ = 'America/Guatemala';
+const THRESHOLDS: Array<{ days: number; key: StageKey }> = [
+  { days: 45, key: 'T-45' },
+  { days: 30, key: 'T-30' },
+  { days: 15, key: 'T-15' },
+  { days: 7, key: 'T-7' },
+  { days: 0, key: 'EXPIRED' },
+];
+
+function formatFechaGT(fecha: Date) {
+  return dayjs(fecha).tz(TZ, true).format('D [de] MMMM [de] YYYY');
+}
+
+function pickStage(daysRemaining: number): StageKey | null {
+  if (daysRemaining <= 0) return 'EXPIRED';
+  if (daysRemaining <= 7) return 'T-7';
+  if (daysRemaining <= 15) return 'T-15';
+  if (daysRemaining <= 30) return 'T-30';
+  if (daysRemaining <= 45) return 'T-45';
+  return null;
+}
+
+function pickSeverity(stage: StageKey): NotiSeverity {
+  switch (stage) {
+    case 'EXPIRED':
+      return NotiSeverity.CRITICO;
+    case 'T-7':
+    case 'T-15':
+      return NotiSeverity.ALERTA;
+    default:
+      return NotiSeverity.INFORMACION; // T-30, T-45
+  }
+}
 
 @Injectable()
 export class VencimientosService {
+  private readonly logger = new Logger(VencimientosService.name);
+
   constructor(
     private readonly prisma: PrismaService,
-
-    private readonly notificationService: NotificationService,
+    private readonly notifications: NotificationService,
   ) {}
+  // @Cron(CronExpression.EVERY_MINUTE, {
+  //   name: 'vencimientos.dailyCheck',
+  //   timeZone: TZ,
+  // })
 
-  @Cron('0 23 * * *', {
-    name: 'vencimientos.midnightGuate',
-    timeZone: 'America/Guatemala',
+  // Corre cada día a las 06:00 a.m. (hora GT)
+  @Cron('0 6 * * *', {
+    name: 'vencimientos.dailyCheck',
+    timeZone: TZ,
   })
-  async handleCronVencimientos() {
-    await this.procesarVencimientos();
-  }
-
-  private async procesarVencimientos() {
-    const hoy = dayjs().tz('America/Guatemala').startOf('day');
-    const limite = hoy.add(15, 'day').endOf('day');
-
-    console.log('🔍 Buscando vencimientos entre:', {
-      desde: dayjs(hoy.toISOString()).format('DD MM YYYY'),
-      hasta: dayjs(limite.toISOString()).format('DD MM YYYY'),
-    });
-
-    const stocks = await this.prisma.stock.findMany({
-      where: {
-        fechaVencimiento: {
-          gte: hoy.toDate(),
-          lte: limite.toDate(),
-        },
-      },
-    });
-    const admins = await this.prisma.usuario.findMany({
-      where: { rol: 'ADMIN' },
-    });
-
-    for (const stock of stocks) {
-      await this.procesarStock(stock, admins, hoy);
+  async runDaily() {
+    try {
+      await this.scanAndNotify();
+    } catch (err) {
+      this.logger.error('Fallo en cron de vencimientos', err?.stack ?? err);
     }
   }
 
-  private async procesarStock(stock, admins, hoy) {
+  /** Escanea stocks (producto y presentaciones) con fecha de vencimiento y notifica por etapas. */
+  async scanAndNotify() {
+    const hoy = dayjs().tz(TZ).startOf('day');
+
+    // Ventana: desde ya (incluye vencidos) hasta +45 días
+    const maxDate = hoy.add(45, 'day').endOf('day');
+
+    this.logger.log(
+      `🔍 Escaneando vencimientos entre ${hoy.format('DD/MM/YYYY')} y ${maxDate.format('DD/MM/YYYY')}`,
+    );
+
+    // === Lotes por producto base (Stock) ===
+    const lotes = await this.prisma.stock.findMany({
+      where: {
+        cantidad: { gt: 0 },
+        fechaVencimiento: { not: null, lte: maxDate.toDate() },
+      },
+      include: {
+        producto: { select: { id: true, nombre: true, codigoProducto: true } },
+        sucursal: { select: { id: true, nombre: true } },
+      },
+    });
+
+    // === Lotes por presentación (StockPresentacion) ===
+    const lotesPres = await this.prisma.stockPresentacion.findMany({
+      where: {
+        cantidadPresentacion: { gt: 0 },
+        fechaVencimiento: { not: null, lte: maxDate.toDate() },
+      },
+      include: {
+        producto: { select: { id: true, nombre: true, codigoProducto: true } },
+        presentacion: { select: { id: true, nombre: true } },
+        sucursal: { select: { id: true, nombre: true } },
+      },
+    });
+
+    this.logger.log(
+      `Encontrados ${lotes.length} lotes de producto y ${lotesPres.length} lotes de presentación para evaluar.`,
+    );
+
+    for (const s of lotes) {
+      await this.processStockLote({
+        referenciaTipo: 'Lote', // estandar
+        referenciaId: s.id,
+        productoId: s.productoId,
+        productoNombre: s.producto?.nombre ?? '#Producto',
+        sucursalId: s.sucursalId,
+        sucursalNombre: s.sucursal?.nombre ?? null,
+        fechaVencimiento: s.fechaVencimiento!,
+        cantidad: s.cantidad,
+        route: `/inventario/producto/${s.productoId}?highlightStock=${s.id}`,
+      });
+    }
+
+    for (const sp of lotesPres) {
+      await this.processStockLote({
+        referenciaTipo: 'LotePresentacion',
+        referenciaId: sp.id,
+        productoId: sp.productoId,
+        productoNombre: `${sp.producto?.nombre ?? '#Producto'} — ${sp.presentacion?.nombre ?? 'presentación'}`,
+        sucursalId: sp.sucursalId,
+        sucursalNombre: sp.sucursal?.nombre ?? null,
+        fechaVencimiento: sp.fechaVencimiento!,
+        cantidad: sp.cantidadPresentacion,
+        route: `/inventario/producto/${sp.productoId}?presentacionId=${sp.presentacionId}&highlightStockPres=${sp.id}`,
+      });
+    }
+  }
+
+  private async processStockLote(p: {
+    referenciaTipo: 'Lote' | 'LotePresentacion';
+    referenciaId: number;
+    productoId: number;
+    productoNombre: string;
+    sucursalId: number;
+    sucursalNombre: string | null;
+    fechaVencimiento: Date;
+    cantidad: number | null;
+    route: string;
+  }) {
+    const hoy = dayjs().tz(TZ).startOf('day');
+    const exp = dayjs(p.fechaVencimiento).tz(TZ, true).startOf('day');
+
+    const daysRemaining = exp.diff(hoy, 'day');
+    const stage = pickStage(daysRemaining);
+
+    if (!stage) {
+      // Aún falta más de 45 días — nada que hacer
+      return;
+    }
+
+    // Idempotencia por etapa (no duplicar por cada ejecución)
+    const exists = await this.prisma.notificacion.findFirst({
+      where: {
+        referenciaTipo: p.referenciaTipo,
+        referenciaId: p.referenciaId,
+        subtipo: `EXPIRY_${stage}`,
+        categoria: NotiCategory.INVENTARIO,
+      },
+      select: { id: true },
+    });
+
+    if (exists) {
+      return;
+    }
+
+    // Asegura un registro de Vencimiento (uno por lote, al primer aviso)
+    await this.ensureVencimientoRecord(
+      p.referenciaTipo,
+      p.referenciaId,
+      p.fechaVencimiento,
+      p.productoNombre,
+      daysRemaining,
+    );
+
+    // Destinatarios: TODOS los usuarios activos de la sucursal (admins y vendedores)
+    const users = await this.prisma.usuario.findMany({
+      where: { activo: true, sucursalId: p.sucursalId },
+      select: { id: true },
+    });
+    const userIds = users.map((u) => u.id);
+    if (userIds.length === 0) return;
+
+    const fechaFmt = formatFechaGT(p.fechaVencimiento);
+
+    // Título y mensaje
+    const titulo =
+      stage === 'EXPIRED'
+        ? 'Producto vencido'
+        : `Producto por vencer (${stage.replace('T-', '≤ ')} días)`;
+
+    const diasTxt =
+      stage === 'EXPIRED'
+        ? 'ya vencido'
+        : `faltan ${daysRemaining} día${daysRemaining === 1 ? '' : 's'}`;
+
+    const mensaje =
+      stage === 'EXPIRED'
+        ? `El lote de "${p.productoNombre}" está VENCIDO (desde ${fechaFmt}).`
+        : `El lote de "${p.productoNombre}" vence el ${fechaFmt} — ${diasTxt}. Cantidad: ${p.cantidad ?? 0}.`;
+
+    const severity = pickSeverity(stage);
+
+    await this.notifications.createForUsers({
+      userIds,
+      titulo,
+      mensaje,
+      categoria: NotiCategory.INVENTARIO,
+      subtipo: `EXPIRY_${stage}`, // EXPIRY_T-45 / T-30 / T-15 / T-7 / EXPIRED
+      severidad: severity,
+      route: p.route,
+      actionLabel: 'Revisar lote',
+      referenciaTipo: p.referenciaTipo, // 'Lote' | 'LotePresentacion'
+      referenciaId: p.referenciaId,
+      sucursalId: p.sucursalId,
+      meta: {
+        productoId: p.productoId,
+        productoNombre: p.productoNombre,
+        sucursal: { id: p.sucursalId, nombre: p.sucursalNombre },
+        fechaVencimiento: p.fechaVencimiento.toISOString(),
+        cantidad: p.cantidad ?? null,
+        daysRemaining,
+        stage,
+      },
+      audiencia: NotiAudience.SUCURSAL, // intención; igual persistimos por usuario
+    });
+  }
+
+  private async ensureVencimientoRecord(
+    referenciaTipo: 'Lote' | 'LotePresentacion',
+    referenciaId: number,
+    fechaVencimiento: Date,
+    productoNombre: string,
+    daysRemaining: number,
+  ) {
+    // El modelo Vencimiento está atado a Stock (lote de producto base).
+    // Para presentaciones, puedes crear otra tabla o registrar de igual forma si mapeas al lote base.
+    if (referenciaTipo !== 'Lote') return;
+
     const ya = await this.prisma.vencimiento.findFirst({
-      where: { stockId: stock.id },
+      where: { stockId: referenciaId },
+      select: { id: true },
     });
     if (ya) return;
 
-    const producto = await this.prisma.producto.findUnique({
-      where: { id: stock.productoId },
-    });
-    if (!producto) return;
+    const descripcion =
+      daysRemaining <= 0
+        ? `El producto ${productoNombre} está vencido.`
+        : `El producto ${productoNombre} se vencerá en ${daysRemaining} día${daysRemaining === 1 ? '' : 's'}.`;
 
-    // const localExp = dayjs
-    //   .tz(stock.fechaVencimiento, 'America/Guatemala')
-    //   .startOf('day');
-    // Dentro de procesarStock:
-    const localExp = dayjs(stock.fechaVencimiento)
-      .tz('America/Guatemala', true) // <-- Usar booleano directamente
-      .startOf('day');
-
-    const fechaCruda = new Date(stock.fechaVencimiento);
-    const fechaSinFormato = stock.fechaVencimiento;
-
-    console.log('la fecha cruda es: ', fechaCruda);
-    console.log('la fechaSinFormatoa es: ', fechaSinFormato);
-
-    console.log(
-      'La fecha que vence es: ',
-      dayjs(localExp).format('DD MM YYYY'),
-    );
-
-    const diasFaltan = localExp.diff(hoy, 'day');
-
-    const formattedDate = localExp
-      .locale('es-mx')
-      .format('D [de] MMMM [de] YYYY');
-
-    const venc = await this.prisma.vencimiento.create({
+    await this.prisma.vencimiento.create({
       data: {
-        fechaVencimiento: stock.fechaVencimiento,
-        descripcion: `El producto ${producto.nombre} vence en ${diasFaltan} días (el ${formattedDate}).`,
-        stockId: stock.id,
+        stockId: referenciaId,
+        fechaVencimiento,
+        descripcion,
         estado: 'PENDIENTE',
       },
     });
-    console.log('Vencimiento creado:', venc.id);
-
-    await Promise.all(
-      admins.map((adm) => this.notificarAdmin(adm.id, stock, producto)),
-    );
   }
 
-  private async notificarAdmin(adminId: number, stock, producto) {
-    const existe = await this.prisma.notificacion.findFirst({
-      where: {
-        referenciaId: stock.id,
-        notificacionesUsuarios: { some: { usuarioId: adminId } },
-      },
-    });
-    if (existe) return;
-
-    await this.notifyVencimientoProducto(
-      this.prisma,
-      this.notificationService,
-      {
-        stockId: stock.id,
-        productoId: producto.id,
-        productoNombre: producto.nombre,
-        sucursalId: stock.sucursalId, // asegúrate de tenerlo a mano
-        sucursalNombre: stock.sucursal?.nombre, // si lo tienes
-        fechaVencimiento: stock.fechaVencimiento,
-        cantidad: stock.cantidad ?? null,
-        ubicacion: stock.ubicacion ?? null, // si existe
-        adminActorId: null, // si alguien lanzó la revisión
-      },
-    );
-
-    console.log(`Notificación enviada a admin ${adminId}`);
-  }
-
-  create(createVencimientoDto: CreateVencimientoDto) {
-    return 'This action adds a new vencimiento';
-  }
+  //SERIVICIOS CRUD
 
   async findAll() {
     try {
@@ -224,97 +348,5 @@ export class VencimientosService {
       console.log(error);
       throw new InternalServerErrorException('Error al eliminar registros');
     }
-  }
-
-  remove(id: number) {
-    return `This action removes a #${id} vencimiento`;
-  }
-
-  //NUEVO HELPER
-  // o usa dayjs si ya lo tienes
-
-  pickSeveridadPorVencimiento(
-    diasRestantes: number,
-  ): 'CRITICO' | 'ALERTA' | 'INFORMACION' {
-    if (diasRestantes <= 0) return 'CRITICO';
-    if (diasRestantes <= 7) return 'ALERTA';
-    return 'INFORMACION';
-  }
-
-  async notifyVencimientoProducto(
-    prisma: PrismaService,
-    notifications: NotificationService,
-    input: NotifyVencimientoInput,
-  ) {
-    const {
-      stockId,
-      productoId,
-      productoNombre,
-      sucursalId,
-      sucursalNombre,
-      fechaVencimiento,
-      cantidad,
-      ubicacion,
-      adminActorId,
-    } = input;
-
-    // 1) Destinatarios: admins de la sucursal
-    const admins = await prisma.usuario.findMany({
-      where: { rol: 'ADMIN', sucursalId, activo: true },
-      select: { id: true },
-    });
-    const userIds = admins.map((a) => a.id);
-    if (userIds.length === 0) return; // opcional: fallback a admins globales
-
-    // 2) Severidad por proximidad
-    const hoy = new Date();
-    const dias = differenceInCalendarDays(fechaVencimiento, hoy);
-    const severidad = this.pickSeveridadPorVencimiento(dias);
-
-    // 3) Mensajes y ruta
-    const fechaFmt = fechaVencimiento.toLocaleDateString('es-GT', {
-      year: 'numeric',
-      month: 'short',
-      day: '2-digit',
-    });
-    const titulo =
-      dias <= 0
-        ? 'Producto vencido'
-        : dias <= 7
-          ? 'Producto por vencer (≤ 7 días)'
-          : 'Producto por vencer (≤ 30 días)';
-    const mensaje =
-      dias <= 0
-        ? `El producto "${productoNombre}" está VENCIDO desde ${fechaFmt}.`
-        : `El producto "${productoNombre}" vence el ${fechaFmt} (faltan ${dias} día${dias === 1 ? '' : 's'}).`;
-
-    // Deep link al detalle del producto/lote (ajusta a tu routing real)
-    const route = `/inventario/producto/${productoId}?highlightStock=${stockId}`;
-
-    // 4) Crear y emitir una sola notificación para todos
-    await notifications.createForUsers({
-      userIds,
-      titulo,
-      mensaje,
-      categoria: 'INVENTARIO',
-      severidad, // INFORMACION | ALERTA | CRITICO
-      subtipo: 'EXPIRY', // estandarizamos subtipo
-      route,
-      actionLabel: 'Revisar lote',
-      referenciaTipo: 'Stock', // o 'Lote' si así lo nombras
-      referenciaId: stockId,
-      remitenteId: adminActorId ?? null, // si existe actor
-      sucursalId,
-      meta: {
-        stockId,
-        producto: { id: productoId, nombre: productoNombre },
-        sucursal: { id: sucursalId, nombre: sucursalNombre ?? null },
-        fechaVencimiento: fechaVencimiento.toISOString(),
-        diasRestantes: dias,
-        cantidad: cantidad ?? null,
-        ubicacion: ubicacion ?? null,
-      },
-      audiencia: 'USUARIOS',
-    });
   }
 }
