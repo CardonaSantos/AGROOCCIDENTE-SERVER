@@ -24,38 +24,66 @@ export class ClientService {
   private readonly logger = new Logger(ClientService.name);
   constructor(private readonly prisma: PrismaService) {}
 
-  async create(createClientDto: CreateClientDto) {
+  // Recomendado: una sola puerta de entrada que use el tx si viene
+  async createClienteTx(
+    tx: Prisma.TransactionClient | null,
+    dto: CreateClientDto,
+  ) {
+    if (tx) {
+      return this.create(dto, tx);
+    }
+    return this.prisma.$transaction(async (trx) => {
+      return this.create(dto, trx);
+    });
+  }
+
+  async create(
+    createClientDto: CreateClientDto,
+    tx?: Prisma.TransactionClient,
+  ) {
     try {
       // Normalizar y validar
       const dpi = normalizeDpi(createClientDto.dpi);
       const nit = normalizeNit(createClientDto.nit);
       ensureOneDoc(dpi, nit);
+
       if (dpi && !isValidDpi(dpi))
         throw new BadRequestException('DPI inválido.');
       if (nit && !isValidNit(nit))
         throw new BadRequestException('NIT inválido.');
 
-      const client = await this.prisma.cliente.create({
+      const nombre = (createClientDto.nombre ?? '').trim();
+      if (!nombre) throw new BadRequestException('El nombre es obligatorio.');
+
+      const db = tx ?? this.prisma;
+
+      const client = await db.cliente.create({
         data: {
-          nombre: createClientDto.nombre.trim(),
+          nombre,
           apellidos: nullIfEmpty(createClientDto.apellidos),
           telefono: nullIfEmpty(createClientDto.telefono),
           direccion: nullIfEmpty(createClientDto.direccion),
           observaciones: nullIfEmpty(createClientDto.observaciones),
-          dpi, // ya es null o string válido
-          nit, // ya es null o string válido
+          dpi, // null o string validado
+          nit, // null o string validado
         },
       });
 
       return client;
     } catch (error) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError) {
-        if (error.code === 'P2002') {
-          // unique constraint
-          const target = (error.meta?.target as string[])?.[0] ?? 'valor';
-          throw new ConflictException(`${target.toUpperCase()} ya existe`);
-        }
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        // constraint única (puede venir como índice compuesto)
+        const target =
+          (error.meta?.target as string[] | undefined)?.join(', ') ?? 'valor';
+        throw new ConflictException(`Ya existe un cliente con ${target}`);
       }
+
+      // Preserva HttpExceptions específicas; si no, lanza 500 genérico
+      if (error instanceof HttpException) throw error;
+
       this.logger.error(error);
       throw new InternalServerErrorException('Error en el servidor');
     }

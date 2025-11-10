@@ -87,6 +87,7 @@ export class VentaService {
       tipoComprobante,
       referenciaPago,
       apellidos,
+      nit,
     } = createVentaDto;
 
     this.logger.log(
@@ -126,9 +127,15 @@ export class VentaService {
       if (clienteId) {
         clienteConnect = { connect: { id: clienteId } };
       } else if (nombre) {
-        const nuevo = await tx.cliente.create({
-          data: { nombre, dpi, telefono, direccion, observaciones, apellidos },
-        });
+        const dtoClient = {
+          dpi,
+          nit,
+          nombre,
+          apellidos,
+          telefono,
+          direccion,
+        };
+        const nuevo = await this.clienteService.createClienteTx(tx, dtoClient);
         clienteConnect = { connect: { id: nuevo.id } };
       }
 
