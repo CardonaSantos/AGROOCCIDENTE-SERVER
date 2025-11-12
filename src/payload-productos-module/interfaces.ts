@@ -3,11 +3,11 @@ export interface ProductoRaw {
   nombre: string | null;
   descripcion: string | null;
   codigoproveedor: string | null;
-  categorias: string | null; // coma-separado, p.ej. "Ferretería, Pinturas"
+  categorias: string | null;
   tipoempaque: string | null;
   stockminimo: number | null;
-  stockvencimiento: number | string | null; // puede venir como número o texto
-  precios: string[]; // coma-separado, p.ej. "12.50, 15.00"
+  stockvencimiento: number | string | null;
+  precios: string[];
   preciocosto: string | number;
 }
 
