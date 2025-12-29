@@ -70,7 +70,7 @@ export class TipoPresentacionService {
   }
 
   async findAll(query: TipoPresentacionQueryDto) {
-    const { page = 1, limit = 20, q, activo } = query;
+    const { page = 1, limit = 500, q, activo } = query;
 
     const where: Prisma.TipoPresentacionWhereInput = {
       ...(q

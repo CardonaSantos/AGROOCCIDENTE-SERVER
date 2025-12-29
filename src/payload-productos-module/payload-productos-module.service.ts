@@ -5,11 +5,10 @@ import {
   InternalServerErrorException,
   Logger,
 } from '@nestjs/common';
-import { CreatePayloadProductosModuleDto } from './dto/create-payload-productos-module.dto';
-import { UpdatePayloadProductosModuleDto } from './dto/update-payload-productos-module.dto';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { ProductoRaw } from './interfaces';
+import { rawPayloadDataProducts } from 'src/assets/productos';
 
 function trimOrNull(v: unknown): string | null {
   if (v === null || v === undefined) return null;
@@ -105,6 +104,14 @@ function normalizeProveedorCode(v: unknown): string | null {
   return s;
 }
 
+// --- NUEVO HELPER DE FECHA ---
+function parseDate(input: unknown): Date | null {
+  if (!input) return null;
+  const d = new Date(String(input));
+  if (isNaN(d.getTime())) return null;
+  return d;
+}
+
 @Injectable()
 export class PayloadProductosModuleService {
   private readonly logger = new Logger(PayloadProductosModuleService.name);
@@ -118,6 +125,7 @@ export class PayloadProductosModuleService {
   private async upsertProductoTx(
     tx: PrismaClient | Prisma.TransactionClient,
     p: ProductoRaw,
+    sucursalId: number,
   ): Promise<number> {
     // -------- Validaciones mínimas
     const codigoProducto = trimOrNull(p.codigoproducto);
@@ -128,37 +136,33 @@ export class PayloadProductosModuleService {
     const stockMinimo = parseEntero(p.stockminimo, 0);
     let codigoProveedor = normalizeProveedorCode(p.codigoproveedor);
 
+    const stockActual = parseEntero(p.stockactual, 0);
+    const fechaVencimiento = parseDate(p.stockvencimiento);
+
     if (codigoProveedor) {
-      const holder = await tx.producto.findUnique({
-        where: { codigoProveedor }, // esto existe porque es único en el schema actual
+      // Optimización: Usar findFirst en lugar de findUnique si codigoProveedor no es @unique en schema
+      const holder = await tx.producto.findFirst({
+        where: { codigoProveedor },
         select: { id: true, codigoProducto: true },
       });
+
       if (holder && holder.codigoProducto !== codigoProducto) {
         this.logger.warn(
-          `codigoProveedor duplicado "${codigoProveedor}" para codigoProducto=${codigoProducto}. Se guardará como NULL.`,
+          `codigoProveedor duplicado "${codigoProveedor}" en prod "${codigoProducto}". Pertenece a "${holder.codigoProducto}". Se guardará NULL.`,
         );
         codigoProveedor = null;
       }
     }
 
-    if (!codigoProducto) {
-      throw new BadRequestException('Falta codigoproducto');
-    }
-    if (!nombre) {
-      throw new BadRequestException(
-        `Falta nombre para codigoProducto=${codigoProducto}`,
-      );
-    }
+    if (!codigoProducto) throw new BadRequestException('Falta codigoproducto');
+    if (!nombre)
+      throw new BadRequestException(`Falta nombre para ${codigoProducto}`);
 
-    // Costo obligatorio:
     const costo = parseMoney(p.preciocosto);
-    if (costo === null) {
-      throw new BadRequestException(
-        `preciocosto inválido para codigoProducto=${codigoProducto}`,
-      );
-    }
+    if (costo === null)
+      throw new BadRequestException(`Costo inválido para ${codigoProducto}`);
 
-    // -------- Upsert del producto base (idempotente por codigoProducto único)
+    // -------- Upsert del producto base
     const producto = await tx.producto.upsert({
       where: { codigoProducto },
       create: {
@@ -166,35 +170,36 @@ export class PayloadProductosModuleService {
         nombre,
         descripcion: descripcion ?? undefined,
         codigoProveedor: codigoProveedor ?? undefined,
-        precioCostoActual: costo,
+        precioCostoActual: costo, // Asegurar Decimal
         stockThreshold: {
-          create: {
-            stockMinimo: stockMinimo,
-          },
+          create: { stockMinimo },
         },
       },
       update: {
         nombre,
         descripcion: descripcion ?? undefined,
-        ...(codigoProveedor ? { codigoProveedor } : {}),
+        // Si codigoProveedor es null, lo desconectamos (set: null) o no hacemos nada
+        ...(codigoProveedor !== undefined ? { codigoProveedor } : {}),
         precioCostoActual: costo,
+
+        // CORRECCIÓN CRÍTICA 1: Usar upsert anidado para evitar error si ya existe el threshold
         stockThreshold: {
-          create: {
-            stockMinimo: stockMinimo,
+          upsert: {
+            create: { stockMinimo },
+            update: { stockMinimo },
           },
         },
       },
       select: { id: true },
     });
 
-    // -------- Tipo de empaque (opcional)
+    // -------- Tipo de empaque
     if (tipoEmpaque) {
       await tx.tipoPresentacion.upsert({
         where: { nombre: tipoEmpaque },
         create: {
           nombre: tipoEmpaque,
           activo: true,
-          descripcion: '',
           productos: { connect: { id: producto.id } },
         },
         update: {
@@ -203,7 +208,7 @@ export class PayloadProductosModuleService {
       });
     }
 
-    // -------- Categorías (opcionales)
+    // -------- Categorías
     if (categorias.length > 0) {
       for (const cat of categorias) {
         await tx.categoria.upsert({
@@ -219,35 +224,74 @@ export class PayloadProductosModuleService {
       }
     }
 
-    // -------- Precios (array de strings -> números)
-    // Nota: aquí no borramos precios previos; si quieres idempotencia por (producto, rol, orden) usa upsert compuesto.
-    const preciosStr: string[] = Array.isArray(p.precios)
-      ? (p.precios as string[])
-      : isNonEmptyString(p.precios)
-        ? String(p.precios)
-            .split(',')
-            .map((x) => x.trim())
-            .filter(Boolean)
-        : [];
-
-    for (let i = 0; i < preciosStr.length; i++) {
-      const n = parseMoney(preciosStr[i]);
-      if (n === null) {
-        this.logger.warn(
-          `Precio inválido ignorado: "${preciosStr[i]}" para codigoProducto=${codigoProducto}`,
-        );
-        continue;
-      }
-      await tx.precioProducto.create({
-        data: {
-          estado: 'APROBADO',
-          orden: i + 1, // 1-based
-          precio: ensurePrecioDecimal(n),
-          rol: 'PUBLICO',
+    // -------- Precios
+    if (Array.isArray(p.precios) && p.precios.length > 0) {
+      await tx.precioProducto.deleteMany({
+        where: {
+          productoId: producto.id,
           tipo: 'ESTANDAR',
-          producto: { connect: { id: producto.id } },
         },
       });
+
+      let orden = 1;
+
+      for (const pr of p.precios) {
+        const valor = parseMoney(pr.precio);
+        if (valor === null) {
+          this.logger.warn(
+            `Precio inválido (${pr.precio}) rol=${pr.rol} producto=${codigoProducto}`,
+          );
+          continue;
+        }
+
+        await tx.precioProducto.create({
+          data: {
+            productoId: producto.id,
+            precio: ensurePrecioDecimal(valor),
+            rol: pr.rol,
+            tipo: 'ESTANDAR',
+            estado: 'APROBADO',
+            orden: orden++,
+          },
+        });
+      }
+    }
+
+    if (stockActual > 0) {
+      // IDEMPOTENCIA: Verificar si ya existe stock para este producto en esta sucursal
+      const existeStock = await tx.stock.findFirst({
+        where: {
+          productoId: producto.id,
+          sucursalId: 1,
+          // Opcional: Podríamos filtrar por lote/vencimiento si quisieras permitir multiples lotes
+        },
+      });
+
+      if (!existeStock) {
+        // Solo creamos el stock inicial si NO existe inventario previo en esta sucursal
+        await tx.stock.create({
+          data: {
+            productoId: producto.id,
+            sucursalId: 1,
+            cantidad: stockActual,
+            cantidadInicial: stockActual, // Asumimos que lo que entra es el inicial de este lote
+            precioCosto: costo,
+            costoTotal: costo * stockActual, // Calculo automático
+            fechaIngreso: new Date(),
+            fechaVencimiento: fechaVencimiento ?? undefined, // null si no tiene
+
+            // Relaciones opcionales dejadas en null (entregaStock, compra, etc)
+            // ya que es una carga inicial "hardcoded".
+          },
+        });
+        this.logger.debug(
+          `📦 Stock inicial creado: ${stockActual} unids para ${codigoProducto}`,
+        );
+      } else {
+        // Si ya existe, podemos optar por NO hacer nada (seguro) o SUMAR (peligroso en scripts de seed)
+        // Aquí decido no hacer nada para mantener la idempotencia.
+        // Si quisieras actualizar el stock existente, usarías tx.stock.update({...})
+      }
     }
 
     return producto.id;
@@ -259,10 +303,6 @@ export class PayloadProductosModuleService {
    */
   async cargaMasiva() {
     // Importa tu payload como sea que lo tengas disponible
-    // (ej. import productosRaw from 'src/assets/farmacia-botiquin.json')
-    // Aquí asumimos una variable global/externa como en tu ejemplo:
-    // const rawPayloadDataProducts: ProductoRaw[] = ...
-    // @ts-ignore
     const data: ProductoRaw[] = rawPayloadDataProducts;
 
     try {
@@ -284,9 +324,12 @@ export class PayloadProductosModuleService {
         const codigoProducto = trimOrNull(p?.codigoproducto);
 
         try {
-          const id = await this.prisma.$transaction(async (tx) => {
-            return this.upsertProductoTx(tx, p);
-          });
+          const id = await this.prisma.$transaction(
+            async (tx) => {
+              return this.upsertProductoTx(tx, p, 1);
+            },
+            { timeout: 10000 },
+          );
 
           successCount++;
           createdIds.push(id);
@@ -305,12 +348,10 @@ export class PayloadProductosModuleService {
             error: msg,
           });
 
-          // Log detallado con stack si existe
           this.logger.error(
             `❌ Falló producto (index=${index}) codigoProducto=${codigoProducto}: ${msg}`,
             err?.stack,
           );
-          // Continuamos con el siguiente producto
         }
       }
 
@@ -321,7 +362,7 @@ export class PayloadProductosModuleService {
         successCount,
         failedCount,
         createdIds,
-        failures, // [{index, codigoProducto, error}]
+        failures,
       };
 
       this.logger.log(
