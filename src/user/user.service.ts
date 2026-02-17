@@ -103,6 +103,26 @@ export class UserService {
     }
   }
 
+  async getUsersToSelect() {
+    try {
+      const users = await this.prisma.usuario.findMany({
+        select: {
+          id: true,
+          nombre: true,
+          rol: true,
+        },
+      });
+
+      return users.map((u) => ({
+        id: u.id,
+        nombre: u.nombre,
+        rol: u.rol,
+      }));
+    } catch (error) {
+      console.log('El error es: ', error);
+    }
+  }
+
   //ENCONTRAR SIMPLE USER
   async findOne(id: number) {
     try {

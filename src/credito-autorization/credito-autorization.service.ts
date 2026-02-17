@@ -561,7 +561,7 @@ export class CreditoAutorizationService {
         }));
       const reffVenta = `CRED-${dayjs().year()}-${String(authCreditoId).padStart(5, '0')}`;
       const ventaDTO: CreateVentaDto = {
-        metodoPago: metodoPago ?? 'CREDITO',
+        metodoPago: 'CREDITO',
         sucursalId: admin.sucursalId,
         tipoComprobante: 'RECIBO',
         observaciones: comentario,
