@@ -10,6 +10,7 @@ import {
   ArrayMinSize,
   IsISO8601,
   IsBoolean,
+  IsDate,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { EstadoSolicitud, InteresTipo, PlanCuotaModo } from '@prisma/client';
@@ -52,6 +53,10 @@ export class CreateCreditoAutorizationDto {
   @ValidateNested({ each: true })
   @Type(() => CuotaPropuestaDto)
   cuotasPropuestas: CuotaPropuestaDto[];
+
+  @IsString()
+  @IsOptional()
+  fecha?: string;
 
   // lineas se mantiene igual a como ya la estás enviando:
   @IsArray() lineas: {

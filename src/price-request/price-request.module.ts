@@ -4,8 +4,10 @@ import { PriceRequestController } from './price-request.controller';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { NotificationService } from 'src/notification/notification.service';
 import { LegacyGateway } from 'src/web-sockets/websocket.gateway';
+import { CloudApiMetaModule } from 'src/cloud-api-meta/cloud-api-meta.module';
 
 @Module({
+  imports: [CloudApiMetaModule],
   controllers: [PriceRequestController],
   providers: [
     PriceRequestService,

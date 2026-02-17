@@ -156,6 +156,8 @@ model Usuario {
   nombre                String
   rol                   Rol // Rol del usuario
   contrasena            String
+  telefono              String?
+
   activo                Boolean                 @default(true)
   entregasRecibidas     EntregaStock[]          @relation("UsuarioRecibido")
   correo                String                  @unique
