@@ -7,6 +7,7 @@ import { VentaModule } from 'src/venta/venta.module';
 import { PrismaModule } from 'src/prisma/prisma.module';
 import { MovimientoFinancieroModule } from 'src/movimiento-financiero/movimiento-financiero.module';
 import { NotificationModule } from 'src/notification/notification.module';
+import { CloudApiMetaModule } from 'src/cloud-api-meta/cloud-api-meta.module';
 
 @Module({
   imports: [
@@ -15,6 +16,7 @@ import { NotificationModule } from 'src/notification/notification.module';
     VentaModule,
     MovimientoFinancieroModule,
     NotificationModule,
+    CloudApiMetaModule,
   ],
   controllers: [CreditoAutorizationController],
   providers: [CreditoAutorizationService],

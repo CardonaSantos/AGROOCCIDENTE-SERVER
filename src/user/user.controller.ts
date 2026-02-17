@@ -32,6 +32,11 @@ export class UserController {
     return await this.userService.findAllUserWithNot();
   }
 
+  @Get('/to-select')
+  async getUsersToSelect() {
+    return await this.userService.getUsersToSelect();
+  }
+
   @Get('/fin-my-user/:id')
   async findMyUser(@Param('id', ParseIntPipe) id: number) {
     return await this.userService.findMyUser(id);

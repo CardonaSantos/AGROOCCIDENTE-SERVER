@@ -1,7 +1,11 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   InternalServerErrorException,
+  Logger,
+  NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
@@ -11,6 +15,7 @@ import { AdminUpdateUserDto } from './dto/AdminUpdateUserDto .dto';
 
 @Injectable()
 export class UserService {
+  private readonly logger = new Logger(UserService.name);
   constructor(private readonly prisma: PrismaService) {}
   async create(createUserDto: CreateUserDto) {
     try {
@@ -103,6 +108,26 @@ export class UserService {
     }
   }
 
+  async getUsersToSelect() {
+    try {
+      const users = await this.prisma.usuario.findMany({
+        select: {
+          id: true,
+          nombre: true,
+          rol: true,
+        },
+      });
+
+      return users.map((u) => ({
+        id: u.id,
+        nombre: u.nombre,
+        rol: u.rol,
+      }));
+    } catch (error) {
+      console.log('El error es: ', error);
+    }
+  }
+
   //ENCONTRAR SIMPLE USER
   async findOne(id: number) {
     try {
@@ -163,51 +188,72 @@ export class UserService {
   }
 
   async updateMyUser(idUser: number, updateUserDto: UpdateUserDto) {
-    try {
-      const { contrasena, contrasenaConfirm, ...data } = updateUserDto;
+    this.logger.log(
+      `updateUserDto recibido:\n${JSON.stringify(updateUserDto, null, 2)}`,
+    );
 
-      console.log('Los datos son: ', contrasena, contrasenaConfirm, data);
+    const { contrasena, contrasenaConfirm, ...personalData } = updateUserDto;
 
-      let contrasenaHash;
+    const dataToUpdate: any = { ...personalData };
 
-      if (contrasena && contrasenaConfirm) {
-        const currentUser = await this.prisma.usuario.findUnique({
-          where: { id: idUser },
-          select: { contrasena: true }, // Solo traemos el hash de la contraseña
-        });
-
-        if (!currentUser) {
-          throw new BadRequestException('Usuario no encontrado');
-        }
-
-        const isMatch = await bcrypt.compare(
-          contrasenaConfirm,
-          currentUser.contrasena,
+    if (contrasena) {
+      if (!contrasenaConfirm) {
+        throw new BadRequestException(
+          'Se requiere la contraseña actual para autorizar el cambio.',
         );
-        if (!isMatch) {
-          throw new BadRequestException('La contraseña actual no es correcta');
-        }
-
-        const salt = await bcrypt.genSalt(10);
-        contrasenaHash = await bcrypt.hash(contrasena, salt);
       }
 
-      const dataToUpdate = {
-        ...data,
-        ...(contrasenaHash && { contrasena: contrasenaHash }), // Solo agrega la contraseña si fue actualizada
-      };
+      const currentUser = await this.prisma.usuario.findUnique({
+        where: { id: idUser },
+        select: { contrasena: true },
+      });
+      this.logger.log('La contraseña actual es: ', currentUser.contrasena);
 
-      const userToUpdate = await this.prisma.usuario.update({
+      if (!currentUser) {
+        throw new NotFoundException('Usuario no encontrado.');
+      }
+
+      const isMatch = await bcrypt.compare(
+        contrasenaConfirm,
+        currentUser.contrasena,
+      );
+
+      if (!isMatch) {
+        throw new UnauthorizedException('La contraseña actual es incorrecta.');
+      }
+
+      const salt = await bcrypt.genSalt(10);
+      dataToUpdate.contrasena = await bcrypt.hash(contrasena, salt);
+    }
+
+    try {
+      const userUpdated = await this.prisma.usuario.update({
         where: { id: idUser },
         data: dataToUpdate,
+        select: {
+          id: true,
+          nombre: true,
+          correo: true,
+          activo: true,
+          rol: true,
+          telefono: true,
+          sucursal: true,
+        },
       });
 
-      console.log('El usuario actualizado es: ', userToUpdate);
-
-      return userToUpdate;
+      return userUpdated;
     } catch (error) {
-      console.error('Error al actualizar el usuario:', error);
-      throw new BadRequestException('Error al actualizar el usuario');
+      console.error('Error DB Update:', error);
+
+      if (error.code === 'P2002') {
+        throw new ConflictException(
+          'El correo electrónico ya está registrado por otro usuario.',
+        );
+      }
+
+      throw new InternalServerErrorException(
+        'No se pudo actualizar la información del usuario.',
+      );
     }
   }
 
@@ -258,6 +304,7 @@ export class UserService {
           activo: true,
           correo: true,
           rol: true,
+          telefono: true,
         },
       });
 
@@ -294,6 +341,7 @@ export class UserService {
         id: user.id,
         nombre: user.nombre,
         correo: user.correo,
+        telefono: user.telefono,
         sucursal: user.sucursal,
         rol: user.rol,
         activo: user.activo,

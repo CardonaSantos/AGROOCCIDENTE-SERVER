@@ -48,7 +48,6 @@ export class VentaController {
     )
     query: QueryVentasTable,
   ) {
-    // overrule: sucursal viene del path param
     const q: QueryVentasTable = {
       ...query,
       sucursalId: id,

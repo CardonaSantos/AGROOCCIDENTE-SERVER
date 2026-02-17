@@ -88,6 +88,7 @@ export class VentaService {
       referenciaPago,
       apellidos,
       nit,
+      fechaVenta,
     } = createVentaDto;
 
     this.logger.log(
@@ -465,10 +466,12 @@ export class VentaService {
           referenciaPago: referenciaPagoValid,
           usuario: { connect: { id: usuarioId } },
           cliente: clienteConnect,
-          horaVenta: new Date(),
+          // horaVenta: new Date(),
           totalVenta: toNumber4(totalVenta),
           imei,
           sucursal: { connect: { id: sucursalId } },
+          fechaVenta: fechaVenta,
+
           productos: {
             create: [
               ...prodConsolidadas.map((x) => {
@@ -636,6 +639,7 @@ export class VentaService {
         tipoComprobante,
         isVendedor,
         usuarioId,
+        user,
       } = query;
 
       if (!sucursalId) {
@@ -648,19 +652,17 @@ export class VentaService {
 
       const AND: Prisma.VentaWhereInput[] = [{ sucursalId, anulada: false }];
 
-      if (isVendedor) {
-        AND.push({
-          usuarioId: usuarioId,
-        });
+      if (user) {
+        AND.push({ usuarioId: user });
+      } else if (isVendedor && usuarioId) {
+        AND.push({ usuarioId });
       }
-      // rango de fechas
-      // rango de fechas (INCLUYENTE en días)
+
       if (fechaDesde || fechaHasta) {
         const start = fechaDesde
           ? dayjs(fechaDesde).startOf('day').toDate()
           : undefined;
 
-        // end exclusivo: inicio del día siguiente
         const endExclusive = fechaHasta
           ? dayjs(fechaHasta).add(1, 'day').startOf('day').toDate()
           : undefined;
@@ -668,12 +670,11 @@ export class VentaService {
         AND.push({
           fechaVenta: {
             ...(start && { gte: start }),
-            ...(endExclusive && { lt: endExclusive }), // <--- lt, NO lte
+            ...(endExclusive && { lt: endExclusive }),
           },
         });
       }
 
-      // montos
       if (montoMin != null || montoMax != null) {
         AND.push({
           totalVenta: {
@@ -683,7 +684,6 @@ export class VentaService {
         });
       }
 
-      // nombre/telefono cliente y/o cliente final
       if (nombreCliente) {
         AND.push({
           OR: [
@@ -720,14 +720,12 @@ export class VentaService {
         });
       }
 
-      // referencia pago
       if (referenciaPago) {
         AND.push({
           referenciaPago: { contains: referenciaPago, mode: 'insensitive' },
         });
       }
 
-      // código de item (producto o presentación)
       if (codigoItem) {
         AND.push({
           productos: {

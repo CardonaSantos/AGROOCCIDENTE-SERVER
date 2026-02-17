@@ -36,6 +36,10 @@ import { MovimientoFinancieroService } from 'src/movimiento-financiero/movimient
 import { CreateMFUtility } from 'src/movimiento-financiero/utilities/createMFDto';
 import { RejectCreditoAuth } from './dto/reject-credito';
 import { NotificationService } from 'src/notification/notification.service';
+import { CloudApiMetaService } from 'src/cloud-api-meta/cloud-api-meta.service';
+import { ConfigService } from '@nestjs/config';
+import { formatearTelefonosMeta } from 'src/utils/tel-formatter';
+import { formatCurrencyGT } from 'src/utils/formatt-moneda';
 dayjs.extend(customParseFormat);
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -61,6 +65,9 @@ export class CreditoAutorizationService {
     private readonly venta: VentaService,
     private readonly mf: MovimientoFinancieroService,
     private readonly notifications: NotificationService,
+    private readonly cloudApi: CloudApiMetaService,
+
+    private readonly confing: ConfigService,
   ) {}
   /**
    * CREACION DE REGISTRO DE AUTORIZACION 1er PASO
@@ -69,16 +76,10 @@ export class CreditoAutorizationService {
    */
   async create(dto: CreateCreditoAutorizationDto) {
     try {
-      this.logger.log(
-        `DTO recibido en create autorizacion:\n${JSON.stringify(dto, null, 2)}`,
-      );
-
-      // ===================== Validaciones/normalizaciones previas =====================
       this.verifyCore(dto);
 
       const saneLines = this.sanitizeAndValidateLines(dto.lineas);
 
-      // Sumar totales desde servidor (no confiar 100% en cliente)
       const serverSum = this.sumLineSubtotals(saneLines);
       if (serverSum !== dto.totalPropuesto) {
         this.logger.warn(
@@ -86,25 +87,20 @@ export class CreditoAutorizationService {
         );
       }
 
-      // Cuota inicial coherente con plan (se sobreescribe si viene en cuotasPropuestas)
       const cuotaInicialByPlan = this.resolveEnganche(
         dto.planCuotaModo,
         dto.cuotaInicialPropuesta,
       );
 
-      // Primera cuota
       const today = dayjs().tz(TZGT);
       const primeraCuotaDate = dto.fechaPrimeraCuota
         ? dayjs(dto.fechaPrimeraCuota).toDate()
         : today.toDate();
 
-      // ====== NUEVO: validar/normalizar cuotas propuestas ======
       const cuotas = this.sanitizeCuotasPropuestas(dto.cuotasPropuestas);
 
-      // Suma de cuotas propuesta (incluyendo enganche si existe)
       const sumaCuotas = cuotas.reduce((acc, c) => acc + c.monto, 0);
 
-      // Si la cuotaInicial en cabecera difiere del ENGANCHE de cuotas, usamos el de cuotas
       const enganchePropuesto =
         cuotas.find((c) => c.etiqueta === 'ENGANCHE')?.monto ?? 0;
       if (
@@ -115,29 +111,27 @@ export class CreditoAutorizationService {
           `Enganche en cabecera (${dto.cuotaInicialPropuesta}) difiere del de cuotas (${enganchePropuesto}). Se usará el de cuotas.`,
         );
       }
+
       const cuotaInicialFinal = enganchePropuesto || cuotaInicialByPlan;
 
-      // ===================== Transacción =====================
       const createdId = await this.prisma.$transaction(async (tx) => {
-        // Cabecera
         const autorization = await tx.solicitudCreditoVenta.create({
           data: {
             cliente: { connect: { id: dto.clienteId } },
             solicitadoPor: { connect: { id: dto.solicitadoPorId } },
             sucursal: { connect: { id: dto.sucursalId } },
             // Propuesta económica
-            totalPropuesto: serverSum, // principal (suma lineas servidor)
-            cuotaInicialPropuesta: cuotaInicialFinal, // ENGANCHE (de cuotas o por plan)
+            totalPropuesto: serverSum,
+            cuotaInicialPropuesta: cuotaInicialFinal,
             cuotasTotalesPropuestas: dto.cuotasTotalesPropuestas,
             interesTipo: dto.interesTipo,
             interesPorcentaje: dto.interesPorcentaje,
             planCuotaModo: dto.planCuotaModo,
             diasEntrePagos: dto.diasEntrePagos,
             fechaPrimeraCuota: primeraCuotaDate,
-            // Flujo
             comentario: dto.comentario || null,
             estado: 'PENDIENTE',
-            // Si quieres guardar la suma de cuotas con interés (opcional):
+            creadoEn: dayjs(dto.fecha).toDate() ?? new Date(),
           },
         });
 
@@ -146,7 +140,6 @@ export class CreditoAutorizationService {
           autorization,
         );
 
-        // ---- Líneas
         const createdLines = await Promise.all(
           saneLines.map((l) => this.createLinea(tx, autorization.id, l)),
         );
@@ -155,7 +148,6 @@ export class CreditoAutorizationService {
           createdLines,
         );
 
-        // Cuotas propuestas
         const createdCuotas = await Promise.all(
           cuotas.map((c) =>
             tx.solicitudCreditoVentaCuota.create({
@@ -179,7 +171,6 @@ export class CreditoAutorizationService {
           createdCuotas,
         );
 
-        // ---- Historial
         const historial = await tx.solicitudCreditoVentaHistorial.create({
           data: {
             solicitud: { connect: { id: autorization.id } },
@@ -190,17 +181,17 @@ export class CreditoAutorizationService {
               : undefined,
           },
         });
+
         this.logger.log(
           '[CreditoAutorizationService] Historial creado:',
           historial,
         );
 
-        // Retornar entidad con relaciones
-        const full = await tx.solicitudCreditoVenta.findUnique({
+        await tx.solicitudCreditoVenta.findUnique({
           where: { id: autorization.id },
           include: {
             lineas: true,
-            cuotasPropuestas: { orderBy: { numero: 'asc' } }, // <— NUEVO
+            cuotasPropuestas: { orderBy: { numero: 'asc' } },
             historial: { orderBy: { fecha: 'desc' } },
             cliente: true,
             sucursal: true,
@@ -223,14 +214,12 @@ export class CreditoAutorizationService {
       const item = normalizeSolicitud(rec);
       this.ws.emitCreditAuthorizationCreated(item);
       //NOTIFICACION
-      // === 1) Notificación para admins de la sucursal ===
       const adminsSucursal = await this.prisma.usuario.findMany({
         where: { rol: 'ADMIN', sucursalId: dto.sucursalId, activo: true },
         select: { id: true },
       });
       let userIds = adminsSucursal.map((a) => a.id);
 
-      // Fallback a admins globales (por si la sucursal no tiene)
       if (userIds.length === 0) {
         const adminsGlobal = await this.prisma.usuario.findMany({
           where: { rol: 'ADMIN', activo: true },
@@ -239,7 +228,6 @@ export class CreditoAutorizationService {
         userIds = adminsGlobal.map((a) => a.id);
       }
 
-      // Crea la notificación (persistencia + WS 'noti:new' por usuario)
       await this.notifications.createForUsers({
         userIds,
         titulo: 'Nueva autorización de crédito',
@@ -247,7 +235,7 @@ export class CreditoAutorizationService {
         categoria: 'CREDITO',
         severidad: 'INFORMACION',
         subtipo: 'CREDIT_AUTH_CREATED',
-        route: `/creditos/autorizaciones/${item.id}`, // ajusta a tu ruta real
+        route: `/creditos/autorizaciones/${item.id}`,
         referenciaTipo: 'SolicitudCreditoVenta',
         referenciaId: item.id,
         remitenteId: dto.solicitadoPorId,
@@ -261,10 +249,12 @@ export class CreditoAutorizationService {
         },
       });
 
-      // Respuesta final
+      await this.createAndSendNotificationWp(rec.id);
+
       this.logger.log(
         '[CreditoAutorizationService] Autorización creada OK (full):',
       );
+
       this.logger.log(JSON.stringify(createdId, null, 2));
 
       return createdId;
@@ -277,6 +267,74 @@ export class CreditoAutorizationService {
       throw new InternalServerErrorException(
         'Fatal error: Error inesperado en módulo autorizacion',
       );
+    }
+  }
+
+  async createAndSendNotificationWp(solicitudCreditoVentaId: number) {
+    try {
+      const template = await this.confing.get<string>(
+        'TEMPLATE_CREDITO_SOLICITUD',
+      );
+      const admins = await this.prisma.usuario.findMany({
+        where: {
+          rol: {
+            in: ['ADMIN', 'MANAGER', 'SUPER_ADMIN'],
+          },
+        },
+        select: {
+          nombre: true,
+          id: true,
+          telefono: true,
+        },
+      });
+
+      const auth = await this.prisma.solicitudCreditoVenta.findUnique({
+        where: {
+          id: solicitudCreditoVentaId,
+        },
+        select: {
+          id: true,
+          totalPropuesto: true,
+          cuotasPropuestas: true,
+          solicitadoPor: {
+            select: {
+              id: true,
+              nombre: true,
+            },
+          },
+          cliente: {
+            select: {
+              id: true,
+              nombre: true,
+              apellidos: true,
+            },
+          },
+        },
+      });
+
+      const clienteNombre = auth.cliente.nombre + auth.cliente.apellidos;
+      const total = formatCurrencyGT(auth.totalPropuesto);
+      const cuotas = auth.cuotasPropuestas.length;
+      const solicitante = auth.solicitadoPor.nombre;
+
+      const tels = admins.map((ad) => ad.telefono);
+
+      const telefonosFormateados = formatearTelefonosMeta(tels);
+
+      for (const admi of telefonosFormateados) {
+        const variables = [clienteNombre, total, cuotas, solicitante];
+
+        const payload = await this.cloudApi.crearPayloadTicket(
+          admi,
+          template,
+          variables.map((v) => v.toString()),
+        );
+        this.logger.log(`Enviando a: ${admi}`);
+
+        await this.cloudApi.enviarMensaje(payload);
+      }
+    } catch (error) {
+      this.logger.error('El error: ', error.stack);
     }
   }
 
@@ -536,7 +594,6 @@ export class CreditoAutorizationService {
     );
 
     return this.prisma.$transaction(async (tx) => {
-      //AUTH Y RESPONSABLE
       const authorization = await tx.solicitudCreditoVenta.findUnique({
         where: { id: authCreditoId },
         select: selectCreditAutorization,
@@ -551,7 +608,6 @@ export class CreditoAutorizationService {
       });
       if (!admin) throw new BadRequestException('Admin no válido');
 
-      // Venta (ideal: con tx)
       const productosDTO: CreateVentaDto['productos'] =
         authorization.lineas.map((l) => ({
           selectedPriceId: l.precioSeleccionadoId,
@@ -559,19 +615,19 @@ export class CreditoAutorizationService {
           ...(l.presentacionId ? { presentacionId: l.presentacionId } : {}),
           ...(l.productoId ? { productoId: l.productoId } : {}),
         }));
-      const reffVenta = `CRED-${dayjs().year()}-${String(authCreditoId).padStart(5, '0')}`;
+
       const ventaDTO: CreateVentaDto = {
-        metodoPago: metodoPago ?? 'CREDITO',
+        metodoPago: 'CREDITO',
         sucursalId: admin.sucursalId,
         tipoComprobante: 'RECIBO',
         observaciones: comentario,
         usuarioId: adminId,
         clienteId: authorization.clienteId,
         productos: productosDTO,
+        fechaVenta: authorization.creadoEn,
       };
 
       const newVenta = await this.venta.createVentaTx(ventaDTO, tx);
-      //  Datos derivados de las cuotas propuestas
       const cuotasAuth = (authorization.cuotasPropuestas ??
         []) as cuotasPropuestas[];
       const montoTotalConInteres = sum(
@@ -609,15 +665,15 @@ export class CreditoAutorizationService {
           diasEntrePagos: authorization.diasEntrePagos ?? 0,
           planCuotaModo: authorization.planCuotaModo ?? 'IGUALES',
           comentario: authorization.comentario ?? undefined,
-          fechaContrato: new Date(),
+          fechaContrato: authorization.creadoEn ?? new Date(),
           garantiaMeses: 0,
           testigos: [],
           fechaProximoPago: primeraNormalDate ?? undefined,
           montoTotalConInteres,
+          creadoEn: authorization.creadoEn,
         },
       });
 
-      // Validar si hay enganche
       const itHasEnganche =
         !!authorization.cuotaInicialPropuesta &&
         authorization.planCuotaModo === 'PRIMERA_MAYOR';

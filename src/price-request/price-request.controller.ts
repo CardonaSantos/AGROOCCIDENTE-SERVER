@@ -26,11 +26,6 @@ export class PriceRequestController {
     return this.priceRequestService.findAll();
   }
 
-  @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.priceRequestService.findOne(+id);
-  }
-
   @Patch('/acept-request-price/:idSolicitud/:idUser')
   acceptRequestPrice(
     @Param('idSolicitud', ParseIntPipe) idSolicitud: number,
@@ -47,21 +42,8 @@ export class PriceRequestController {
     return this.priceRequestService.rejectRequesPrice(idSolicitud, idUser);
   }
 
-  // @Patch(':id')
-  // update(
-  //   @Param('id') id: string,
-  //   @Body() updatePriceRequestDto: UpdatePriceRequestDto,
-  // ) {
-  //   return this.priceRequestService.update(+id, updatePriceRequestDto);
-  // }
-
   @Delete('/delete-all')
   removeall() {
     return this.priceRequestService.allremove();
-  }
-
-  @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.priceRequestService.remove(+id);
   }
 }

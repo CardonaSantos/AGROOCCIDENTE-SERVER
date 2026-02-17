@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Injectable,
   InternalServerErrorException,
+  Logger,
 } from '@nestjs/common';
 import { CreatePriceRequestDto } from './dto/create-price-request.dto';
 import { UpdatePriceRequestDto } from './dto/update-price-request.dto';
@@ -9,13 +10,23 @@ import { PrismaService } from 'src/prisma/prisma.service';
 import { NotificationService } from 'src/notification/notification.service';
 import { LegacyGateway } from 'src/web-sockets/websocket.gateway';
 import { nuevaSolicitud } from 'src/web-sockets/Types/SolicitudType';
+import { CloudApiMetaService } from 'src/cloud-api-meta/cloud-api-meta.service';
+import { ConfigService } from '@nestjs/config';
+import { formatearTelefonosMeta } from 'src/utils/tel-formatter';
+import { formatCurrencyGT } from 'src/utils/formatt-moneda';
 
 @Injectable()
 export class PriceRequestService {
+  private readonly logger = new Logger(PriceRequestService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly notificationService: NotificationService,
     private readonly ws: LegacyGateway,
+
+    private readonly cloudApi: CloudApiMetaService,
+
+    private readonly confing: ConfigService,
   ) {}
   //
   async create(createPriceRequestDto: CreatePriceRequestDto) {
@@ -106,6 +117,8 @@ export class PriceRequestService {
       for (const admin of userIds) {
         this.ws.handleEnviarSolicitudPrecio(nuevaSolicitud, admin);
       }
+
+      await this.createAndSendNotificationWp(nuevaSolicitud.id);
 
       return nueva;
     } catch (error) {
@@ -274,16 +287,68 @@ export class PriceRequestService {
     }
   }
 
-  findOne(id: number) {
-    return `This action returns a #${id} priceRequest`;
-  }
+  async createAndSendNotificationWp(solicitudPrecioId: number) {
+    try {
+      const template = await this.confing.get<string>(
+        'TEMPLATE_SOLICITUD_PRECIO_ESPECIAL',
+      );
+      const admins = await this.prisma.usuario.findMany({
+        where: {
+          rol: {
+            in: ['ADMIN', 'MANAGER', 'SUPER_ADMIN'],
+          },
+        },
+        select: {
+          nombre: true,
+          id: true,
+          telefono: true,
+        },
+      });
 
-  update(id: number, updatePriceRequestDto: UpdatePriceRequestDto) {
-    return `This action updates a #${id} priceRequest`;
-  }
+      const request = await this.prisma.solicitudPrecio.findUnique({
+        where: {
+          id: solicitudPrecioId,
+        },
+        select: {
+          id: true,
+          solicitadoPor: {
+            select: {
+              id: true,
+              nombre: true,
+            },
+          },
+          producto: {
+            select: {
+              id: true,
+              nombre: true,
+              codigoProducto: true,
+            },
+          },
+          precioSolicitado: true,
+        },
+      });
 
-  remove(id: number) {
-    return `This action removes a #${id} priceRequest`;
+      const solicitante = request.solicitadoPor.nombre;
+      const producto = `${request.producto.nombre} (código: ${request.producto.codigoProducto})`;
+      const precio = `${formatCurrencyGT(request.precioSolicitado)}`;
+      const tels = admins.map((ad) => ad.telefono);
+      const telefonosFormateados = formatearTelefonosMeta(tels);
+
+      for (const admi of telefonosFormateados) {
+        const variables = [solicitante, producto, precio];
+
+        const payload = await this.cloudApi.crearPayloadTicket(
+          admi,
+          template,
+          variables.map((v) => v.toString()),
+        );
+        this.logger.log(`Enviando a: ${admi}`);
+
+        await this.cloudApi.enviarMensaje(payload);
+      }
+    } catch (error) {
+      this.logger.error('El error: ', error.stack);
+    }
   }
 
   async allremove() {

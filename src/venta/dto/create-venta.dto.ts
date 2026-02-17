@@ -69,6 +69,10 @@ export class CreateVentaDto {
   @IsEnum(MetodoPago)
   metodoPago: MetodoPago;
 
+  @IsDate()
+  @IsOptional()
+  fechaVenta?: Date;
+
   @IsNumber()
   monto?: number;
 

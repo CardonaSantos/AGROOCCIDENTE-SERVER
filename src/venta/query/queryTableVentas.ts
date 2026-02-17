@@ -73,6 +73,12 @@ export class QueryVentasTable {
   @Transform(toNumOrUndef)
   sucursalId?: number;
 
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Transform(toNumOrUndef)
+  user?: number;
+
   // ——— Búsquedas / filtros
   @IsOptional()
   @IsString()
